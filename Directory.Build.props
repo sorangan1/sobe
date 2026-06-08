@@ -1,0 +1,12 @@
+<!-- Contains required properties for osu!framework projects. -->
+<Project>
+  <PropertyGroup>
+    <ApplicationManifest>$(MSBuildThisFileDirectory)app.manifest</ApplicationManifest>
+    <!-- Only the .NET 10 runtime is installed locally; allow the net8.0 targets to run on it. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <PropertyGroup Label="Documentation">
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>

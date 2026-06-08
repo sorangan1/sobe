@@ -1,0 +1,10 @@
+{
+  "solution": {
+    "path": "OsuBeatmapEditor.sln",
+    "projects": [
+      "OsuBeatmapEditor.Game\\OsuBeatmapEditor.Game.csproj",
+      "OsuBeatmapEditor.Resources\\OsuBeatmapEditor.Resources.csproj",
+      "OsuBeatmapEditor.iOS\\OsuBeatmapEditor.iOS.csproj"
+    ]
+  }
+}
