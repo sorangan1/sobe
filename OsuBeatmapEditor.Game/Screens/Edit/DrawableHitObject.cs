@@ -22,7 +22,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
     public partial class DrawableHitObject : CompositeDrawable
     {
         private const double fade_out = 240;         // fade-out duration after it
-        private const double time_fade_in = 400;     // osu! Standard object fade-in window (ms), capped to preempt
+        private const double time_fade_in = 400;     // osu! Standard object fade-in window (ms)
+        private const double preempt_min = 450;      // minimum preempt (AR10); lazer scales fade-in below it
         private const float approach_start_scale = 4f;
         private const float follow_scale = 1.9f;
 
@@ -321,9 +322,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             bool hasDuration = hitObject.Kind is HitObjectKind.Slider or HitObjectKind.Spinner;
             double visibleEnd = start + (hasDuration ? hitObject.Duration : 0);
 
-            // osu! Standard appearance: the object fades in over a fixed window (TimeFadeIn, capped to
-            // preempt for very high AR) once it first becomes visible at start - preempt, then holds.
-            double fadeIn = Math.Min(time_fade_in, preempt);
+            // Outside its visible lifetime the object is fully transparent; skip the per-frame transform work
+            // so cost scales with on-screen objects (matching lazer's lifetime-managed hit-object container).
+            if (time < start - preempt || time > visibleEnd + fade_out)
+            {
+                if (Alpha != 0)
+                    Alpha = 0;
+                return;
+            }
+
+            // osu! Standard appearance: the object fades in over TimeFadeIn once it first becomes visible at
+            // start - preempt, then holds. lazer scales the window down only for AR>10 (preempt < 450ms).
+            double fadeIn = time_fade_in * Math.Min(1, preempt / preempt_min);
 
             float alpha;
             if (time < start)
@@ -342,7 +352,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     float t = (float)Math.Clamp((start - time) / preempt, 0, 1);
                     approachCircle.Scale = new Vector2(1 + (approach_start_scale - 1) * t);
 
-                    double approachFadeIn = Math.Min(time_fade_in * 2, preempt);
+                    double approachFadeIn = Math.Min(fadeIn * 2, preempt);
                     approachCircle.Alpha = (float)Math.Clamp((time - (start - preempt)) / approachFadeIn, 0, 1);
                 }
                 else

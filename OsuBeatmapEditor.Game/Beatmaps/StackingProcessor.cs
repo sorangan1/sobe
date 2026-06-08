@@ -14,9 +14,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         private const float stack_distance = 3f;
 
         /// <summary>
-        /// Recomputes <see cref="HitObjectModel.StackHeight"/> for every object in place.
-        /// <paramref name="preempt"/> is the AR preempt (ms); <paramref name="stackLeniency"/> the map setting.
-        /// Objects are assumed sorted by start time.
+        /// Recomputes <see cref="HitObjectModel.StackHeight"/> for every object in place. A direct port of
+        /// osu!lazer's <c>OsuBeatmapProcessor.applyStacking</c> (modern, beatmap version &gt;= 6) for the
+        /// full object range, so only the single reverse pass runs (lazer skips the forward extend when the
+        /// end index is the last object). <paramref name="preempt"/> is the AR preempt (ms), truncated to an
+        /// integer to match stable; <paramref name="stackLeniency"/> the map setting. Objects must be sorted by time.
         /// </summary>
         public static void Apply(System.Collections.Generic.List<HitObjectModel> objects, double preempt, float stackLeniency)
         {
@@ -25,20 +27,20 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 return;
 
             var stack = new int[count];
-            double stackThreshold = preempt * stackLeniency;
 
-            // Walk backwards; for each object, look back at earlier objects within the time window and
-            // raise/lower their stack heights when they share a position.
+            // Truncate to int and keep the result as float, matching stable (see lazer's calculateStackThreshold).
+            float stackThreshold = (int)preempt * stackLeniency;
+
+            // Reverse pass: walk backwards, building each stack chain from its top object downward.
             for (int i = count - 1; i > 0; i--)
             {
-                int n = i;
-                var objectI = objects[i];
-
-                // Already stacked, or spinners (which never stack) - skip.
-                if (stack[i] != 0 || objectI.Kind == HitObjectKind.Spinner)
+                if (stack[i] != 0 || objects[i].Kind == HitObjectKind.Spinner)
                     continue;
 
-                if (objectI.Kind == HitObjectKind.Circle)
+                int n = i;
+                int cur = i; // the chain's current object (lazer's reassigned `objectI`); the outer `i` is never moved.
+
+                if (objects[i].Kind == HitObjectKind.Circle)
                 {
                     while (--n >= 0)
                     {
@@ -46,13 +48,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         if (objectN.Kind == HitObjectKind.Spinner)
                             continue;
 
-                        if (objectI.StartTime - endTime(objectN) > stackThreshold)
+                        // Integer truncation of both times is required to match stable.
+                        if ((int)objects[cur].StartTime - (int)endTime(objectN) > stackThreshold)
                             break;
 
-                        // A slider tail under this circle pulls the whole intervening run down onto the tail.
-                        if (objectN.Kind == HitObjectKind.Slider && distance(endPosition(objectN), position(objectI)) < stack_distance)
+                        // A slider tail under this stack pulls the whole intervening run down (negative stacking).
+                        if (objectN.Kind == HitObjectKind.Slider && distance(endPosition(objectN), position(objects[cur])) < stack_distance)
                         {
-                            int offset = stack[i] - stack[n] + 1;
+                            int offset = stack[cur] - stack[n] + 1;
                             for (int j = n + 1; j <= i; j++)
                             {
                                 if (distance(endPosition(objectN), position(objects[j])) < stack_distance)
@@ -62,15 +65,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                             break;
                         }
 
-                        if (distance(position(objectN), position(objectI)) < stack_distance)
+                        if (distance(position(objectN), position(objects[cur])) < stack_distance)
                         {
-                            stack[n] = stack[i] + 1;
-                            objectI = objectN;
-                            i = n;
+                            stack[n] = stack[cur] + 1;
+                            cur = n;
                         }
                     }
                 }
-                else if (objectI.Kind == HitObjectKind.Slider)
+                else if (objects[i].Kind == HitObjectKind.Slider)
                 {
                     while (--n >= 0)
                     {
@@ -78,14 +80,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         if (objectN.Kind == HitObjectKind.Spinner)
                             continue;
 
-                        if (objectI.StartTime - objectN.StartTime > stackThreshold)
+                        if (objects[cur].StartTime - objectN.StartTime > stackThreshold)
                             break;
 
-                        if (distance(endPosition(objectN), position(objectI)) < stack_distance)
+                        if (distance(endPosition(objectN), position(objects[cur])) < stack_distance)
                         {
-                            stack[n] = stack[i] + 1;
-                            objectI = objectN;
-                            i = n;
+                            stack[n] = stack[cur] + 1;
+                            cur = n;
                         }
                     }
                 }
@@ -103,13 +104,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         private static Vector2 position(HitObjectModel o) =>
             o.Path is { Count: > 0 } path ? path[0] : new Vector2(o.X, o.Y);
 
-        private static Vector2 endPosition(HitObjectModel o)
-        {
-            if (o.Kind == HitObjectKind.Slider && o.Path is { Count: > 0 } path)
-                return o.Slides % 2 == 1 ? path[^1] : path[0];
-
-            return new Vector2(o.X, o.Y);
-        }
+        // Stacking uses the slider's geometric path end (EndPosition = Position + Path.PositionAt(1)),
+        // independent of repeat count - matching lazer (whose stacking ignores repeats).
+        private static Vector2 endPosition(HitObjectModel o) =>
+            o.Kind == HitObjectKind.Slider && o.Path is { Count: > 0 } path ? path[^1] : new Vector2(o.X, o.Y);
 
         private static float distance(Vector2 a, Vector2 b) => (a - b).Length;
     }
