@@ -78,15 +78,15 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// Rewrites a slider's head position (parts 0/1), curve field (part 5) and pixel length (part 7) from
         /// edited control points, leaving the slide count and hitsounds untouched. Used by control-point editing.
         /// </summary>
-        public static string SetSliderCurve(string raw, char type, IReadOnlyList<SliderAnchor> anchors, double pixelLength)
+        public static string SetSliderCurve(string raw, IReadOnlyList<SliderControlPoint> controlPoints, double pixelLength)
         {
             string[] parts = raw.Split(',');
-            if (parts.Length < 6 || anchors.Count == 0)
+            if (parts.Length < 6 || controlPoints.Count == 0)
                 return raw;
 
-            parts[0] = ((int)Math.Round(anchors[0].X)).ToString(CultureInfo.InvariantCulture);
-            parts[1] = ((int)Math.Round(anchors[0].Y)).ToString(CultureInfo.InvariantCulture);
-            parts[5] = SliderGeometry.CurveField(type, anchors);
+            parts[0] = ((int)Math.Round(controlPoints[0].X)).ToString(CultureInfo.InvariantCulture);
+            parts[1] = ((int)Math.Round(controlPoints[0].Y)).ToString(CultureInfo.InvariantCulture);
+            parts[5] = SliderGeometry.CurveField(controlPoints);
             if (parts.Length >= 8)
                 parts[7] = pixelLength.ToString("0.###", CultureInfo.InvariantCulture);
             return string.Join(',', parts);

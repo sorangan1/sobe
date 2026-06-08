@@ -78,7 +78,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Slider-build state: anchors committed by successive clicks (double-click = sharp corner),
         // right-click finishes (the cursor becomes the tail), Esc cancels.
         private bool buildingSlider;
-        private readonly List<SliderAnchor> sliderAnchors = new List<SliderAnchor>();
+        private readonly List<SliderControlPoint> sliderAnchors = new List<SliderControlPoint>();
         private double lastAnchorClickTime = double.MinValue;
         private SmoothPath? sliderPreview;
 
@@ -205,7 +205,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 lastAnchorClickTime = now;
 
                 if (doubleClick && sliderAnchors.Count > 1)
-                    sliderAnchors[^1] = sliderAnchors[^1] with { Red = !sliderAnchors[^1].Red };
+                    sliderAnchors[^1] = sliderAnchors[^1] with { Type = sliderAnchors[^1].IsSegmentStart ? (SliderPathType?)null : SliderPathType.Bezier };
                 else
                     addSliderAnchor(playArea.ToLocalSpace(e.ScreenSpaceMousePosition));
                 return true;
@@ -331,7 +331,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (sliderAnchors.Count > 0 && (sliderAnchors[^1].Position - p).LengthSquared < 1f)
                 return;
 
-            sliderAnchors.Add(new SliderAnchor(p));
+            sliderAnchors.Add(new SliderControlPoint(p));
         }
 
         /// <summary>Finishes the slider, adding the cursor as the tail, then committing it (needs a head + tail).</summary>
@@ -345,10 +345,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 Vector2 p = clampToPlayfield(cursor);
                 if (sliderAnchors.Count == 0 || (sliderAnchors[^1].Position - p).LengthSquared >= 1f)
-                    sliderAnchors.Add(new SliderAnchor(p));
+                    sliderAnchors.Add(new SliderControlPoint(p));
             }
 
-            var anchors = new List<SliderAnchor>(sliderAnchors);
+            var anchors = new List<SliderControlPoint>(sliderAnchors);
             cancelSliderBuild();
 
             if (anchors.Count >= 2)
@@ -566,7 +566,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             int id = selection.Selected.First();
             foreach (var o in currentHitObjects)
             {
-                if (o.Id == id && o.Kind == HitObjectKind.Slider && o.Anchors is { Count: >= 2 })
+                if (o.Id == id && o.Kind == HitObjectKind.Slider && o.ControlPoints is { Count: >= 2 })
                 {
                     overlayLayer.Add(controlPoints = new SliderControlPointVisualiser(o, currentDiameter, actions));
                     return;
@@ -703,9 +703,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (sliderPreview == null || !buildingSlider)
                 return;
 
-            var pts = new List<SliderAnchor>(sliderAnchors) { new SliderAnchor(clampToPlayfield(cursor)) };
-            char type = pts.Any(a => a.Red) ? 'B' : SliderPathCalculator.DefaultCurveType(pts.Count);
-            var path = SliderGeometry.ComputePath(pts, type);
+            var pts = new List<SliderControlPoint>(sliderAnchors) { new SliderControlPoint(clampToPlayfield(cursor)) };
+            var path = SliderGeometry.ComputePath(SliderGeometry.InferSegmentTypes(pts));
 
             if (path.Count < 2)
             {

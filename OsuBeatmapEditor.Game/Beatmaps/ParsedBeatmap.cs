@@ -11,15 +11,40 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         Spinner,
     }
 
+    /// <summary>The spline family a slider path segment is interpreted with (mirrors osu!lazer's SplineType).</summary>
+    public enum SliderSplineType
+    {
+        Catmull,
+        BSpline,
+        Linear,
+        PerfectCurve,
+    }
+
     /// <summary>
-    /// One slider control point in osu!pixels, head first. <see cref="Red"/> marks a "red anchor" - a sharp
-    /// corner / segment boundary (encoded in .osu as a doubled control point), as in osu!lazer's editor.
+    /// The type of a slider path segment (mirrors osu!lazer's <c>PathType</c>): a spline family plus an
+    /// optional B-spline degree (null = full-order Bézier, as written by the plain <c>B</c> curve letter).
     /// </summary>
-    public readonly record struct SliderAnchor(float X, float Y, bool Red = false)
+    public readonly record struct SliderPathType(SliderSplineType Type, int? Degree = null)
+    {
+        public static readonly SliderPathType Bezier = new SliderPathType(SliderSplineType.BSpline);
+        public static readonly SliderPathType Linear = new SliderPathType(SliderSplineType.Linear);
+        public static readonly SliderPathType PerfectCurve = new SliderPathType(SliderSplineType.PerfectCurve);
+        public static readonly SliderPathType Catmull = new SliderPathType(SliderSplineType.Catmull);
+    }
+
+    /// <summary>
+    /// One slider control point in absolute osu!pixels, head first (mirrors osu!lazer's <c>PathControlPoint</c>).
+    /// A non-null <see cref="Type"/> means this point STARTS a new path segment of that type; null means it
+    /// continues the previous segment. The first control point always has a type. In the editor a typed point
+    /// renders as a "red anchor" (segment boundary / sharp corner); a typeless one renders white.
+    /// </summary>
+    public readonly record struct SliderControlPoint(float X, float Y, SliderPathType? Type = null)
     {
         public Vector2 Position => new Vector2(X, Y);
 
-        public SliderAnchor(Vector2 p, bool red = false) : this(p.X, p.Y, red) { }
+        public bool IsSegmentStart => Type != null;
+
+        public SliderControlPoint(Vector2 p, SliderPathType? type = null) : this(p.X, p.Y, type) { }
     }
 
     /// <summary>A hitsound sample bank (the .osu sample set: 1 = Normal, 2 = Soft, 3 = Drum).</summary>
@@ -53,8 +78,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         string RawLine = "",
         int Id = -1,
         int StackHeight = 0,
-        IReadOnlyList<SliderAnchor>? Anchors = null,
-        char CurveType = 'B');
+        IReadOnlyList<SliderControlPoint>? ControlPoints = null);
 
     /// <summary>
     /// A timing point reduced to what the timeline needs: its time, whether it is uninherited (BPM), and its
@@ -93,6 +117,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
         /// <summary>Base slider velocity multiplier ([Difficulty] SliderMultiplier; default 1.4), used to time placed sliders.</summary>
         public float SliderMultiplier { get; set; } = 1.4f;
+
+        /// <summary>The ".osu file format vN" version (default 14). 128+ is the lazer format, which relaxes some slider rules.</summary>
+        public int FormatVersion { get; set; } = 14;
 
         // Metadata.
         public string Title { get; set; } = string.Empty;

@@ -13,11 +13,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Places a new hit circle at the given osu!pixel position (current snapped time).</summary>
         void PlaceCircle(Vector2 osuPosition);
 
-        /// <summary>Places a new slider through the given control anchors (head first) at the current snapped time.</summary>
-        void PlaceSlider(IReadOnlyList<SliderAnchor> anchors);
+        /// <summary>Places a new slider through the given control points (head first) at the current snapped time.</summary>
+        void PlaceSlider(IReadOnlyList<SliderControlPoint> controlPoints);
 
-        /// <summary>Replaces an existing slider's control points (moving/toggling anchors), keeping its length and timing.</summary>
-        void UpdateSliderAnchors(int id, IReadOnlyList<SliderAnchor> anchors);
+        /// <summary>Replaces an existing slider's control points (moving/adding/deleting/typing), resizing it to the new path.</summary>
+        void UpdateSliderAnchors(int id, IReadOnlyList<SliderControlPoint> controlPoints);
 
         /// <summary>Deletes all currently-selected objects.</summary>
         void DeleteSelected();

@@ -39,6 +39,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal))
                     continue;
 
+                // Header line: "osu file format vN" (controls some slider parsing edge cases).
+                if (section.Length == 0 && line.StartsWith("osu file format v", StringComparison.Ordinal)
+                    && int.TryParse(line.AsSpan("osu file format v".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out int ver))
+                {
+                    result.FormatVersion = ver;
+                    continue;
+                }
+
                 if (line.StartsWith('[') && line.EndsWith(']'))
                 {
                     section = line[1..^1];
@@ -336,10 +344,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             }
             else if ((type & 0b10) != 0 && parts.Length >= 6)
             {
-                (var path, double duration, int slides) = parseSlider(x, y, time, parts, timingPoints, sliderMultiplier);
-                (var anchors, char curveType) = SliderGeometry.ParseAnchors(line);
+                var controlPoints = SliderGeometry.ParseControlPoints(line, result.FormatVersion);
+                (var path, double duration, int slides) = parseSlider(time, parts, timingPoints, sliderMultiplier, controlPoints);
                 result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Slider, path, duration, slides, comboNumber, comboIndex,
-                    hitSound, normalBank, additionBank, sampleVolume, line, Anchors: anchors, CurveType: curveType));
+                    hitSound, normalBank, additionBank, sampleVolume, line, ControlPoints: controlPoints));
             }
             else
             {
@@ -349,24 +357,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         }
 
         private static (IReadOnlyList<Vector2> path, double duration, int slides) parseSlider(
-            float headX, float headY, double time, string[] parts, List<TimingPoint> timingPoints, float sliderMultiplier)
+            double time, string[] parts, List<TimingPoint> timingPoints, float sliderMultiplier, IReadOnlyList<SliderControlPoint> controlPoints)
         {
-            // parts[5] = "<type>|x:y|...", parts[6] = slides (repeats), parts[7] = pixel length.
-            string[] curve = parts[5].Split('|');
-            char curveType = curve.Length > 0 && curve[0].Length > 0 ? curve[0][0] : 'L';
-
-            var controlPoints = new List<Vector2> { new Vector2(headX, headY) };
-            for (int i = 1; i < curve.Length; i++)
-            {
-                string[] xy = curve[i].Split(':');
-                if (xy.Length == 2
-                    && float.TryParse(xy[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float px)
-                    && float.TryParse(xy[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float py))
-                {
-                    controlPoints.Add(new Vector2(px, py));
-                }
-            }
-
+            // parts[6] = slides (repeats), parts[7] = pixel length.
             int slides = 1;
             if (parts.Length >= 7)
                 int.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out slides);
@@ -376,7 +369,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (parts.Length >= 8)
                 double.TryParse(parts[7], NumberStyles.Float, CultureInfo.InvariantCulture, out pixelLength);
 
-            var path = SliderPathCalculator.Calculate(controlPoints, curveType, pixelLength);
+            // Path geometry mirrors lazer's SliderPath (segmented spline + length trim/extend to pixelLength).
+            var path = SliderGeometry.ComputePath(controlPoints, pixelLength);
 
             // Slider travel time: pixelLength / velocity, velocity = SliderMultiplier * 100 * SV per beat.
             (double beatLength, double sv) = effectiveTiming(time, timingPoints);

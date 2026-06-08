@@ -346,33 +346,30 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             selection.SetSingle(id);
         }
 
-        /// <summary>Inserts a new slider through the given control anchors (head first) on the current snapped time.</summary>
-        public void PlaceSlider(IReadOnlyList<SliderAnchor> points)
+        /// <summary>Inserts a new slider through the given control points (head first) on the current snapped time.</summary>
+        public void PlaceSlider(IReadOnlyList<SliderControlPoint> points)
         {
-            var anchors = clampAnchors(points);
-            if (anchors.Count < 2)
+            var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
+            if (cps.Count < 2)
                 return;
 
             int time = (int)Math.Round(snapTime(CurrentTime));
 
-            // Any sharp corner forces Bézier; otherwise infer from the anchor count (2=L, 3=P, 4+=B).
-            char curveType = anchors.Any(a => a.Red) ? 'B' : SliderPathCalculator.DefaultCurveType(anchors.Count);
-
             // The freshly-traced slider spans its full control polygon; snap that length so the tail lands on a tick.
-            double pixelLength = snapSliderLength(time, SliderGeometry.PathLength(SliderGeometry.ComputePath(anchors, curveType)));
-            var fullPath = SliderGeometry.ComputePath(anchors, curveType, pixelLength);
-            if (pixelLength < 1)
+            double pixelLength = snapSliderLength(time, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            var fullPath = SliderGeometry.ComputePath(cps, pixelLength);
+            if (pixelLength < 1 || fullPath.Count < 2)
                 return;
 
-            int hx = (int)Math.Round(anchors[0].X);
-            int hy = (int)Math.Round(anchors[0].Y);
+            int hx = (int)Math.Round(cps[0].X);
+            int hy = (int)Math.Round(cps[0].Y);
             int id = nextId();
 
             // Type bit 1 = slider; bit 2 = new combo (set while Q is armed).
             int type = playfield.NewComboArmed ? 0b110 : 0b010;
             string length = pixelLength.ToString("0.###", CultureInfo.InvariantCulture);
-            string curve = SliderGeometry.CurveField(curveType, anchors);
-            // x,y,time,type,hitSound,sliderType|anchors...,slides,length,edgeSounds,edgeSets,hitSample
+            string curve = SliderGeometry.CurveField(cps);
+            // x,y,time,type,hitSound,sliderType|points...,slides,length,edgeSounds,edgeSets,hitSample
             string raw = $"{hx},{hy},{time},{type},0,{curve},1,{length},0|0,0:0|0:0,0:0:0:0:";
 
             double duration = sliderDuration(time, pixelLength, 1);
@@ -380,7 +377,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             pushUndo();
             removeObjectsAt(time);
             parsed.HitObjects.Add(new HitObjectModel(hx, hy, time, HitObjectKind.Slider, fullPath, duration, 1,
-                RawLine: raw, Id: id, Anchors: anchors, CurveType: curveType));
+                RawLine: raw, Id: id, ControlPoints: cps));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
@@ -388,45 +385,47 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
-        /// Rebuilds a slider from edited control points (move / add / delete / corner toggle). Like lazer, the
-        /// slider length follows the new control polygon, snapped so its tail still lands on the beat grid.
+        /// Rebuilds a slider from edited control points (move / add / delete / type toggle). Like lazer, the
+        /// slider length follows the new control polygon, snapped so its tail still lands on the beat grid;
+        /// existing per-segment types are preserved.
         /// </summary>
-        public void UpdateSliderAnchors(int id, IReadOnlyList<SliderAnchor> points)
+        public void UpdateSliderAnchors(int id, IReadOnlyList<SliderControlPoint> points)
         {
             int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
             if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
                 return;
 
             var o = parsed.HitObjects[idx];
-            var anchors = clampAnchors(points);
-            if (anchors.Count < 2)
+            var cps = clampControlPoints(points);
+            if (cps.Count < 2)
                 return;
 
-            char curveType = SliderGeometry.AdjustType(o.CurveType, anchors);
+            // The first control point must always carry a definite type (lazer invariant).
+            if (cps[0].Type == null)
+                cps[0] = cps[0] with { Type = SliderPathType.Bezier };
 
-            // The slider now spans its full control polygon; snap that length to the beat grid.
-            double pixelLength = snapSliderLength(o.StartTime, SliderGeometry.PathLength(SliderGeometry.ComputePath(anchors, curveType)));
-            var path = SliderGeometry.ComputePath(anchors, curveType, pixelLength);
+            double pixelLength = snapSliderLength(o.StartTime, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            var path = SliderGeometry.ComputePath(cps, pixelLength);
             if (path.Count < 2 || pixelLength < 1)
                 return;
 
-            string raw = HitObjectLineEditor.SetSliderCurve(o.RawLine, curveType, anchors, pixelLength);
+            string raw = HitObjectLineEditor.SetSliderCurve(o.RawLine, cps, pixelLength);
             double duration = sliderDuration(o.StartTime, pixelLength, o.Slides);
 
             pushUndo();
             parsed.HitObjects[idx] = o with
             {
-                X = (int)Math.Round(anchors[0].X),
-                Y = (int)Math.Round(anchors[0].Y),
+                X = (int)Math.Round(cps[0].X),
+                Y = (int)Math.Round(cps[0].Y),
                 Path = path,
-                Anchors = anchors,
-                CurveType = curveType,
+                ControlPoints = cps,
                 Duration = duration,
                 RawLine = raw,
             };
             afterEdit();
             selection.SetSingle(id);
         }
+
 
         /// <summary>
         /// Snaps a slider's pixel length so its tail falls on the active beat-snap tick: rounds the resulting
@@ -447,16 +446,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return velocity * snapped;
         }
 
-        /// <summary>Clamps each control anchor to the playfield in integer osu!pixels (preserving red-corner flags).</summary>
-        private static List<SliderAnchor> clampAnchors(IReadOnlyList<SliderAnchor> points)
+        /// <summary>Clamps each control point to the playfield in integer osu!pixels (preserving its segment type).</summary>
+        private static List<SliderControlPoint> clampControlPoints(IReadOnlyList<SliderControlPoint> points)
         {
-            var result = new List<SliderAnchor>(points.Count);
-            foreach (var a in points)
+            var result = new List<SliderControlPoint>(points.Count);
+            foreach (var p in points)
             {
-                result.Add(new SliderAnchor(
-                    Math.Clamp((int)Math.Round(a.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH),
-                    Math.Clamp((int)Math.Round(a.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT),
-                    a.Red));
+                result.Add(p with
+                {
+                    X = Math.Clamp((int)Math.Round(p.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH),
+                    Y = Math.Clamp((int)Math.Round(p.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT),
+                });
             }
             return result;
         }
@@ -701,20 +701,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     X = original.X + dx,
                     Y = original.Y + dy,
                     Path = offsetPath(original.Path, dx, dy),
-                    Anchors = offsetAnchors(original.Anchors, dx, dy),
+                    ControlPoints = offsetControlPoints(original.ControlPoints, dx, dy),
                     RawLine = HitObjectLineEditor.ShiftPosition(original.RawLine, dx, dy),
                 };
             }
         }
 
-        private static IReadOnlyList<SliderAnchor>? offsetAnchors(IReadOnlyList<SliderAnchor>? anchors, int dx, int dy)
+        private static IReadOnlyList<SliderControlPoint>? offsetControlPoints(IReadOnlyList<SliderControlPoint>? controlPoints, int dx, int dy)
         {
-            if (anchors == null)
+            if (controlPoints == null)
                 return null;
 
-            var result = new List<SliderAnchor>(anchors.Count);
-            foreach (var a in anchors)
-                result.Add(a with { X = a.X + dx, Y = a.Y + dy });
+            var result = new List<SliderControlPoint>(controlPoints.Count);
+            foreach (var p in controlPoints)
+                result.Add(p with { X = p.X + dx, Y = p.Y + dy });
             return result;
         }
 
