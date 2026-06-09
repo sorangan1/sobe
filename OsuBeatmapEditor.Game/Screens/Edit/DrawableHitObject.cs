@@ -81,6 +81,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // editor seeks backward (this is how osu!lazer makes hit objects rewindable - it overrides the getter).
         public override bool RemoveCompletedTransforms => false;
 
+        // The LifetimeManagementContainer manages our lifetime; it must not remove us when we go out of it.
+        public override bool RemoveWhenNotAlive => false;
+
         /// <summary>True if the given osu!pixel position lies on this object's body/circle (stack-aware).</summary>
         public bool BodyContains(Vector2 osuPosition)
         {

@@ -23,6 +23,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Keep completed transforms so they re-evaluate correctly when the editor seeks (lazer overrides this).
         public override bool RemoveCompletedTransforms => false;
 
+        // The LifetimeManagementContainer manages our lifetime; it must not remove us when we go out of it.
+        public override bool RemoveWhenNotAlive => false;
+
         public DrawableFollowPoints(Vector2 start, Vector2 end, double startTime, double endTime)
         {
             RelativeSizeAxes = Axes.Both;
