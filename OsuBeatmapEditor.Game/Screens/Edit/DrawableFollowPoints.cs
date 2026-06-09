@@ -20,7 +20,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const double preempt = 800;    // how far ahead (ms) an arrow starts fading in
         private const double fade = 200;       // fade-in / fade-out duration (ms)
 
-        private readonly List<Point> points = new List<Point>();
+        // Keep completed transforms so they re-evaluate correctly when the editor seeks (lazer overrides this).
+        public override bool RemoveCompletedTransforms => false;
 
         public DrawableFollowPoints(Vector2 start, Vector2 end, double startTime, double endTime)
         {
@@ -29,10 +30,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Vector2 delta = end - start;
             float distance = delta.Length;
             if (distance < spacing * 2)
+            {
+                LifetimeEnd = LifetimeStart; // nothing to show
                 return;
+            }
 
             float rotation = MathHelper.RadiansToDegrees((float)Math.Atan2(delta.Y, delta.X));
             double duration = Math.Max(1, endTime - startTime);
+
+            double firstFadeIn = double.MaxValue;
+            double lastFadeOut = double.MinValue;
 
             for (float d = spacing * 1.5f; d < distance - spacing; d += spacing)
             {
@@ -43,11 +50,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 double fadeOutTime = startTime + fraction * duration;
                 double fadeInTime = fadeOutTime - preempt;
 
-                var arrow = new SpriteText
+                var arrow = new FollowPointArrow
                 {
                     Anchor = Anchor.TopLeft,
                     Origin = Anchor.Centre,
-                    Position = to,
+                    Position = from,
                     Rotation = rotation,
                     Text = ">",
                     Colour = new Color4(1f, 1f, 1f, 0.65f),
@@ -55,32 +62,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Alpha = 0,
                 };
 
-                AddInternal(arrow);
-                points.Add(new Point(arrow, from, to, fadeInTime, fadeOutTime));
-            }
-        }
-
-        /// <summary>Updates every arrow's fade/position for the given playback time.</summary>
-        public void UpdateAt(double time)
-        {
-            foreach (var p in points)
-            {
-                if (time < p.FadeInTime || time > p.FadeOutTime)
+                // Fade in + ease toward the target as the playback wave approaches, fade out as it passes.
+                using (arrow.BeginAbsoluteSequence(fadeInTime))
                 {
-                    p.Arrow.Alpha = 0;
-                    continue;
+                    arrow.FadeIn(fade);
+                    arrow.MoveTo(to, fade, Easing.Out);
                 }
 
-                double sinceIn = time - p.FadeInTime;
-                float inAlpha = (float)Math.Clamp(sinceIn / fade, 0, 1);
-                float outAlpha = (float)Math.Clamp((p.FadeOutTime - time) / fade, 0, 1);
-                p.Arrow.Alpha = inAlpha * outAlpha;
+                using (arrow.BeginAbsoluteSequence(fadeOutTime - fade))
+                    arrow.FadeOut(fade);
 
-                float move = (float)Math.Clamp(sinceIn / fade, 0, 1);
-                p.Arrow.Position = Vector2.Lerp(p.From, p.To, 1 - (1 - move) * (1 - move)); // ease-out
+                AddInternal(arrow);
+
+                firstFadeIn = Math.Min(firstFadeIn, fadeInTime);
+                lastFadeOut = Math.Max(lastFadeOut, fadeOutTime);
+            }
+
+            if (firstFadeIn <= lastFadeOut)
+            {
+                LifetimeStart = firstFadeIn;
+                LifetimeEnd = lastFadeOut;
             }
         }
 
-        private readonly record struct Point(SpriteText Arrow, Vector2 From, Vector2 To, double FadeInTime, double FadeOutTime);
+        /// <summary>A follow-point arrow that keeps its completed transforms so it re-evaluates when seeking.</summary>
+        private partial class FollowPointArrow : SpriteText
+        {
+            public override bool RemoveCompletedTransforms => false;
+        }
     }
 }

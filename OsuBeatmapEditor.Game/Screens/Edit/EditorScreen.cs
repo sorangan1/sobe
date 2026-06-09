@@ -199,10 +199,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Live difficulty: AR changes the approach window (and the stack window); CS rebuilds (debounced).
             editable.Ar.BindValueChanged(v =>
             {
-                playfield.Preempt = ParsedBeatmap.PreemptFor(v.NewValue);
                 applyStacking();
                 rebuildHitObjects();
             }, true);
+
+            // Hit objects animate against the interpolated audio clock (set in load), so transforms track playback.
+            if (audioClock != null)
+                playfield.SetClock(audioClock);
             editable.Cs.BindValueChanged(_ =>
             {
                 circleSizeRebuild?.Cancel();
@@ -319,7 +322,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void rebuildHitObjects()
         {
             float diameter = (54.4f - 4.48f * editable.Cs.Value) * 2;
-            playfield.SetHitObjects(parsed.HitObjects, diameter);
+            playfield.SetHitObjects(parsed.HitObjects, diameter, ParsedBeatmap.PreemptFor(editable.Ar.Value));
         }
 
         // --- IEditorActions: editing operations invoked by the timeline/playfield ---
@@ -1037,8 +1040,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             base.LoadComplete();
 
-            playfield.SetHitObjects(parsed.HitObjects, parsed.CircleRadius * 2);
-            playfield.Preempt = parsed.Preempt;
+            rebuildHitObjects();
 
             if (track != null && parsed.HitObjects.Count > 0)
                 track.Seek(Math.Max(0, parsed.HitObjects[0].StartTime - 200));

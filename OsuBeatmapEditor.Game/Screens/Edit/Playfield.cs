@@ -8,6 +8,7 @@ using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
+using osu.Framework.Timing;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
@@ -29,8 +30,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Supplies the beat-snapped current time (for the placement preview's combo number).</summary>
         public Func<double>? SnappedTimeSource;
 
-        /// <summary>Approach/fade-in window in ms (derived from AR); updated live when AR changes.</summary>
-        public double Preempt { get; set; } = 1200;
 
         [Resolved]
         private EditorSelection selection { get; set; } = null!;
@@ -53,15 +52,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private readonly Container playArea;
         private Container gridContainer = null!;
-        private readonly Container<Drawable> followPointContainer;
-        private readonly Container<Drawable> hitObjectContainer;
+        private readonly HitObjectLifetimeContainer followPointContainer;
+        private readonly HitObjectLifetimeContainer hitObjectContainer;
         private readonly Container selectionLayer;
         private readonly Container overlayLayer;
         private CircularContainer placementPreview = null!;
         private Box placementFill = null!;
         private SpriteText placementNumber = null!;
+
+        // Live drawable + model per object id, so edits sync incrementally instead of rebuilding everything.
         private readonly List<DrawableHitObject> objects = new List<DrawableHitObject>();
-        private readonly List<DrawableFollowPoints> followPoints = new List<DrawableFollowPoints>();
+        private readonly Dictionary<int, DrawableHitObject> drawableMap = new Dictionary<int, DrawableHitObject>();
+        private readonly Dictionary<int, HitObjectModel> modelMap = new Dictionary<int, HitObjectModel>();
+        private float lastDiameter = -1;
+        private double lastPreempt = -1;
 
         private IReadOnlyList<HitObjectModel> currentHitObjects = Array.Empty<HitObjectModel>();
         private float currentDiameter = 40f;
@@ -119,9 +123,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                             Colour = Color4.Transparent,
                         },
                     },
-                    // Follow points sit beneath the hit objects.
-                    followPointContainer = new Container { RelativeSizeAxes = Axes.Both },
-                    hitObjectContainer = new Container { RelativeSizeAxes = Axes.Both },
+                    // Follow points sit beneath the hit objects. Both are lifetime-managed so only on-screen
+                    // objects are realised/updated/drawn (like lazer's HitObjectContainer).
+                    followPointContainer = new HitObjectLifetimeContainer { RelativeSizeAxes = Axes.Both },
+                    hitObjectContainer = new HitObjectLifetimeContainer { RelativeSizeAxes = Axes.Both },
                     // Persistent yellow selection outlines (always visible, independent of object fade).
                     selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
                     // Placement preview + rubber-band box.
@@ -483,26 +488,73 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             osuPosition.X >= 0 && osuPosition.Y >= 0
             && osuPosition.X <= ParsedBeatmap.PLAYFIELD_WIDTH && osuPosition.Y <= ParsedBeatmap.PLAYFIELD_HEIGHT;
 
-        /// <summary>Replaces the displayed hit objects.</summary>
-        public void SetHitObjects(IReadOnlyList<HitObjectModel> hitObjects, float circleDiameter)
+        /// <summary>
+        /// Syncs the displayed hit objects to <paramref name="hitObjects"/>, creating/removing/replacing only
+        /// the ones that actually changed (by id + value), so a single edit doesn't rebuild the whole map.
+        /// A circle-size (diameter) or AR (preempt) change rebuilds everything, since those affect all objects.
+        /// </summary>
+        public void SetHitObjects(IReadOnlyList<HitObjectModel> hitObjects, float circleDiameter, double preempt)
         {
             currentHitObjects = hitObjects;
             currentDiameter = circleDiameter;
-            hitObjectContainer.Clear();
-            objects.Clear();
-            followPointContainer.Clear();
-            followPoints.Clear();
 
-            // Reverse order so earlier objects draw on top (matching osu!'s stacking during approach).
-            for (int i = hitObjects.Count - 1; i >= 0; i--)
+            bool fullRebuild = circleDiameter != lastDiameter || preempt != lastPreempt;
+            lastDiameter = circleDiameter;
+            lastPreempt = preempt;
+
+            if (fullRebuild)
             {
-                var drawable = new DrawableHitObject(hitObjects[i], circleDiameter);
-                objects.Add(drawable);
+                hitObjectContainer.Clear();
+                drawableMap.Clear();
+                modelMap.Clear();
+            }
+
+            var present = new HashSet<int>();
+
+            foreach (var o in hitObjects)
+            {
+                present.Add(o.Id);
+
+                // Unchanged object: keep its existing drawable (record-struct value equality, paths by ref).
+                if (modelMap.TryGetValue(o.Id, out var old) && old.Equals(o))
+                    continue;
+
+                if (drawableMap.TryGetValue(o.Id, out var existing))
+                    hitObjectContainer.Remove(existing);
+
+                var drawable = new DrawableHitObject(o, circleDiameter, preempt);
+                drawableMap[o.Id] = drawable;
+                modelMap[o.Id] = o;
                 hitObjectContainer.Add(drawable);
+            }
+
+            // Remove drawables whose objects are gone.
+            foreach (int id in drawableMap.Keys.Where(id => !present.Contains(id)).ToList())
+            {
+                hitObjectContainer.Remove(drawableMap[id]);
+                drawableMap.Remove(id);
+                modelMap.Remove(id);
+            }
+
+            // Rebuild the flat list used for hit-testing/selection in time order.
+            objects.Clear();
+            foreach (var o in hitObjects)
+            {
+                if (drawableMap.TryGetValue(o.Id, out var d))
+                    objects.Add(d);
             }
 
             buildFollowPoints(hitObjects);
             updateSelection();
+        }
+
+        /// <summary>Sets the clock the hit objects animate against (the editor's interpolated audio clock).</summary>
+        public void SetClock(IFrameBasedClock clock)
+        {
+            hitObjectContainer.Clock = clock;
+            hitObjectContainer.ProcessCustomClock = false;
+            followPointContainer.Clock = clock;
+            followPointContainer.ProcessCustomClock = false;
         }
 
         /// <summary>
@@ -591,6 +643,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         private void buildFollowPoints(IReadOnlyList<HitObjectModel> hitObjects)
         {
+            // Follow points are cheap and connection-dependent on neighbours, so rebuild the set each sync;
+            // each connection is transform-based + lifetime-managed, so there's no per-frame cost.
+            followPointContainer.Clear();
+
             for (int i = 0; i < hitObjects.Count - 1; i++)
             {
                 var current = hitObjects[i];
@@ -600,9 +656,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (next.ComboNumber == 1 || current.Kind == HitObjectKind.Spinner || next.Kind == HitObjectKind.Spinner)
                     continue;
 
-                var connection = new DrawableFollowPoints(endPosition(current), startPosition(next), endTime(current), next.StartTime);
-                followPoints.Add(connection);
-                followPointContainer.Add(connection);
+                followPointContainer.Add(new DrawableFollowPoints(endPosition(current), startPosition(next), endTime(current), next.StartTime));
             }
         }
 
@@ -633,15 +687,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (scale > 0)
                 playArea.Scale = new Vector2(scale);
 
-            if (TimeSource != null)
-            {
-                double time = TimeSource();
-                foreach (var o in objects)
-                    o.UpdateAt(time, Preempt);
-                foreach (var fp in followPoints)
-                    fp.UpdateAt(time);
-            }
-
+            // Hit objects + follow points animate themselves via scheduled transforms against the audio clock
+            // (set in SetClock); the lifetime container only updates/draws the ones currently on screen.
             updatePlacementPreview();
         }
 
