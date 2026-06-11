@@ -65,8 +65,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Replaces the selection with the given indices.</summary>
         public void SetRange(IEnumerable<int> indices)
         {
+            var next = new HashSet<int>(indices);
+            if (next.SetEquals(selected))
+                return; // no change - avoid firing Changed (and rebuilding visuals) every frame during a drag
+
             selected.Clear();
-            foreach (int i in indices)
+            foreach (int i in next)
                 selected.Add(i);
             Changed?.Invoke();
         }

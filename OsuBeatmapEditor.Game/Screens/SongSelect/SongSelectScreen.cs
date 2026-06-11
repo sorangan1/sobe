@@ -1,4 +1,6 @@
 using System;
+using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.IO;
@@ -6,6 +8,7 @@ using osu.Framework.Allocation;
 using osu.Framework.Audio;
 using osu.Framework.Audio.Track;
 using osu.Framework.Graphics;
+using osu.Framework.Graphics.Colour;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Shapes;
@@ -16,6 +19,7 @@ using osu.Framework.Input.Events;
 using osu.Framework.IO.Stores;
 using osu.Framework.Platform;
 using osu.Framework.Screens;
+using osu.Framework.Threading;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.Screens.Edit;
@@ -37,9 +41,23 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         private BeatmapCarousel carousel = null!;
         private Container rightArea = null!;
+        private CarouselSearchTextBox searchBox = null!;
         private Container backgroundContainer = null!;
         private OsuButton newBeatmapButton = null!;
+        private BeatmapInfoPanel infoPanel = null!;
         private NewBeatmapOverlay newBeatmapOverlay = null!;
+        private NewDifficultyOverlay newDifficultyOverlay = null!;
+        private ConfirmOverlay confirmOverlay = null!;
+
+        // Cached by the game host; absent under the standalone test browser, so calls are null-guarded.
+        [Resolved(CanBeNull = true)]
+        private ToastOverlay? toasts { get; set; }
+
+        private Storage storage = null!;
+
+        // The set/difficulty a pending "Create new Difficulty" action is templating from.
+        private BeatmapSetModel? pendingDifficultySet;
+        private BeatmapDifficultyModel? pendingDifficultyTemplate;
 
         private IReadOnlyList<BeatmapSetModel> sets = Array.Empty<BeatmapSetModel>();
 
@@ -53,13 +71,23 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         private BeatmapSetModel? selectedSet;
         private BeatmapDifficultyModel? selectedDiff;
-        private string? loadedSetIdentity;
+        private string? loadedAudioKey;
         private string? loadedBackgroundKey;
         private EditorScreen? pushedEditor;
 
+        private SongSelectPreferences prefs = null!;
+        private ScheduledDelegate? searchDebounce;
+
+        // The game window, kept so the OS file-drop handler can be detached on disposal.
+        private IWindow? window;
+        private Action<string>? dragDropHandler;
+
         [BackgroundDependencyLoader]
-        private void load(GameHost host, AudioManager audio)
+        private void load(GameHost host, AudioManager audio, Storage storage)
         {
+            this.storage = storage;
+            prefs = new SongSelectPreferences(storage);
+
             sets = BeatmapStore.LoadAll();
 
             string? dataDir = LazerStorage.FindDataDirectory();
@@ -70,64 +98,82 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 trackStore = audio.GetTrackStore(new StorageBackedResourceStore(new NativeStorage(Path.Combine(dataDir, "files"), host)));
             }
 
-            BasicTextBox searchBox;
-            BasicDropdown<SortMode> sortDropdown;
+            ThemedDropdown<SortMode> sortDropdown;
 
-            // A context-menu container wraps everything so right-clicking a difficulty can offer "Edit".
+            // The context-menu container renders the carousel's right-click menus (styled items).
             InternalChild = new PaddedContextMenuContainer
             {
                 RelativeSizeAxes = Axes.Both,
                 Child = new Container
                 {
-                    RelativeSizeAxes = Axes.Both,
-                    Children = new Drawable[]
+                RelativeSizeAxes = Axes.Both,
+                Children = new Drawable[]
+                {
+                    new Box
                     {
-                new Box
-                {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = OsuColour.BackgroundDark,
-                },
-                backgroundContainer = new Container
-                {
-                    RelativeSizeAxes = Axes.Both,
-                },
-                // Dim layer keeps the UI readable over bright backgrounds.
-                new Box
-                {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = Color4.Black,
-                    Alpha = 0.55f,
-                },
-                newBeatmapButton = new OsuButton("New Beatmap", OsuColour.Pink)
-                {
-                    Anchor = Anchor.BottomLeft,
-                    Origin = Anchor.BottomLeft,
-                    Size = new Vector2(220, 56),
-                    Margin = new MarginPadding(30),
-                    Action = onNewBeatmap,
-                },
-                rightArea = new Container
-                {
-                    Anchor = Anchor.TopRight,
-                    Origin = Anchor.TopRight,
-                    RelativeSizeAxes = Axes.Y,
-                    Width = carousel_width,
-                    Padding = new MarginPadding { Top = 24, Bottom = 24, Right = 24 },
-                    Children = new Drawable[]
+                        RelativeSizeAxes = Axes.Both,
+                        Colour = OsuColour.BackgroundDark,
+                    },
+                    backgroundContainer = new Container
                     {
-                        // Carousel first, toolbar second so the sort dropdown's popup draws above the list.
-                        carousel = new BeatmapCarousel
-                        {
-                            RelativeSizeAxes = Axes.Both,
-                            Padding = new MarginPadding { Top = 52 },
-                            SelectionChanged = onSelectionChanged,
-                        },
-                        new GridContainer
+                        RelativeSizeAxes = Axes.Both,
+                    },
+                    // Dim layer keeps the UI readable over bright backgrounds.
+                    new Box
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Colour = Color4.Black,
+                        Alpha = 0.55f,
+                    },
+                    // Dark gradient behind the carousel strip (transparent on the left, darker toward the
+                    // right) so the cards read clearly against the background image.
+                    new Box
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Colour = ColourInfo.GradientHorizontal(
+                            new Color4(0f, 0f, 0f, 0f),
+                            new Color4(0f, 0f, 0f, 0.6f)),
+                    },
+                    // Full-screen carousel: click/drag/scroll work anywhere, while the cards themselves
+                    // sit in a fixed strip on the right. Sits below the button/toolbar so those stay usable.
+                    carousel = new BeatmapCarousel
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Padding = new MarginPadding { Top = 76, Bottom = 24 },
+                        SelectionChanged = onSelectionChanged,
+                    },
+                    // Selected-map readout, top-left over the dimmed background.
+                    infoPanel = new BeatmapInfoPanel
+                    {
+                        Anchor = Anchor.TopLeft,
+                        Origin = Anchor.TopLeft,
+                        Margin = new MarginPadding { Left = 40, Top = 40 },
+                    },
+                    newBeatmapButton = new OsuButton("New Beatmap", OsuColour.Pink)
+                    {
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Size = new Vector2(220, 56),
+                        Margin = new MarginPadding(30),
+                        Action = onNewBeatmap,
+                    },
+                    // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
+                    // and the search box stay interactive.
+                    rightArea = new Container
+                    {
+                        Anchor = Anchor.TopRight,
+                        Origin = Anchor.TopRight,
+                        Width = carousel_width - 24,
+                        Height = 40,
+                        Margin = new MarginPadding { Top = 24, Right = 24 },
+                        Child = new GridContainer
                         {
                             RelativeSizeAxes = Axes.X,
                             Height = 40,
                             ColumnDimensions = new[]
                             {
+                                new Dimension(GridSizeMode.Absolute, 22),
+                                new Dimension(GridSizeMode.Absolute, 8),
                                 new Dimension(),
                                 new Dimension(GridSizeMode.Absolute, 12),
                                 new Dimension(GridSizeMode.Absolute, 150),
@@ -136,14 +182,23 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             {
                                 new Drawable?[]
                                 {
-                                    searchBox = new BasicTextBox
+                                    new SpriteIcon
+                                    {
+                                        Anchor = Anchor.CentreLeft,
+                                        Origin = Anchor.CentreLeft,
+                                        Icon = FontAwesome.Solid.Search,
+                                        Size = new Vector2(16),
+                                        Colour = OsuColour.TextMuted,
+                                    },
+                                    null,
+                                    searchBox = new CarouselSearchTextBox
                                     {
                                         RelativeSizeAxes = Axes.X,
                                         Height = 40,
                                         PlaceholderText = "Search...",
                                     },
                                     null,
-                                    sortDropdown = new BasicDropdown<SortMode>
+                                    sortDropdown = new ThemedDropdown<SortMode>
                                     {
                                         RelativeSizeAxes = Axes.X,
                                     },
@@ -151,25 +206,74 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             },
                         },
                     },
-                },
-                newBeatmapOverlay = new NewBeatmapOverlay
-                {
-                    Created = onBeatmapCreated,
-                },
+                    newBeatmapOverlay = new NewBeatmapOverlay
+                    {
+                        Created = onBeatmapCreated,
                     },
+                    newDifficultyOverlay = new NewDifficultyOverlay
+                    {
+                        Confirmed = onCreateDifficultyConfirmed,
+                    },
+                    confirmOverlay = new ConfirmOverlay(),
+                },
                 },
             };
 
             carousel.EditRequested = openEditor;
+            carousel.CreateDifficultyRequested = onCreateDifficulty;
+            carousel.CreateSetRequested = onCreateSet;
+            carousel.DeleteSetRequested = onDeleteSet;
+            carousel.DeleteDifficultyRequested = onDeleteDifficulty;
             carousel.Textures = textures;
 
             sortDropdown.Items = Enum.GetValues<SortMode>();
-            sortDropdown.Current.Value = SortMode.Artist;
-            sortDropdown.Current.BindValueChanged(e => carousel.SetSort(e.NewValue));
+            // Restore the last-used sort and persist any change.
+            sortDropdown.Current.Value = prefs.Sort.Value;
+            sortDropdown.Current.BindValueChanged(e =>
+            {
+                prefs.Sort.Value = e.NewValue;
+                carousel.SetSort(e.NewValue);
+            });
 
-            searchBox.Current.BindValueChanged(e => carousel.SetFilter(e.NewValue));
+            // Debounce so a fast typer doesn't trigger a rebuild on every keystroke.
+            searchBox.Current.BindValueChanged(e =>
+            {
+                searchDebounce?.Cancel();
+                searchDebounce = Scheduler.AddDelayed(() => carousel.SetFilter(e.NewValue), 60);
+            });
 
+            carousel.SetSort(prefs.Sort.Value);
             carousel.SetBeatmaps(sets);
+            // Open on a random map (and start its preview) once the screen is laid out.
+            Schedule(carousel.SelectRandom);
+
+            // Dropping an audio file on the window opens the New Beatmap dialog with it preselected.
+            // The event fires off the update thread, so marshal back before touching drawables.
+            window = host.Window;
+            if (window != null)
+            {
+                dragDropHandler = path => Schedule(() => onFileDropped(path));
+                window.DragDrop += dragDropHandler;
+            }
+        }
+
+        /// <summary>Handles an OS file drop: if it is a supported audio file and we're the active screen, open New Beatmap.</summary>
+        private void onFileDropped(string path)
+        {
+            if (!this.IsCurrentScreen())
+                return;
+
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (!NewBeatmapOverlay.AudioExtensions.Contains(ext))
+            {
+                toasts?.Push("Drop an mp3, ogg or wav to start a new beatmap", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            if (!File.Exists(path))
+                return;
+
+            newBeatmapOverlay.ShowForDroppedAudio(path);
         }
 
         public override void OnEntering(ScreenTransitionEvent e)
@@ -181,6 +285,9 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
             newBeatmapButton.MoveToY(40).FadeOut();
             newBeatmapButton.Delay(150).MoveToY(0, 500, Easing.OutQuint).FadeIn(500, Easing.OutQuint);
+
+            // Focus the search box so typing immediately filters (it holds focus thereafter).
+            Schedule(() => GetContainingFocusManager()?.ChangeFocus(searchBox));
         }
 
         public override void OnSuspending(ScreenTransitionEvent e)
@@ -204,15 +311,15 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             // few times so the change shows up in our carousel once the import lands.
             if (pushedEditor?.DidSave == true)
             {
-                Scheduler.AddDelayed(reloadBeatmaps, 1500);
-                Scheduler.AddDelayed(reloadBeatmaps, 4000);
+                Scheduler.AddDelayed(() => reloadBeatmaps(), 1500);
+                Scheduler.AddDelayed(() => reloadBeatmaps(), 4000);
             }
 
             pushedEditor = null;
         }
 
         /// <summary>Reloads the beatmap library from osu!lazer's realm and repopulates the carousel.</summary>
-        private void reloadBeatmaps()
+        private void reloadBeatmaps(bool notify = false)
         {
             Task.Run(() =>
             {
@@ -221,6 +328,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 {
                     sets = loaded;
                     carousel.SetBeatmaps(sets);
+                    if (notify)
+                        toasts?.Push($"Library reloaded - {sets.Count} sets", EditorTheme.Colours.Success);
                 });
             });
         }
@@ -230,6 +339,13 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             // Don't navigate the carousel while the new-beatmap dialog is open.
             if (newBeatmapOverlay.State.Value == Visibility.Visible)
                 return base.OnKeyDown(e);
+
+            // Ctrl+Space pauses/resumes the song preview.
+            if (e.Key == Key.Space && e.ControlPressed)
+            {
+                currentPreview?.TogglePause();
+                return true;
+            }
 
             switch (e.Key)
             {
@@ -254,8 +370,14 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     openSelected();
                     return true;
 
+                // F2 jumps to a random map; F5 reloads the library from osu!lazer's realm.
+                case Key.F2:
+                    carousel.SelectRandom();
+                    return true;
+
                 case Key.F5:
-                    reloadBeatmaps();
+                    toasts?.Push("Reloading library...");
+                    reloadBeatmaps(notify: true);
                     return true;
             }
 
@@ -267,6 +389,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             selectedSet = set;
             selectedDiff = diff;
 
+            infoPanel.SetMap(set, diff);
+
             // Reload the background whenever the *effective* background image changes - this covers both
             // moving to a new set and moving between difficulties that use a different background.
             string backgroundKey = $"{set.Identity}|{effectiveBackground(set, diff)}";
@@ -276,24 +400,39 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 loadBackground(set, diff);
             }
 
-            // Audio is shared across a set's difficulties; only reload on a set change.
-            if (loadedSetIdentity != set.Identity)
+            // Difficulties can use different audio files (e.g. "Boys Don't Cry"); only reload when the
+            // effective audio actually changes, so same-audio diffs don't restart the preview.
+            string audioKey = $"{set.Identity}|{effectiveAudio(set, diff)}";
+            if (loadedAudioKey != audioKey)
             {
-                loadedSetIdentity = set.Identity;
-                loadPreview(set);
+                loadedAudioKey = audioKey;
+                loadPreview(set, diff);
             }
         }
 
         private static string effectiveBackground(BeatmapSetModel set, BeatmapDifficultyModel diff) =>
             diff.BackgroundFile.Length > 0 ? diff.BackgroundFile : set.BackgroundFile;
 
-        private void loadPreview(BeatmapSetModel set)
+        /// <summary>This difficulty's audio filename, falling back to the first set difficulty that has one.</summary>
+        private static string effectiveAudio(BeatmapSetModel set, BeatmapDifficultyModel diff)
+        {
+            if (diff.AudioFile.Length > 0)
+                return diff.AudioFile.ToLowerInvariant();
+
+            foreach (var d in set.Difficulties)
+                if (d.AudioFile.Length > 0)
+                    return d.AudioFile.ToLowerInvariant();
+
+            return string.Empty;
+        }
+
+        private void loadPreview(BeatmapSetModel set, BeatmapDifficultyModel diff)
         {
             if (trackStore == null)
                 return;
 
             int token = ++previewRequest;
-            var preview = new PreviewTrack(set, trackStore);
+            var preview = new PreviewTrack(set, diff, trackStore);
 
             LoadComponentAsync(preview, loaded =>
             {
@@ -375,7 +514,160 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             carousel.AddNewBeatmap(model);
         }
 
-        private void onNewBeatmap() => newBeatmapOverlay.Show();
+        private void onNewBeatmap() => newBeatmapOverlay.ShowForNewBeatmap();
+
+        // --- Context-menu actions (Create new Difficulty / Create new Set) ---
+
+        private void onCreateDifficulty(BeatmapSetModel set, BeatmapDifficultyModel template)
+        {
+            if (template.OsuFileHash.Length == 0)
+            {
+                toasts?.Push("Can't add a difficulty to an unsaved map", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            pendingDifficultySet = set;
+            pendingDifficultyTemplate = template;
+            newDifficultyOverlay.Show(set.Difficulties.Select(d => d.DifficultyName));
+        }
+
+        private void onCreateDifficultyConfirmed(string name)
+        {
+            var set = pendingDifficultySet;
+            var template = pendingDifficultyTemplate;
+            if (set == null || template == null)
+                return;
+
+            toasts?.Push($"Creating difficulty \"{name}\"...");
+
+            Task.Run(() =>
+            {
+                bool ok = BeatmapCloner.CreateDifficulty(set, template, name);
+                Schedule(() =>
+                {
+                    if (ok)
+                    {
+                        toasts?.Push("Difficulty sent to osu!lazer", EditorTheme.Colours.Success);
+                        // The import lands asynchronously; refresh a couple of times so it appears.
+                        Scheduler.AddDelayed(() => reloadBeatmaps(), 1500);
+                        Scheduler.AddDelayed(() => reloadBeatmaps(), 4000);
+                    }
+                    else
+                    {
+                        toasts?.Push("Could not create difficulty", EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        private void onCreateSet(BeatmapSetModel set, BeatmapDifficultyModel donor)
+        {
+            string? osuPath = LazerFileStore.ResolvePath(set.DataDirectory, donor.OsuFileHash);
+            if (osuPath == null)
+            {
+                toasts?.Push("Can't read the source map's audio/timing", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            string[] lines = File.ReadAllLines(osuPath);
+            string audioName = BeatmapCloner.ExtractAudioFilename(lines);
+            var timingLines = BeatmapCloner.ExtractTimingPointLines(lines);
+
+            if (audioName.Length == 0 || !set.Files.TryGetValue(audioName.ToLowerInvariant(), out string? hash))
+            {
+                toasts?.Push("Source map has no resolvable audio", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            string? audioPath = LazerFileStore.ResolvePath(set.DataDirectory, hash);
+            if (audioPath == null)
+            {
+                toasts?.Push("Source audio file is missing", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            newBeatmapOverlay.ShowSeeded(
+                artist: set.Artist,
+                title: set.Title,
+                creator: defaultCreator(),
+                audioStorePath: audioPath,
+                audioFileName: audioName,
+                timingLines: timingLines,
+                bpm: firstBpm(timingLines));
+        }
+
+        /// <summary>The mapper name configured in editor settings (used as the creator for new sets).</summary>
+        private string defaultCreator()
+        {
+            try { return new EditorSettings(storage).DefaultCreator.Value; }
+            catch { return string.Empty; }
+        }
+
+        /// <summary>BPM of the first uninherited timing point, or 120 if none can be parsed.</summary>
+        private static double firstBpm(IReadOnlyList<string> timingLines)
+        {
+            foreach (string line in timingLines)
+            {
+                string[] parts = line.Split(',');
+                // Field 6 is the uninherited flag (1 = red/BPM); legacy lines without it are uninherited.
+                bool uninherited = parts.Length <= 6 || parts[6].Trim() == "1";
+                if (uninherited && parts.Length >= 2
+                    && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double beatLength)
+                    && beatLength > 0)
+                    return 60000.0 / beatLength;
+            }
+
+            return 120;
+        }
+
+        // --- Delete (writes directly to osu!lazer's realm) ---
+
+        private void onDeleteSet(BeatmapSetModel set)
+        {
+            confirmOverlay.Show(
+                "Delete set",
+                $"Delete \"{set.Artist} - {set.Title}\" from osu!lazer? This removes all its difficulties.",
+                "Delete set",
+                () => performDelete(() => BeatmapDeleter.DeleteSet(set), "Set deleted"));
+        }
+
+        private void onDeleteDifficulty(BeatmapSetModel set, BeatmapDifficultyModel diff)
+        {
+            confirmOverlay.Show(
+                "Delete difficulty",
+                $"Delete the difficulty \"{diff.DifficultyName}\" from \"{set.Title}\"?",
+                "Delete difficulty",
+                () => performDelete(() => BeatmapDeleter.DeleteDifficulty(set, diff), "Difficulty deleted"));
+        }
+
+        /// <summary>Runs a realm delete off-thread, then toasts the result and refreshes the carousel.</summary>
+        private void performDelete(Func<string?> delete, string successMessage)
+        {
+            Task.Run(() =>
+            {
+                string? error = delete();
+                Schedule(() =>
+                {
+                    if (error == null)
+                    {
+                        toasts?.Push(successMessage, EditorTheme.Colours.Success);
+                        reloadBeatmaps();
+                    }
+                    else
+                    {
+                        toasts?.Push(error, EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        protected override void Dispose(bool isDisposing)
+        {
+            if (window != null && dragDropHandler != null)
+                window.DragDrop -= dragDropHandler;
+
+            base.Dispose(isDisposing);
+        }
 
         /// <summary>
         /// Loads and displays a beatmap set's background image, decoding the .osu and the image
@@ -437,37 +729,59 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private partial class PreviewTrack : CompositeDrawable
         {
             private readonly BeatmapSetModel set;
+            private readonly BeatmapDifficultyModel diff;
             private readonly ITrackStore trackStore;
 
             private Track? track;
             private int previewTime = -1;
 
-            public PreviewTrack(BeatmapSetModel set, ITrackStore trackStore)
+            public PreviewTrack(BeatmapSetModel set, BeatmapDifficultyModel diff, ITrackStore trackStore)
             {
                 this.set = set;
+                this.diff = diff;
                 this.trackStore = trackStore;
             }
 
             [BackgroundDependencyLoader]
             private void load()
             {
-                foreach (var diff in set.Difficulties)
+                // Prefer this difficulty's own audio (from realm metadata); fall back to decoding the
+                // .osu, then to any difficulty in the set that resolves to a stored audio file.
+                if (tryLoad(diff))
+                    return;
+
+                foreach (var other in set.Difficulties)
                 {
-                    if (diff.OsuFileHash.Length == 0)
-                        continue;
-
-                    string? osuPath = LazerFileStore.ResolvePath(set.DataDirectory, diff.OsuFileHash);
-                    if (osuPath == null)
-                        continue;
-
-                    var parsed = OsuFileDecoder.Decode(osuPath);
-                    if (parsed.AudioFilename.Length == 0 || !set.Files.TryGetValue(parsed.AudioFilename.ToLowerInvariant(), out string? hash))
-                        continue;
-
-                    track = trackStore.Get($"{hash[..1]}/{hash[..2]}/{hash}");
-                    previewTime = parsed.PreviewTime;
-                    break;
+                    if (other != diff && tryLoad(other))
+                        return;
                 }
+            }
+
+            /// <summary>Attempts to resolve and load a difficulty's audio track; returns true on success.</summary>
+            private bool tryLoad(BeatmapDifficultyModel candidate)
+            {
+                string audioFile = candidate.AudioFile;
+                int preview = candidate.PreviewTime;
+
+                // Metadata didn't carry the audio filename - decode the .osu as a fallback.
+                if (audioFile.Length == 0 && candidate.OsuFileHash.Length > 0)
+                {
+                    string? osuPath = LazerFileStore.ResolvePath(set.DataDirectory, candidate.OsuFileHash);
+                    if (osuPath != null)
+                    {
+                        var parsed = OsuFileDecoder.Decode(osuPath);
+                        audioFile = parsed.AudioFilename;
+                        if (preview < 0)
+                            preview = parsed.PreviewTime;
+                    }
+                }
+
+                if (audioFile.Length == 0 || !set.Files.TryGetValue(audioFile.ToLowerInvariant(), out string? hash) || hash.Length < 2)
+                    return false;
+
+                track = trackStore.Get($"{hash[..1]}/{hash[..2]}/{hash}");
+                previewTime = preview;
+                return track != null;
             }
 
             /// <summary>Seeks to the preview point (or 40% in if unset) and starts playback.</summary>
@@ -483,6 +797,18 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 // to 0 would make the preview play from the start instead of the preview point.
                 track.Seek(Math.Max(0, time));
                 track.Start();
+            }
+
+            /// <summary>Pauses the preview where it is, or resumes it if already paused (Ctrl+Space).</summary>
+            public void TogglePause()
+            {
+                if (track == null)
+                    return;
+
+                if (track.IsRunning)
+                    track.Stop();
+                else
+                    track.Start();
             }
 
             public void Stop() => track?.Stop();

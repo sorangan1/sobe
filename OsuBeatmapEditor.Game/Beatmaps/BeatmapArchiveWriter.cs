@@ -22,11 +22,19 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (!request.IsValid)
                 throw new InvalidOperationException("New beatmap request is incomplete.");
 
-            string audioExtension = Path.GetExtension(request.AudioPath).ToLowerInvariant();
-            if (string.IsNullOrEmpty(audioExtension))
-                audioExtension = ".mp3";
-
-            string audioFilename = $"audio{audioExtension}";
+            string audioFilename;
+            if (!string.IsNullOrWhiteSpace(request.AudioFileName))
+            {
+                // Reuse the source set's audio filename (its on-disk path is content-addressed, no extension).
+                audioFilename = sanitiseFilename(request.AudioFileName);
+            }
+            else
+            {
+                string audioExtension = Path.GetExtension(request.AudioPath).ToLowerInvariant();
+                if (string.IsNullOrEmpty(audioExtension))
+                    audioExtension = ".mp3";
+                audioFilename = $"audio{audioExtension}";
+            }
 
             string osuFilename = sanitiseFilename(
                 $"{request.Artist} - {request.Title} ({request.Creator}) [{request.DifficultyName}].osu");
@@ -110,8 +118,18 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             sb.Append("//Storyboard Sound Samples\n\n");
 
             sb.Append("[TimingPoints]\n");
-            // time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects
-            sb.Append($"0,{bl},4,1,0,100,1,0\n\n");
+            if (request.TimingPointLines is { Count: > 0 })
+            {
+                // Carry over the source set's timing verbatim (BPM + any SV/kiai points).
+                foreach (string line in request.TimingPointLines)
+                    sb.Append(line).Append('\n');
+                sb.Append('\n');
+            }
+            else
+            {
+                // time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects
+                sb.Append($"0,{bl},4,1,0,100,1,0\n\n");
+            }
 
             sb.Append("[HitObjects]\n");
 

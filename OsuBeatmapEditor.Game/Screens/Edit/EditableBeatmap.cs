@@ -26,6 +26,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Stack leniency (0-1), how aggressively nearby objects stack.</summary>
         public readonly BindableFloat StackLeniency;
 
+        /// <summary>Base slider velocity multiplier ([Difficulty] SliderMultiplier).</summary>
+        public readonly BindableFloat SliderMultiplier;
+
+        /// <summary>Slider tick rate ([Difficulty] SliderTickRate), ticks per beat.</summary>
+        public readonly BindableFloat SliderTickRate;
+
         public readonly BindableBool IsDirty = new BindableBool();
 
         public EditableBeatmap(ParsedBeatmap p, string defaultCreator)
@@ -44,6 +50,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Ar = difficulty(p.EffectiveApproachRate);
             Od = difficulty(p.OverallDifficulty);
             StackLeniency = new BindableFloat(p.StackLeniency) { MinValue = 0f, MaxValue = 1f, Precision = 0.1f };
+            SliderMultiplier = new BindableFloat(p.SliderMultiplier) { MinValue = 0.4f, MaxValue = 3.6f, Precision = 0.1f };
+            SliderTickRate = new BindableFloat(p.SliderTickRate) { MinValue = 1f, MaxValue = 4f, Precision = 1f };
 
             void markDirty() => IsDirty.Value = true;
 
@@ -60,6 +68,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Ar.ValueChanged += _ => markDirty();
             Od.ValueChanged += _ => markDirty();
             StackLeniency.ValueChanged += _ => markDirty();
+            SliderMultiplier.ValueChanged += _ => markDirty();
+            SliderTickRate.ValueChanged += _ => markDirty();
         }
 
         private static BindableFloat difficulty(float value) => new BindableFloat(value)

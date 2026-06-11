@@ -23,9 +23,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         protected override (string name, Func<Drawable> content)[] CreateSections() => new (string, Func<Drawable>)[]
         {
             ("Color", buildColourSection),
+            ("Objects", buildObjectsSection),
             ("Timeline", buildTimelineSection),
             ("Shortcuts", buildShortcutsSection),
         };
+
+        private Drawable buildObjectsSection() => section(
+            colourRow("Combo colour 1", settings.ComboColour1),
+            colourRow("Combo colour 2", settings.ComboColour2),
+            colourRow("Combo colour 3", settings.ComboColour3),
+            colourRow("Combo colour 4", settings.ComboColour4),
+            heightRow("Object background opacity", settings.ObjectBackgroundOpacity),
+            heightRow("Object outline thickness", settings.ObjectBorderThickness),
+            heightRow("Slider tick size", settings.SliderTickSize),
+            heightRow("Past object fade (ms)", settings.ObjectFadeOut));
 
         private Drawable buildTimelineSection() => section(
             colourRow("Measure line", settings.MeasureLineColour),
@@ -37,7 +48,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             heightRow("Quarter line height", settings.QuarterLineHeight));
 
         private Drawable heightRow(string label, BindableFloat value) => SettingsLayout.LabeledRow(label,
-            new NumberBox(value) { Width = 56, Height = 30, Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
+            new NumberBox(value) { Width = 56, Height = EditorTheme.Sizing.InputHeight, Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
 
         private Drawable buildColourSection() => section(
             colourRow("Timing point (BPM)", settings.UninheritedColour),
@@ -51,13 +62,31 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             new SpriteText
             {
                 Text = "Default beatmap creator",
-                Colour = OsuColour.TextMuted,
-                Font = FontUsage.Default.With(size: 14),
+                Colour = EditorTheme.Colours.TextMuted,
+                Font = EditorTheme.Type.Label(),
             },
-            new EditorTextBox(settings.DefaultCreator) { RelativeSizeAxes = Axes.X, Height = 34 },
-            new Container { RelativeSizeAxes = Axes.X, Height = 6 },
-            SettingsLayout.LabeledRow("Play / Pause", new KeyRebindButton(settings.PlayPauseKey)),
-            SettingsLayout.LabeledRow("Exit editor", new KeyRebindButton(settings.ExitKey)));
+            new EditorTextBox(settings.DefaultCreator) { RelativeSizeAxes = Axes.X, Height = EditorTheme.Sizing.InputHeight },
+            new Container { RelativeSizeAxes = Axes.X, Height = EditorTheme.Spacing.Md },
+            shortcutRow("Play / Pause", settings.PlayPauseKey),
+            shortcutRow("Exit editor", settings.ExitKey),
+            shortcutRow("Song setup", settings.SongSetupKey),
+            shortcutRow("Settings", settings.SettingsKey),
+            shortcutRow("Timing points", settings.TimingPointsKey),
+            shortcutRow("Distance snap toggle", settings.DistanceSnapKey),
+            shortcutRow("Convert slider to stream", settings.ConvertStreamKey));
+
+        private Drawable shortcutRow(string label, Bindable<Shortcut> shortcut) => SettingsLayout.LabeledRow(label,
+            new FillFlowContainer
+            {
+                AutoSizeAxes = Axes.Both,
+                Direction = FillDirection.Horizontal,
+                Spacing = new Vector2(8, 0),
+                Children = new Drawable[]
+                {
+                    new KeyRebindButton(shortcut) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
+                    new ResetButton(shortcut.SetDefault) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
+                },
+            });
 
         private Drawable colourRow(string label, Bindable<Colour4> colour) => SettingsLayout.LabeledRow(label,
             new FillFlowContainer
@@ -77,7 +106,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             RelativeSizeAxes = Axes.X,
             AutoSizeAxes = Axes.Y,
             Direction = FillDirection.Vertical,
-            Spacing = new Vector2(0, 10),
+            Spacing = new Vector2(0, EditorTheme.Spacing.Md),
             Children = rows,
         };
     }

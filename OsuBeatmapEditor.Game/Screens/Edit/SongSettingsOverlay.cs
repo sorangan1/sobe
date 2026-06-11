@@ -45,23 +45,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             diffRow("CS", beatmap.Cs),
             diffRow("AR", beatmap.Ar),
             diffRow("OD", beatmap.Od),
-            diffRow("Stack Leniency", beatmap.StackLeniency));
+            diffRow("Stack Leniency", beatmap.StackLeniency),
+            diffRow("Slider Velocity", beatmap.SliderMultiplier),
+            diffRow("Slider Tick Rate", beatmap.SliderTickRate));
 
         private Drawable field(string label, Bindable<string> bindable) => new FillFlowContainer
         {
             RelativeSizeAxes = Axes.X,
             AutoSizeAxes = Axes.Y,
             Direction = FillDirection.Vertical,
-            Spacing = new Vector2(0, 4),
+            Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
             Children = new Drawable[]
             {
                 new SpriteText
                 {
                     Text = label,
-                    Colour = OsuColour.TextMuted,
-                    Font = FontUsage.Default.With(size: 14),
+                    Colour = EditorTheme.Colours.TextMuted,
+                    Font = EditorTheme.Type.Label(),
                 },
-                new EditorTextBox(bindable) { RelativeSizeAxes = Axes.X, Height = 32 },
+                new EditorTextBox(bindable) { RelativeSizeAxes = Axes.X, Height = EditorTheme.Sizing.InputHeight },
             },
         };
 
@@ -70,7 +72,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return new Container
             {
                 RelativeSizeAxes = Axes.X,
-                Height = 40,
+                Height = EditorTheme.Sizing.RowHeight,
                 Children = new Drawable[]
                 {
                     new SpriteText
@@ -78,8 +80,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
                         Text = label,
-                        Colour = OsuColour.Text,
-                        Font = FontUsage.Default.With(size: 16, weight: "SemiBold"),
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.BodyStrong(),
                     },
                     // Type the value directly; two-way bound to the slider below.
                     new NumberBox(bindable)
@@ -87,21 +89,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Anchor = Anchor.CentreRight,
                         Origin = Anchor.CentreRight,
                         Width = 52,
-                        Height = 30,
+                        Height = EditorTheme.Sizing.InputHeight,
                     },
                     new Container
                     {
                         RelativeSizeAxes = Axes.Both,
-                        Padding = new MarginPadding { Left = 50, Right = 64 },
+                        Padding = new MarginPadding { Left = 120, Right = 64 },
                         Child = new BasicSliderBar<float>
                         {
                             Anchor = Anchor.CentreLeft,
                             Origin = Anchor.CentreLeft,
                             RelativeSizeAxes = Axes.X,
-                            Height = 16,
+                            Height = 8,
                             Current = bindable,
-                            BackgroundColour = OsuColour.Surface,
-                            SelectionColour = OsuColour.Pink,
+                            BackgroundColour = EditorTheme.Colours.Sunken,
+                            SelectionColour = EditorTheme.Colours.Accent,
                         },
                     },
                 },
@@ -113,7 +115,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             RelativeSizeAxes = Axes.X,
             AutoSizeAxes = Axes.Y,
             Direction = FillDirection.Vertical,
-            Spacing = new Vector2(0, 12),
+            Spacing = new Vector2(0, EditorTheme.Spacing.Lg),
             Children = rows,
         };
     }

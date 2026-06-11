@@ -3,39 +3,41 @@ using osuTK.Graphics;
 namespace OsuBeatmapEditor.Game.Graphics
 {
     /// <summary>
-    /// Central palette for the editor, following the osu!lazer dark aesthetic.
-    /// Kept as a small set of named constants so the look stays consistent across components.
+    /// Legacy palette shim. The named entries now forward to the design tokens in <see cref="EditorTheme"/>
+    /// so the whole app shares one neutral pro-tool palette; new/edited UI should reference
+    /// <see cref="EditorTheme"/> directly (see docs/design-guide.md). Only the beatmap-content colours
+    /// (<see cref="ComboColours"/>, <see cref="Purple"/>) remain native here - they are map content, not chrome.
     /// </summary>
     public static class OsuColour
     {
-        /// <summary>The signature osu! pink accent (#FF66AB).</summary>
-        public static readonly Color4 Pink = fromHex(0xFF66AB);
+        /// <summary>Brand accent (osu! pink). Maps to <see cref="EditorTheme.Colours.Accent"/>.</summary>
+        public static readonly Color4 Pink = EditorTheme.Colours.Accent;
 
-        /// <summary>A darker pink used for pressed / active states (#CC5088).</summary>
-        public static readonly Color4 PinkDark = fromHex(0xCC5088);
+        /// <summary>Pressed accent. Maps to <see cref="EditorTheme.Colours.AccentPressed"/>.</summary>
+        public static readonly Color4 PinkDark = EditorTheme.Colours.AccentPressed;
 
-        /// <summary>Secondary purple accent (#AF59FF).</summary>
+        /// <summary>Secondary purple accent (spinner decoration - map content, kept native) (#AF59FF).</summary>
         public static readonly Color4 Purple = fromHex(0xAF59FF);
 
-        /// <summary>Selection highlight (#FFD23F).</summary>
-        public static readonly Color4 Yellow = fromHex(0xFFD23F);
+        /// <summary>Selection highlight. Maps to <see cref="EditorTheme.Colours.Selection"/>.</summary>
+        public static readonly Color4 Yellow = EditorTheme.Colours.Selection;
 
-        /// <summary>Deep background, near-black with a blue/purple tint (#1A1A2E).</summary>
-        public static readonly Color4 BackgroundDark = fromHex(0x1A1A2E);
+        /// <summary>Deepest surface. Maps to <see cref="EditorTheme.Colours.Sunken"/>.</summary>
+        public static readonly Color4 BackgroundDark = EditorTheme.Colours.Sunken;
 
-        /// <summary>Slightly lighter background for raised surfaces / panels (#26263F).</summary>
-        public static readonly Color4 BackgroundRaised = fromHex(0x26263F);
+        /// <summary>Raised panel surface. Maps to <see cref="EditorTheme.Colours.Raised"/>.</summary>
+        public static readonly Color4 BackgroundRaised = EditorTheme.Colours.Raised;
 
-        /// <summary>Neutral surface used for idle buttons (#33334D).</summary>
-        public static readonly Color4 Surface = fromHex(0x33334D);
+        /// <summary>Idle control surface. Maps to <see cref="EditorTheme.Colours.Control"/>.</summary>
+        public static readonly Color4 Surface = EditorTheme.Colours.Control;
 
-        /// <summary>Primary text colour (#F0F0F5).</summary>
-        public static readonly Color4 Text = fromHex(0xF0F0F5);
+        /// <summary>Primary text. Maps to <see cref="EditorTheme.Colours.Text"/>.</summary>
+        public static readonly Color4 Text = EditorTheme.Colours.Text;
 
-        /// <summary>Muted / secondary text colour (#9090A8).</summary>
-        public static readonly Color4 TextMuted = fromHex(0x9090A8);
+        /// <summary>Muted text. Maps to <see cref="EditorTheme.Colours.TextMuted"/>.</summary>
+        public static readonly Color4 TextMuted = EditorTheme.Colours.TextMuted;
 
-        /// <summary>The four default combo colours, cycled per new combo. Chosen to be vivid yet easy on the eyes.</summary>
+        /// <summary>The four default combo colours, cycled per new combo (map content, kept native).</summary>
         public static readonly Color4[] ComboColours =
         {
             fromHex(0xFF7FA3), // soft pink

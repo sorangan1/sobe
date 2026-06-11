@@ -40,18 +40,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Origin = Anchor.Centre,
                     Size = new Vector2(460, 200),
                     Masking = true,
-                    CornerRadius = 12,
+                    CornerRadius = EditorTheme.Radius.Lg,
                     Children = new Drawable[]
                     {
-                        new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundRaised },
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Overlay },
                         new SpriteText
                         {
                             Anchor = Anchor.TopCentre,
                             Origin = Anchor.TopCentre,
                             Margin = new MarginPadding { Top = 36 },
                             Text = "You have unsaved changes.",
-                            Colour = OsuColour.Text,
-                            Font = FontUsage.Default.With(size: 22, weight: "SemiBold"),
+                            Colour = EditorTheme.Colours.Text,
+                            Font = EditorTheme.Type.Title(),
                         },
                         new FillFlowContainer
                         {

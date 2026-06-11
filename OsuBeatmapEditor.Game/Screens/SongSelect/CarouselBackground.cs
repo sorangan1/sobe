@@ -28,7 +28,9 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             return new Container
             {
                 RelativeSizeAxes = Axes.Both,
-                Masking = true,
+                // No Masking here: the parent card already masks (with its corner radius). A second masking
+                // layer adds its own anti-aliased edge that doesn't line up with the card's, leaving a 1px
+                // seam of undimmed background along the top. Letting the card do the clipping removes it.
                 Children = new Drawable[]
                 {
                     new Sprite

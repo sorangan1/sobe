@@ -36,8 +36,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
                         Text = label,
-                        Colour = OsuColour.Text,
-                        Font = FontUsage.Default.With(size: 17, weight: "SemiBold"),
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.Body(),
                     },
                     control,
                 },
@@ -109,11 +109,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public ColourSwatch(Bindable<Colour4> colour)
         {
             this.colour = colour;
-            Size = new Vector2(64, 26);
+            Size = new Vector2(64, EditorTheme.Sizing.InputHeight);
             Masking = true;
-            CornerRadius = 4;
-            BorderThickness = 2;
-            BorderColour = OsuColour.TextMuted;
+            CornerRadius = EditorTheme.Radius.Sm;
+            BorderThickness = EditorTheme.Sizing.BorderThickness;
+            BorderColour = EditorTheme.Colours.Border;
         }
 
         [BackgroundDependencyLoader]
@@ -147,9 +147,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public ResetButton(Action action)
         {
             Action = action;
-            Size = new Vector2(58, 26);
+            Size = new Vector2(58, EditorTheme.Sizing.InputHeight);
             Masking = true;
-            CornerRadius = 4;
+            CornerRadius = EditorTheme.Radius.Md;
         }
 
         [BackgroundDependencyLoader]
@@ -157,45 +157,49 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Children = new Drawable[]
             {
-                background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                 new SpriteText
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
                     Text = "Reset",
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 13, weight: "SemiBold"),
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.Label(),
                 },
             };
         }
 
         protected override bool OnHover(HoverEvent e)
         {
-            background.FadeColour(OsuColour.BackgroundRaised, 100);
+            background.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             return base.OnHover(e);
         }
 
         protected override void OnHoverLost(HoverLostEvent e)
         {
-            background.FadeColour(OsuColour.Surface, 100);
+            background.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             base.OnHoverLost(e);
         }
     }
 
-    /// <summary>Button that rebinds a keyboard shortcut: click, then press the desired key.</summary>
+    /// <summary>
+    /// Button that rebinds a keyboard shortcut: click, then press the desired combination. Modifier keys
+    /// (Ctrl/Shift/Alt) held while pressing a normal key are captured as part of the shortcut - pressing a
+    /// modifier alone just waits for the main key. Escape cancels without changing the binding.
+    /// </summary>
     public partial class KeyRebindButton : ClickableContainer
     {
-        private readonly Bindable<Key> key;
+        private readonly Bindable<Shortcut> shortcut;
         private Box background = null!;
         private SpriteText text = null!;
         private bool listening;
 
-        public KeyRebindButton(Bindable<Key> key)
+        public KeyRebindButton(Bindable<Shortcut> shortcut)
         {
-            this.key = key;
-            Size = new Vector2(150, 30);
+            this.shortcut = shortcut;
+            Size = new Vector2(150, EditorTheme.Sizing.RowHeight);
             Masking = true;
-            CornerRadius = 4;
+            CornerRadius = EditorTheme.Radius.Md;
         }
 
         public override bool AcceptsFocus => true;
@@ -205,25 +209,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Children = new Drawable[]
             {
-                background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                 text = new SpriteText
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 15, weight: "SemiBold"),
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.BodyStrong(),
                 },
             };
 
-            key.BindValueChanged(_ => updateText(), true);
+            shortcut.BindValueChanged(_ => updateText(), true);
         }
 
-        private void updateText() => text.Text = listening ? "Press a key..." : key.Value.ToString();
+        private void updateText()
+        {
+            text.Text = listening ? "Press keys..." : shortcut.Value.ToString();
+            text.Colour = listening ? EditorTheme.Colours.TextMuted : EditorTheme.Colours.Text;
+        }
 
         protected override bool OnClick(ClickEvent e)
         {
+            // Listening state: a soft accent tint + accent border - NOT the solid accent fill, which is
+            // reserved for primary/active controls (design system: the accent isn't a generic highlight).
             listening = true;
-            background.Colour = OsuColour.Pink;
+            background.Colour = EditorTheme.Colours.AccentSoft;
+            BorderThickness = EditorTheme.Sizing.BorderThickness;
+            BorderColour = EditorTheme.Colours.Accent;
             updateText();
             return true;
         }
@@ -233,8 +245,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!listening)
                 return false;
 
+            // Wait for a non-modifier key, then capture it together with whatever modifiers are held.
+            if (Shortcut.IsModifierKey(e.Key))
+                return true;
+
             if (e.Key != Key.Escape)
-                key.Value = e.Key;
+                shortcut.Value = new Shortcut(e.Key, e.ControlPressed, e.ShiftPressed, e.AltPressed);
 
             stopListening();
             return true;
@@ -249,7 +265,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void stopListening()
         {
             listening = false;
-            background.Colour = OsuColour.Surface;
+            background.Colour = EditorTheme.Colours.Control;
+            BorderThickness = 0;
             updateText();
         }
     }

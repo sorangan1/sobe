@@ -19,6 +19,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         {
             public string Title = "", TitleUnicode = "", Artist = "", ArtistUnicode = "", Creator = "", Version = "", Source = "", Tags = "";
             public float Hp, Cs, Ar, Od, StackLeniency = 0.7f;
+            public float SliderMultiplier = 1.4f, SliderTickRate = 1f;
         }
 
         public static bool Save(BeatmapSetModel set, BeatmapDifficultyModel difficulty, ParsedBeatmap parsed, Edits edits)
@@ -34,7 +35,20 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 .Where(l => !string.IsNullOrEmpty(l))
                 .ToList();
 
-            string patched = patch(File.ReadAllLines(osuPath), edits, hitObjectLines);
+            // Re-emit the timing points (red/green stable lines) so add/delete/edit persist; the lazer
+            // importer translates them into its own per-property control points on import.
+            var timingPointLines = parsed.TimingPointModels
+                .OrderBy(tp => tp.Time)
+                .Select(TimingPointLineEditor.Encode)
+                .ToList();
+
+            // The [Editor] Bookmarks line, re-emitted from the (possibly edited) bookmark list, or null when
+            // there are none (then the line is dropped on save).
+            string? bookmarksLine = parsed.Bookmarks.Count > 0
+                ? "Bookmarks: " + string.Join(",", parsed.Bookmarks)
+                : null;
+
+            string patched = patch(File.ReadAllLines(osuPath), edits, hitObjectLines, timingPointLines, bookmarksLine);
 
             // Which stored file is the difficulty we edited (so we replace its content, keep the rest).
             string? editedFile = null;
@@ -87,10 +101,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return LazerImporter.Import(oszPath);
         }
 
-        private static string patch(string[] lines, Edits e, IReadOnlyList<string> hitObjectLines)
+        private static string patch(string[] lines, Edits e, IReadOnlyList<string> hitObjectLines, IReadOnlyList<string> timingPointLines, string? bookmarksLine)
         {
             var sb = new StringBuilder();
             string section = string.Empty;
+            bool editorSectionSeen = false;
 
             foreach (string raw in lines)
             {
@@ -98,6 +113,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
                 {
                     section = trimmed[1..^1];
+                    if (section == "Editor")
+                        editorSectionSeen = true;
                     sb.Append(raw).Append('\n');
 
                     // Replace the entire hit-object body with the current (edited) lines.
@@ -107,11 +124,26 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                             sb.Append(hitObject).Append('\n');
                     }
 
+                    // Replace the entire timing-point body with the current (edited) lines.
+                    if (section == "TimingPoints")
+                    {
+                        foreach (string timingPoint in timingPointLines)
+                            sb.Append(timingPoint).Append('\n');
+                    }
+
+                    // Re-emit the (possibly edited) bookmarks at the top of the [Editor] section.
+                    if (section == "Editor" && bookmarksLine != null)
+                        sb.Append(bookmarksLine).Append('\n');
+
                     continue;
                 }
 
-                // Skip the original hit-object lines; they were re-emitted under the header above.
-                if (section == "HitObjects")
+                // Skip the original hit-object / timing-point lines; they were re-emitted under the header.
+                if (section == "HitObjects" || section == "TimingPoints")
+                    continue;
+
+                // Skip the original Bookmarks line; the current one was re-emitted under the [Editor] header.
+                if (section == "Editor" && trimmed.StartsWith("Bookmarks", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 sb.Append(section switch
@@ -123,6 +155,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 });
                 sb.Append('\n');
             }
+
+            // If the file had no [Editor] section but we have bookmarks, add one so they persist.
+            if (!editorSectionSeen && bookmarksLine != null)
+                sb.Append("\n[Editor]\n").Append(bookmarksLine).Append('\n');
 
             return sb.ToString();
         }
@@ -160,6 +196,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 "CircleSize" => $"CircleSize:{num(e.Cs)}",
                 "OverallDifficulty" => $"OverallDifficulty:{num(e.Od)}",
                 "ApproachRate" => $"ApproachRate:{num(e.Ar)}",
+                "SliderMultiplier" => $"SliderMultiplier:{num(e.SliderMultiplier)}",
+                "SliderTickRate" => $"SliderTickRate:{num(e.SliderTickRate)}",
                 _ => line,
             };
         }

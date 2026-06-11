@@ -23,7 +23,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
     /// </summary>
     public partial class SliderControlPointVisualiser : CompositeDrawable
     {
+        /// <summary>Raised when an edge node is clicked: its node index (0 = head, <c>Slides</c> = tail).</summary>
+        public Action<int>? PartNodeClicked;
+
+        /// <summary>Raised when the slider body (not a handle or edge node) is single-clicked.</summary>
+        public Action? BodyClicked;
+
         private readonly int sliderId;
+        private readonly int tailNodeIndex;
         private readonly float diameter;
         private readonly IEditorActions actions;
         private readonly double pixelLength;
@@ -39,6 +46,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public SliderControlPointVisualiser(HitObjectModel slider, float diameter, IEditorActions actions)
         {
             sliderId = slider.Id;
+            tailNodeIndex = Math.Max(1, slider.Slides);
             this.diameter = diameter;
             this.actions = actions;
             controlPoints = slider.ControlPoints!.ToList();
@@ -81,6 +89,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Moved = handleMoved,
                     Toggled = handleToggled,
                     RightClicked = handleRightClicked,
+                    Clicked = pieceClicked,
                 };
                 pieces.Add(piece);
                 pieceLayer.Add(piece);
@@ -119,7 +128,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             showPreview();
 
             if (finished)
+            {
                 actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
+                actions.ClearSliderPreview();
+            }
+            else
+            {
+                // Show, in real time, how long the reshaped slider will occupy on the top timeline.
+                actions.PreviewSliderResize(sliderId, controlPoints.ToArray());
+            }
         }
 
         /// <summary>Double-click a handle: toggle whether it starts a new segment (a sharp corner).</summary>
@@ -170,10 +187,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return SliderPathType.Bezier;
         }
 
-        /// <summary>Double-clicking the slider body (not a handle) inserts a control point on the nearest polygon segment.</summary>
+        /// <summary>A single click on a handle selects its edge node (head/tail) for the two-stage part selection.</summary>
+        private void pieceClicked(int index)
+        {
+            if (index == 0)
+                PartNodeClicked?.Invoke(0);
+            else if (index == controlPoints.Count - 1)
+                PartNodeClicked?.Invoke(tailNodeIndex);
+            // Intermediate anchors aren't edge nodes; a click just keeps the slider selected.
+        }
+
+        /// <summary>
+        /// Click handling on the body (clicks on a handle go to the piece itself): a click on the head/tail
+        /// circle selects that edge node; a single click on the body selects the body part; a double-click on
+        /// the body inserts a control point on the nearest polygon segment.
+        /// </summary>
         protected override bool OnClick(ClickEvent e)
         {
             Vector2 pos = clamp(ToLocalSpace(e.ScreenSpaceMousePosition));
+
+            // The head/tail circle is larger than its handle, so cover the circle area for edge-node selection.
+            // The tail sits at the rendered path end (not the last control point, which a length trim can move).
+            var path = SliderGeometry.ComputePath(controlPoints, pixelLength);
+            float nodeRadius = diameter / 2f;
+            if (Vector2.Distance(pos, controlPoints[0].Position) <= nodeRadius)
+            {
+                PartNodeClicked?.Invoke(0);
+                return true;
+            }
+            if (path.Count > 0 && Vector2.Distance(pos, path[^1]) <= nodeRadius)
+            {
+                PartNodeClicked?.Invoke(tailNodeIndex);
+                return true;
+            }
 
             if (!nearPath(pos, Math.Max(8f, diameter / 2f)))
                 return false; // clicks away from the body fall through to the playfield
@@ -188,8 +234,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 controlPoints.Insert(insertAt, new SliderControlPoint(pos));
                 actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
             }
+            else
+            {
+                BodyClicked?.Invoke(); // selecting the body part keeps this slider selected
+            }
 
-            return true; // a single click on the body keeps this slider selected
+            return true;
         }
 
         private int nearestSegmentIndex(Vector2 p)
@@ -221,10 +271,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return false;
         }
 
-        /// <summary>Live preview of the reshaped slider body (full control-polygon length, as the commit will resize to).</summary>
+        /// <summary>
+        /// Live preview of the reshaped slider body using the TICK-SNAPPED length (exactly what the commit will
+        /// produce), so the mapper sees the real-time size snapping as they drag - not the raw control polygon.
+        /// </summary>
         private void showPreview()
         {
-            var path = SliderGeometry.ComputePath(controlPoints);
+            var path = actions.SnappedSliderPath(sliderId, controlPoints.ToArray());
             if (path.Count < 2)
             {
                 preview.Alpha = 0;
@@ -254,6 +307,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             public Action<int, Vector2, bool>? Moved;
             public Action<int>? Toggled;
             public Action<int>? RightClicked;
+            public Action<int>? Clicked;
 
             private readonly int index;
             private readonly Box fill;
@@ -299,6 +353,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 double now = Time.Current;
                 if (now - lastClickTime < 250)
                     Toggled?.Invoke(index);
+                else
+                    Clicked?.Invoke(index);
                 lastClickTime = now;
                 return true; // swallow so the playfield doesn't treat it as an empty-space click
             }

@@ -1,6 +1,7 @@
 using System;
 using osu.Framework.Allocation;
 using osu.Framework.Graphics;
+using osu.Framework.Graphics.Colour;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Shapes;
@@ -12,15 +13,19 @@ using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.UI;
 using osuTK;
+using osuTK.Graphics;
 
 namespace OsuBeatmapEditor.Game.Screens.SongSelect
 {
     /// <summary>
     /// A small, selectable card representing a single difficulty within a multi-difficulty set.
     /// </summary>
-    public partial class BeatmapDiffPanel : ClickableContainer, IHasContextMenu
+    public partial class BeatmapDiffPanel : ClickableContainer, ICarouselPanel, IHasContextMenu
     {
         public const float PANEL_HEIGHT = 44;
+
+        /// <summary>Right-click menu entries; set by the carousel when the card is realised.</summary>
+        public MenuItem[] ContextMenuItems { get; set; } = Array.Empty<MenuItem>();
 
         private readonly BeatmapSetModel set;
         private readonly BeatmapDifficultyModel difficulty;
@@ -31,13 +36,6 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         private bool selected;
 
-        /// <summary>Invoked by the "Edit" context-menu item.</summary>
-        public Action? EditAction;
-
-        public MenuItem[] ContextMenuItems => EditAction == null
-            ? Array.Empty<MenuItem>()
-            : new MenuItem[] { new MenuItem("Edit", EditAction) };
-
         public BeatmapDiffPanel(BeatmapSetModel set, BeatmapDifficultyModel difficulty, LargeTextureStore? textures = null)
         {
             this.set = set;
@@ -47,7 +45,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             RelativeSizeAxes = Axes.X;
             Height = PANEL_HEIGHT;
             Masking = true;
-            CornerRadius = 5;
+            CornerRadius = 6;
         }
 
         [BackgroundDependencyLoader]
@@ -61,6 +59,18 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     Colour = OsuColour.BackgroundRaised,
                 },
                 CarouselBackground.TryCreate(textures, set, difficulty.BackgroundFile) ?? Empty(),
+                // A short tint band on the right edge in this difficulty's star-rating colour (fading in from
+                // transparent), leaving the left - where the star pill and name sit - untinted.
+                new Box
+                {
+                    Anchor = Anchor.CentreRight,
+                    Origin = Anchor.CentreRight,
+                    RelativeSizeAxes = Axes.Both,
+                    Width = 0.32f,
+                    Colour = ColourInfo.GradientHorizontal(
+                        difficultyColour(0f),
+                        difficultyColour(0.7f)),
+                },
                 new FillFlowContainer
                 {
                     Anchor = Anchor.CentreLeft,
@@ -92,12 +102,23 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 {
                     RelativeSizeAxes = Axes.Both,
                     Masking = true,
+                    CornerRadius = 6,
                     BorderThickness = 3,
                     BorderColour = OsuColour.Yellow,
                     Alpha = 0,
                     Child = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Yellow, Alpha = 0, AlwaysPresent = true },
                 },
             };
+        }
+
+        /// <summary>How far a selected card slides left to read as selected (cards are right-anchored).</summary>
+        private const float selected_shift = 14;
+
+        /// <summary>This difficulty's star-rating colour at the given alpha.</summary>
+        private Color4 difficultyColour(float alpha)
+        {
+            var c = StarRatingColour.For(difficulty.StarRating);
+            return new Color4(c.R, c.G, c.B, alpha);
         }
 
         public void SetSelected(bool value)
@@ -108,6 +129,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             selected = value;
             selectionOutline.FadeTo(value ? 1 : 0, 150, Easing.OutQuint);
             background.FadeColour(value ? OsuColour.Surface : OsuColour.BackgroundRaised, 150, Easing.OutQuint);
+            this.MoveToX(value ? -selected_shift : 0, 200, Easing.OutQuint);
         }
 
         protected override bool OnHover(HoverEvent e)

@@ -54,5 +54,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
         /// <summary>This difficulty's background image filename (from its metadata). Empty if none.</summary>
         public string BackgroundFile { get; init; } = string.Empty;
+
+        /// <summary>This difficulty's audio filename (from its metadata). Empty if none.</summary>
+        public string AudioFile { get; init; } = string.Empty;
+
+        /// <summary>Mapper-chosen preview point in milliseconds, or -1 if unset.</summary>
+        public int PreviewTime { get; init; } = -1;
     }
 }

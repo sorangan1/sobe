@@ -5,6 +5,7 @@ using osu.Framework.Allocation;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Lines;
+using osu.Framework.Graphics.Primitives;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
@@ -30,12 +31,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Supplies the beat-snapped current time (for the placement preview's combo number).</summary>
         public Func<double>? SnappedTimeSource;
 
+        /// <summary>Resolves where a circle placement at a cursor position would actually land (distance/magnetic snap).</summary>
+        public Func<Vector2, Vector2>? PlacementSnap;
+
+        /// <summary>Spacing (osu!pixels) between slider ticks for a given slider, honouring tempo/SV/tick-rate; 0 = none.</summary>
+        public Func<HitObjectModel, double>? SliderTickDistance;
+
 
         [Resolved]
         private EditorSelection selection { get; set; } = null!;
 
         [Resolved]
+        private NodeSelection nodeSelection { get; set; } = null!;
+
+        [Resolved]
         private IEditorActions actions { get; set; } = null!;
+
+        [Resolved]
+        private EditorSettings settings { get; set; } = null!;
 
         private bool moving;
         private Vector2 moveStart;
@@ -43,8 +56,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Rubber-band box-select state.
         private bool boxSelecting;
         private Vector2 boxStart;
+        private Vector2 boxCurrent;
         private Box? selectionBox;
         private HashSet<int> dragBaseline = new HashSet<int>();
+        // Objects picked by the box so far. Box selection accumulates: while the box is held during playback,
+        // objects that fade in inside it are added and never removed as they fade out again.
+        private HashSet<int> boxSelected = new HashSet<int>();
 
         // Grid sizes (osu!pixels) cycled by the G key, matching osu!lazer's editor; 0 = grid off.
         private static readonly float[] grid_sizes = { 4f, 8f, 16f, 32f, 0f };
@@ -70,11 +87,31 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private IReadOnlyList<HitObjectModel> currentHitObjects = Array.Empty<HitObjectModel>();
         private float currentDiameter = 40f;
 
+        // Each live follow-point connection plus the endpoints/ids it was built from, so a position drag can
+        // recreate just the connections touching the selection instead of rebuilding the whole map (which lags).
+        private sealed class FollowPointConnection
+        {
+            public int FromId, ToId;
+            public Vector2 BaseStart, BaseEnd;
+            public double StartTime, EndTime;
+            public DrawableFollowPoints Drawable = null!;
+        }
+
+        private readonly List<FollowPointConnection> followPoints = new List<FollowPointConnection>();
+
         /// <summary>Whether the circle-placement tool is armed (a ghost circle follows the cursor).</summary>
         public bool PlacementActive { get; private set; }
 
         /// <summary>Whether the slider-placement tool is armed (drag from head to tail to create a linear slider).</summary>
         public bool SliderPlacementActive { get; private set; }
+
+        /// <summary>Whether the spinner-placement tool is armed (click to start, scrub forward, click/right-click to end).</summary>
+        public bool SpinnerPlacementActive { get; private set; }
+
+        // Spinner build state: a left-click starts it at the current time; the end follows the playhead as the
+        // user scrubs forward; a left- or right-click commits it. Mirrors osu!lazer's SpinnerPlacementBlueprint.
+        private bool buildingSpinner;
+        private CircularContainer? spinnerGhost;
 
         /// <summary>Whether the next placed object will start a new combo (toggled with Q).</summary>
         public bool NewComboArmed { get; set; }
@@ -88,6 +125,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // Live control-point editor for the currently-selected single slider.
         private SliderControlPointVisualiser? controlPoints;
+
+        // Transform box (rotate/scale/flip), shown while Shift is held with a selection.
+        private SelectionBox? transformBox;
+        private bool transforming;
 
         /// <summary>True while a slider is being traced (head placed, awaiting more anchors / finish).</summary>
         public bool BuildingSlider => buildingSlider;
@@ -141,6 +182,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void load()
         {
             selection.Changed += updateSelection;
+            nodeSelection.Changed += updateSelection;
+
+            // Rebuild all objects live when the relevant appearance settings change.
+            settings.ObjectBackgroundOpacity.ValueChanged += _ => rebuildAppearance();
+            settings.ObjectBorderThickness.ValueChanged += _ => rebuildAppearance();
+            settings.SliderTickSize.ValueChanged += _ => rebuildAppearance();
+            settings.ObjectFadeOut.ValueChanged += _ => rebuildAppearance();
+            foreach (var combo in settings.ComboColours)
+                combo.ValueChanged += _ => rebuildAppearance();
+        }
+
+        /// <summary>
+        /// Forces every hit-object drawable to be recreated. Used when a global value that the incremental
+        /// sync can't see in the per-object models changes (e.g. slider tick rate / velocity affect the ticks).
+        /// </summary>
+        public void RebuildObjects() => rebuildAppearance();
+
+        /// <summary>Rebuilds every hit-object drawable so appearance-setting changes take effect immediately.</summary>
+        private void rebuildAppearance()
+        {
+            if (currentHitObjects.Count == 0)
+                return;
+
+            hitObjectContainer.Clear();
+            drawableMap.Clear();
+            modelMap.Clear();
+            SetHitObjects(currentHitObjects, currentDiameter, lastPreempt);
         }
 
         /// <summary>The cursor's position in osu!pixels, if it is currently over the play area.</summary>
@@ -158,6 +226,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             osuPosition = local;
             return true;
+        }
+
+        /// <summary>
+        /// Whether the object with the given id is currently on-screen: the playback time lies within its
+        /// approach+active window (StartTime - preempt .. end). Time-based (not the drawable's interpolated
+        /// alpha) so it stays consistent with callers that snap against the same <see cref="TimeSource"/>.
+        /// </summary>
+        public bool IsObjectVisible(int id)
+        {
+            double t = TimeSource?.Invoke() ?? 0;
+
+            foreach (var o in currentHitObjects)
+            {
+                if (o.Id != id)
+                    continue;
+
+                // Match what's actually drawn (and what selection treats as hittable): the approach window
+                // plus the configurable fade-out tail, so a passed object stays snappable while it lingers.
+                double end = o.StartTime + (o.Kind is HitObjectKind.Slider or HitObjectKind.Spinner ? o.Duration : 0);
+                return t >= o.StartTime - lastPreempt && t <= end + settings.ObjectFadeOut.Value;
+            }
+
+            return false;
         }
 
         /// <summary>The top-most currently-visible object under an osu!pixel position, or null.</summary>
@@ -178,6 +269,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (e.Button == MouseButton.Right && buildingSlider)
             {
                 finishSlider();
+                return true;
+            }
+
+            // While placing a spinner, right-click commits it (ending at the current playhead time).
+            if (e.Button == MouseButton.Right && buildingSpinner)
+            {
+                finishSpinner();
                 return true;
             }
 
@@ -216,6 +314,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Spinner tool: the first left-click starts the spinner at the current time; a second left-click
+            // commits it (the end having followed the playhead). Right-click also commits (handled above).
+            if (SpinnerPlacementActive)
+            {
+                if (!buildingSpinner)
+                {
+                    buildingSpinner = true;
+                    setSpinnerGhostActive(true);
+                    actions.BeginSpinnerPlacement();
+                }
+                else
+                {
+                    finishSpinner();
+                }
+
+                return true;
+            }
+
             // With the placement tool armed, a left-click drops a circle at the cursor instead of selecting.
             if (PlacementActive)
             {
@@ -232,13 +348,23 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (o != null)
             {
                 if (e.ControlPressed)
+                {
                     selection.Toggle(o.Id);
+                    nodeSelection.Clear();
+                }
                 else
+                {
+                    // Two-stage selection: the first click selects the whole object. Selecting an individual
+                    // slider part (head / tail / body) is only possible once the slider is the sole selection,
+                    // and is handled by the SliderControlPointVisualiser that appears in that state.
                     selection.SetSingle(o.Id);
+                    nodeSelection.Clear();
+                }
             }
             else if (!e.ControlPressed)
             {
                 selection.Clear();
+                nodeSelection.Clear();
             }
 
             return true;
@@ -251,6 +377,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // Slider tool: consume drags so they don't box-select; the anchor is added on release.
             if (SliderPlacementActive)
+                return true;
+
+            // Spinner tool: a drag shouldn't box-select; placement is click-based.
+            if (SpinnerPlacementActive)
                 return true;
 
             if (PlacementActive)
@@ -275,6 +405,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             boxSelecting = true;
             boxStart = start;
             dragBaseline = e.ControlPressed ? new HashSet<int>(selection.Selected) : new HashSet<int>();
+            boxSelected = new HashSet<int>(dragBaseline);
 
             overlayLayer.Add(selectionBox = new Box
             {
@@ -369,6 +500,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             sliderAnchors.Clear();
             sliderPreview?.Expire();
             sliderPreview = null;
+            actions.ClearSliderPreview();
         }
 
         private static Vector2 clampToPlayfield(Vector2 p) => new Vector2(
@@ -377,6 +509,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private void updateBoxSelection(Vector2 current)
         {
+            boxCurrent = current;
+
             Vector2 min = Vector2.ComponentMin(boxStart, current);
             Vector2 max = Vector2.ComponentMax(boxStart, current);
 
@@ -386,8 +520,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 selectionBox.Size = max - min;
             }
 
-            // Select only currently-visible objects whose head lies inside the box, plus the CTRL baseline.
-            var picked = new HashSet<int>(dragBaseline);
+            // Accumulate: add every currently-visible object whose head lies inside the box, and never remove.
+            // Re-run each frame (from Update) so that while the box is held during playback, objects that fade
+            // in inside it get picked up - and ones that fade out stay selected.
             foreach (var o in objects)
             {
                 if (!o.IsHittable)
@@ -395,10 +530,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 Vector2 head = o.HeadPosition;
                 if (head.X >= min.X && head.X <= max.X && head.Y >= min.Y && head.Y <= max.Y)
-                    picked.Add(o.Id);
+                    boxSelected.Add(o.Id);
             }
 
-            selection.SetRange(picked);
+            selection.SetRange(boxSelected);
         }
 
         /// <summary>Advances to the next grid size (G key), wrapping back to the start.</summary>
@@ -457,6 +592,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (active)
             {
                 SliderPlacementActive = false;
+                SetSpinnerPlacementActive(false);
                 cancelSliderBuild();
                 selection.Clear();
             }
@@ -464,6 +600,82 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 placementPreview.Alpha = 0;
             }
+        }
+
+        /// <summary>Arms or disarms the spinner-placement tool, clearing the selection when arming.</summary>
+        public void SetSpinnerPlacementActive(bool active)
+        {
+            if (SpinnerPlacementActive == active)
+                return;
+
+            SpinnerPlacementActive = active;
+            NewComboArmed = false;
+            cancelSpinnerBuild();
+
+            if (active)
+            {
+                PlacementActive = false;
+                SliderPlacementActive = false;
+                cancelSliderBuild();
+                selection.Clear();
+                setSpinnerGhostActive(false); // visible-but-dim ghost shows the spinner area until placement starts
+                ensureSpinnerGhost();
+            }
+            else
+            {
+                placementPreview.Alpha = 0;
+                spinnerGhost?.Expire();
+                spinnerGhost = null;
+            }
+        }
+
+        /// <summary>Discards the in-progress spinner placement.</summary>
+        public void CancelSpinnerBuild() => cancelSpinnerBuild();
+
+        private void cancelSpinnerBuild()
+        {
+            if (!buildingSpinner)
+                return;
+
+            buildingSpinner = false;
+            actions.CancelSpinnerPlacement();
+            setSpinnerGhostActive(false);
+        }
+
+        private void finishSpinner()
+        {
+            if (!buildingSpinner)
+                return;
+
+            buildingSpinner = false;
+            actions.FinishSpinnerPlacement();
+            setSpinnerGhostActive(false); // stays armed (dim ghost) for the next spinner
+        }
+
+        /// <summary>Creates the centred spinner ghost ring if the tool is armed and it isn't already shown.</summary>
+        private void ensureSpinnerGhost()
+        {
+            if (spinnerGhost != null)
+                return;
+
+            const float radius = 130f; // matches DrawableHitObject's spinner disc
+            overlayLayer.Add(spinnerGhost = new CircularContainer
+            {
+                Position = new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f),
+                Origin = Anchor.Centre,
+                Size = new Vector2(radius * 2),
+                Masking = true,
+                BorderThickness = 4,
+                BorderColour = OsuColour.Pink,
+                Alpha = 0.4f,
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.Transparent, AlwaysPresent = true },
+            });
+        }
+
+        private void setSpinnerGhostActive(bool building)
+        {
+            ensureSpinnerGhost();
+            spinnerGhost?.FadeTo(building ? 0.85f : 0.4f, 150, Easing.OutQuint);
         }
 
         /// <summary>Arms or disarms the slider-placement tool, clearing the selection when arming.</summary>
@@ -476,6 +688,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (active)
             {
                 PlacementActive = false;
+                SetSpinnerPlacementActive(false);
                 selection.Clear();
             }
             else
@@ -522,7 +735,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (drawableMap.TryGetValue(o.Id, out var existing))
                     hitObjectContainer.Remove(existing);
 
-                var drawable = new DrawableHitObject(o, circleDiameter, preempt);
+                double tick = o.Kind == HitObjectKind.Slider ? SliderTickDistance?.Invoke(o) ?? 0 : 0;
+                var drawable = new DrawableHitObject(o, circleDiameter, preempt, settings.ObjectFadeOut.Value, tick);
                 drawableMap[o.Id] = drawable;
                 modelMap[o.Id] = o;
                 hitObjectContainer.Add(drawable);
@@ -574,6 +788,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             selectionLayer.Position = osuOffset;
+
+            // Keep the slider's control-point handles glued to the body as it is dragged.
+            if (controlPoints != null)
+                controlPoints.Position = osuOffset;
+
+            // Keep the follow-point chain glued to the moving objects (only the touched connections update).
+            previewFollowPoints(osuOffset);
         }
 
         /// <summary>
@@ -594,10 +815,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     continue;
 
                 Vector2 stack = DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
-                selectionLayer.Add(selectionRing(startPosition(o) + stack));
+
+                // Body part selected: highlight the whole path beneath the endpoint rings.
+                if (o.Kind == HitObjectKind.Slider && nodeSelection.IsBodySelected(o.Id) && o.Path is { Count: > 1 })
+                    selectionLayer.Add(bodyHighlight(o.Path, stack));
+
+                bool headNode = nodeSelection.Selected is { } hn && hn.ObjectId == o.Id && hn.NodeIndex == 0;
+                selectionLayer.Add(selectionRing(startPosition(o) + stack, headNode ? EditorTheme.Colours.Error : OsuColour.Yellow));
 
                 if (o.Kind == HitObjectKind.Slider)
-                    selectionLayer.Add(selectionRing(endPosition(o) + stack));
+                {
+                    bool tailNode = nodeSelection.Selected is { } tn && tn.ObjectId == o.Id && tn.NodeIndex == Math.Max(1, o.Slides);
+                    selectionLayer.Add(selectionRing(endPosition(o) + stack, tailNode ? EditorTheme.Colours.Error : OsuColour.Yellow));
+                }
             }
 
             updateControlPointEditor();
@@ -620,20 +850,40 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 if (o.Id == id && o.Kind == HitObjectKind.Slider && o.ControlPoints is { Count: >= 2 })
                 {
-                    overlayLayer.Add(controlPoints = new SliderControlPointVisualiser(o, currentDiameter, actions));
+                    int sliderId = o.Id;
+                    overlayLayer.Add(controlPoints = new SliderControlPointVisualiser(o, currentDiameter, actions)
+                    {
+                        // Two-stage part selection: with the slider already the sole selection, clicking a
+                        // head/tail node or the body selects just that part.
+                        PartNodeClicked = node => nodeSelection.Select(sliderId, node),
+                        BodyClicked = () => nodeSelection.SelectBody(sliderId),
+                    });
                     return;
                 }
             }
         }
 
-        private Drawable selectionRing(Vector2 position) => new CircularContainer
+        /// <summary>A translucent yellow overlay tracing the slider's body, shown when its body part is selected.</summary>
+        private Drawable bodyHighlight(IReadOnlyList<Vector2> path, Vector2 stack)
+        {
+            var highlight = new SmoothPath
+            {
+                PathRadius = currentDiameter / 2f,
+                Colour = new Color4(OsuColour.Yellow.R, OsuColour.Yellow.G, OsuColour.Yellow.B, 0.3f),
+            };
+            highlight.Vertices = path;
+            highlight.Position = stack - highlight.PositionInBoundingBox(Vector2.Zero);
+            return highlight;
+        }
+
+        private Drawable selectionRing(Vector2 position, Color4 colour) => new CircularContainer
         {
             Position = position,
             Origin = Anchor.Centre,
             Size = new Vector2(currentDiameter * 1.15f),
             Masking = true,
             BorderThickness = Math.Max(2.5f, currentDiameter * 0.06f),
-            BorderColour = OsuColour.Yellow,
+            BorderColour = colour,
             Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.Transparent, AlwaysPresent = true },
         };
 
@@ -643,9 +893,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         private void buildFollowPoints(IReadOnlyList<HitObjectModel> hitObjects)
         {
-            // Follow points are cheap and connection-dependent on neighbours, so rebuild the set each sync;
-            // each connection is transform-based + lifetime-managed, so there's no per-frame cost.
-            followPointContainer.Clear();
+            // Each connection's geometry depends only on its two neighbours, so reuse the ones whose endpoints
+            // and times are unchanged and recreate only those that actually moved. A full rebuild every sync
+            // would recreate every connection's drawables on each frame of a rotate/scale/move drag, which lags.
+            var existing = new Dictionary<(int, int), FollowPointConnection>();
+            foreach (var c in followPoints)
+                existing[(c.FromId, c.ToId)] = c;
+
+            var rebuilt = new List<FollowPointConnection>();
+            var kept = new HashSet<FollowPointConnection>();
 
             for (int i = 0; i < hitObjects.Count - 1; i++)
             {
@@ -656,7 +912,65 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (next.ComboNumber == 1 || current.Kind == HitObjectKind.Spinner || next.Kind == HitObjectKind.Spinner)
                     continue;
 
-                followPointContainer.Add(new DrawableFollowPoints(endPosition(current), startPosition(next), endTime(current), next.StartTime));
+                Vector2 start = endPosition(current);
+                Vector2 end = startPosition(next);
+                double startTime = endTime(current);
+                double endTimeMs = next.StartTime;
+
+                // Reuse the existing connection if everything that determines its geometry is unchanged.
+                if (existing.TryGetValue((current.Id, next.Id), out var reuse)
+                    && reuse.BaseStart == start && reuse.BaseEnd == end
+                    && reuse.StartTime == startTime && reuse.EndTime == endTimeMs)
+                {
+                    kept.Add(reuse);
+                    rebuilt.Add(reuse);
+                    continue;
+                }
+
+                var connection = new FollowPointConnection
+                {
+                    FromId = current.Id,
+                    ToId = next.Id,
+                    BaseStart = start,
+                    BaseEnd = end,
+                    StartTime = startTime,
+                    EndTime = endTimeMs,
+                };
+                connection.Drawable = new DrawableFollowPoints(start, end, startTime, endTimeMs);
+                followPointContainer.Add(connection.Drawable);
+                rebuilt.Add(connection);
+            }
+
+            // Drop connections that no longer exist (or were replaced).
+            foreach (var c in followPoints)
+                if (!kept.Contains(c))
+                    followPointContainer.Remove(c.Drawable);
+
+            followPoints.Clear();
+            followPoints.AddRange(rebuilt);
+        }
+
+        /// <summary>
+        /// Live preview of a position drag for the follow points: recreates only the connections that touch a
+        /// selected (dragged) object, offsetting that endpoint by <paramref name="osuOffset"/>. This keeps the
+        /// chain glued to the moving objects without rebuilding the whole map's connections each frame (which lags).
+        /// A committed move (or drag cancel) calls <see cref="buildFollowPoints"/> again to restore the full set.
+        /// </summary>
+        private void previewFollowPoints(Vector2 osuOffset)
+        {
+            foreach (var c in followPoints)
+            {
+                bool fromSelected = selection.Contains(c.FromId);
+                bool toSelected = selection.Contains(c.ToId);
+                if (!fromSelected && !toSelected)
+                    continue;
+
+                Vector2 start = c.BaseStart + (fromSelected ? osuOffset : Vector2.Zero);
+                Vector2 end = c.BaseEnd + (toSelected ? osuOffset : Vector2.Zero);
+
+                followPointContainer.Remove(c.Drawable);
+                c.Drawable = new DrawableFollowPoints(start, end, c.StartTime, c.EndTime);
+                followPointContainer.Add(c.Drawable);
             }
         }
 
@@ -679,10 +993,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             base.Update();
 
-            // Uniformly scale the fixed-size play area to fit the available space, leaving a margin.
+            // Scale the play area exactly like osu!lazer's editor: it fits the 512x384 (4:3) playfield into
+            // the full available area (DrawableOsuEditorRuleset overrides the adjustment container to
+            // Size = Vector2.One, dropping gameplay's 0.8 shrink). The smaller of width/height binds, keeping
+            // the 4:3 aspect; this is a fixed scale independent of circle size.
+            // A hair under full-fit so there's a slight breathing margin from the top/bottom timelines.
             float scale = Math.Min(
                 DrawWidth / ParsedBeatmap.PLAYFIELD_WIDTH,
-                DrawHeight / ParsedBeatmap.PLAYFIELD_HEIGHT) * 0.9f;
+                DrawHeight / ParsedBeatmap.PLAYFIELD_HEIGHT) * 0.97f;
 
             if (scale > 0)
                 playArea.Scale = new Vector2(scale);
@@ -690,6 +1008,51 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Hit objects + follow points animate themselves via scheduled transforms against the audio clock
             // (set in SetClock); the lifetime container only updates/draws the ones currently on screen.
             updatePlacementPreview();
+            updateTransformBox();
+
+            // While a rubber-band box is held, keep picking up objects that fade in inside it during playback,
+            // even when the cursor is stationary (so the selection grows as the song plays).
+            if (boxSelecting)
+                updateBoxSelection(boxCurrent);
+        }
+
+        /// <summary>
+        /// Shows the rotate/scale/flip selection box while Shift is held with a movable selection (and no
+        /// placement tool armed), keeping it sized to the selection's osu!pixel bounds.
+        /// </summary>
+        private void updateTransformBox()
+        {
+            var input = GetContainingInputManager();
+            bool shift = input?.CurrentState.Keyboard.ShiftPressed ?? false;
+            bool eligible = transforming
+                            || (shift && !PlacementActive && !SliderPlacementActive && !buildingSlider && actions.SelectionBounds() != null);
+
+            if (eligible && transformBox == null)
+            {
+                transformBox = new SelectionBox
+                {
+                    ScreenToOsu = playArea.ToLocalSpace,
+                    TransformBegin = () => { transforming = true; actions.BeginSelectionTransform(); },
+                    TransformEnd = () => { transforming = false; actions.EndSelectionTransform(); },
+                    Rotate = deg => actions.RotateSelection(deg),
+                    Resize = (d, a) => actions.ScaleSelection(d, a),
+                    Flip = h => actions.FlipSelection(h),
+                };
+                overlayLayer.Add(transformBox);
+            }
+            else if (!eligible && transformBox != null)
+            {
+                transformBox.Expire();
+                transformBox = null;
+            }
+
+            if (transformBox != null && actions.SelectionBounds() is RectangleF b)
+            {
+                // Inflate by the circle radius so the box surrounds the visible objects, not just their centres.
+                float r = currentDiameter / 2f;
+                transformBox.Position = new Vector2(b.X - r, b.Y - r);
+                transformBox.Size = new Vector2(b.Width + 2 * r, b.Height + 2 * r);
+            }
         }
 
         /// <summary>A circle preview shaped like a real hit circle (combo colour, white rim, combo number).</summary>
@@ -729,8 +1092,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             var (colour, number) = previewCombo();
 
-            // Ghost head circle: at the slider's head while tracing, otherwise under the cursor.
-            Vector2 ghost = buildingSlider && sliderAnchors.Count > 0 ? sliderAnchors[0].Position : pos;
+            // Ghost head circle: at the slider's head while tracing, otherwise at the (snapped) cursor.
+            Vector2 ghost = buildingSlider && sliderAnchors.Count > 0
+                ? sliderAnchors[0].Position
+                : PlacementActive && PlacementSnap != null ? PlacementSnap(pos) : pos;
 
             placementPreview.Size = new Vector2(currentDiameter);
             placementPreview.BorderThickness = currentDiameter * 0.08f;
@@ -756,12 +1121,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (path.Count < 2)
             {
                 sliderPreview.Hide();
+                actions.ClearSliderPreview();
                 return;
             }
 
             sliderPreview.Show();
             sliderPreview.Vertices = path;
             sliderPreview.Position = -sliderPreview.PositionInBoundingBox(Vector2.Zero);
+
+            // Show, in real time, how long the slider will occupy on the top timeline.
+            actions.PreviewSliderPlacement(pts);
         }
 
         /// <summary>The combo colour and number a circle placed at the current time would receive.</summary>
@@ -789,9 +1158,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // A new combo (Q) or the very first object restarts the count on the next colour.
             if (NewComboArmed || !anyBefore)
-                return (OsuColour.ComboColourFor(anyBefore ? prevIndex + 1 : 0), 1);
+                return (comboColour(anyBefore ? prevIndex + 1 : 0), 1);
 
-            return (OsuColour.ComboColourFor(prevIndex), prevNumber + 1);
+            return (comboColour(prevIndex), prevNumber + 1);
+        }
+
+        /// <summary>The configurable combo colour for an index, as an osuTK colour.</summary>
+        private Color4 comboColour(int index)
+        {
+            var c = settings.ComboColourFor(index);
+            return new Color4(c.R, c.G, c.B, c.A);
         }
     }
 }
