@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using osu.Framework.Logging;
 using Realms;
@@ -18,8 +17,6 @@ namespace OsuBeatmapEditor.Game.Beatmaps
     /// </summary>
     public static class BeatmapDeleter
     {
-        private static bool backedUpThisSession;
-
         /// <summary>Soft-deletes the whole set (DeletePending), exactly as osu!lazer does. Returns null on success, else an error message.</summary>
         public static string? DeleteSet(BeatmapSetModel set) => mutate(set, (realm, beatmapSet) =>
         {
@@ -78,7 +75,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
             try
             {
-                backup(realmFile);
+                LazerRealmBackup.EnsureBackup(realmFile);
 
                 var config = new RealmConfiguration(realmFile) { IsDynamic = true };
                 using var realm = Realm.GetInstance(config);
@@ -121,26 +118,6 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             {
                 Logger.Error(ex, "BeatmapDeleter: realm write failed");
                 return $"{ex.GetType().Name}: {ex.Message}";
-            }
-        }
-
-        /// <summary>Copies client.realm into an editor-backups folder once per session, before any write.</summary>
-        private static void backup(string realmFile)
-        {
-            if (backedUpThisSession)
-                return;
-
-            try
-            {
-                string dir = Path.Combine(Path.GetDirectoryName(realmFile)!, "editor-backups");
-                Directory.CreateDirectory(dir);
-                string dest = Path.Combine(dir, $"client-{DateTime.Now:yyyyMMdd-HHmmss}.realm");
-                File.Copy(realmFile, dest, overwrite: false);
-                backedUpThisSession = true;
-            }
-            catch
-            {
-                // Non-fatal: a missing backup shouldn't block the delete the user asked for.
             }
         }
     }

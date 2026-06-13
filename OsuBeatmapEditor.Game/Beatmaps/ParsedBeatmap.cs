@@ -199,6 +199,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// <summary>Editor bookmark times (ms).</summary>
         public List<int> Bookmarks { get; } = new List<int>();
 
+        /// <summary>The map's own combo colours from the <c>[Colours]</c> section (ComboN), in order. Empty if none.</summary>
+        public List<osu.Framework.Graphics.Colour4> ComboColours { get; } = new List<osu.Framework.Graphics.Colour4>();
+
         /// <summary>Kiai-time spans (ms). <see cref="KiaiSection.End"/> is <see cref="int.MaxValue"/> if open-ended.</summary>
         public List<KiaiSection> KiaiSections { get; } = new List<KiaiSection>();
 

@@ -101,6 +101,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return result;
         }
 
+        /// <summary>
+        /// Builds the .osu text for a new (empty) difficulty cloned from <paramref name="lines"/>: timing,
+        /// metadata, difficulty settings, audio and background are preserved, but hit objects start empty,
+        /// the version is renamed and the online id is zeroed. Used by the direct realm creator.
+        /// </summary>
+        public static string BuildEmptyDifficultyOsu(string[] lines, string difficultyName) =>
+            cloneWithEmptyHitObjects(lines, difficultyName);
+
         /// <summary>Copies a .osu verbatim, but renames the version, zeroes the online id and empties the hit objects.</summary>
         private static string cloneWithEmptyHitObjects(string[] lines, string difficultyName)
         {

@@ -55,6 +55,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private EditorSettings settings { get; set; } = null!;
 
         [Resolved]
+        private EditableBeatmap editable { get; set; } = null!;
+
+        [Resolved]
         private BeatSnapDivisor beatSnap { get; set; } = null!;
 
         /// <summary>The active beat-snap resolution (ticks per beat).</summary>
@@ -171,6 +174,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             settings.UninheritedColour.ValueChanged += _ => buildTimingPoints();
             settings.InheritedColour.ValueChanged += _ => buildTimingPoints();
             settings.BookmarkColour.ValueChanged += _ => buildTimingPoints();
+            // Recolour the timeline objects live when the combo palette/toggle/map colours change.
+            editable.ColoursChanged += buildObjects;
         }
 
         protected override void Update()
@@ -281,7 +286,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 var o = beatmap.HitObjects[i];
                 float x = (float)(o.StartTime * pixelsPerMs);
-                Colour4 comboColour = settings.ComboColourFor(o.ComboIndex);
+                Colour4 comboColour = editable.ComboColourFor(o.ComboIndex);
                 Color4 combo = new Color4(comboColour.R, comboColour.G, comboColour.B, comboColour.A);
 
                 // Children are positioned relative to the blueprint (local 0 = the object's start).

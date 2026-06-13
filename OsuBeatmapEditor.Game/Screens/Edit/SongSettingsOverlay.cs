@@ -28,7 +28,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             ("General", buildGeneralSection),
             ("Difficulty", buildDifficultySection),
+            ("Colours", buildColoursSection),
         };
+
+        private Drawable buildColoursSection() => flow(
+            note("The beatmap's own combo colours (saved to the map). The editor renders these when "
+                 + "\"Use beatmap colours\" is on in Settings; otherwise the editor palette is used."),
+            new MapColoursEditor());
+
+        private static Drawable note(string text)
+        {
+            var flow = new TextFlowContainer(t =>
+            {
+                t.Colour = EditorTheme.Colours.TextMuted;
+                t.Font = EditorTheme.Type.Body();
+            })
+            {
+                RelativeSizeAxes = Axes.X,
+                AutoSizeAxes = Axes.Y,
+            };
+            flow.AddText(text);
+            return flow;
+        }
 
         private Drawable buildGeneralSection() => flow(
             field("Artist", beatmap.ArtistUnicode),

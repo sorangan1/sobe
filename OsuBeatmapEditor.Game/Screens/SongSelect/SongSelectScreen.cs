@@ -493,25 +493,10 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         private void onBeatmapCreated(NewBeatmapRequest request)
         {
-            var model = new BeatmapSetModel
-            {
-                OnlineID = -1,
-                Artist = request.Artist,
-                Title = request.Title,
-                Author = request.Creator,
-                DataDirectory = LazerStorage.FindDataDirectory() ?? string.Empty,
-                Difficulties = new List<BeatmapDifficultyModel>
-                {
-                    new BeatmapDifficultyModel
-                    {
-                        DifficultyName = request.DifficultyName,
-                        RulesetShortName = "osu",
-                    },
-                },
-                SearchText = $"{request.Artist} {request.Title} {request.Creator}".ToLowerInvariant(),
-            };
-
-            carousel.AddNewBeatmap(model);
+            // The set is already in lazer's realm (written directly), so reload and select + centre it.
+            string identity = $"{request.Artist}|{request.Title}|{request.Creator}";
+            carousel.SelectWhenLoaded(identity, request.DifficultyName, markNew: true);
+            reloadBeatmaps();
         }
 
         private void onNewBeatmap() => newBeatmapOverlay.ShowForNewBeatmap();
@@ -542,19 +527,20 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
             Task.Run(() =>
             {
-                bool ok = BeatmapCloner.CreateDifficulty(set, template, name);
+                // Write the new difficulty straight into lazer's realm (no importer, no launch).
+                string? error = BeatmapRealmCreator.CreateDifficulty(set, template, name);
                 Schedule(() =>
                 {
-                    if (ok)
+                    if (error == null)
                     {
-                        toasts?.Push("Difficulty sent to osu!lazer", EditorTheme.Colours.Success);
-                        // The import lands asynchronously; refresh a couple of times so it appears.
-                        Scheduler.AddDelayed(() => reloadBeatmaps(), 1500);
-                        Scheduler.AddDelayed(() => reloadBeatmaps(), 4000);
+                        toasts?.Push("Difficulty created", EditorTheme.Colours.Success);
+                        // Select + centre the new difficulty once the reload brings it into the carousel.
+                        carousel.SelectWhenLoaded(set.Identity, name);
+                        reloadBeatmaps();
                     }
                     else
                     {
-                        toasts?.Push("Could not create difficulty", EditorTheme.Colours.Error);
+                        toasts?.Push($"Could not create difficulty: {error}", EditorTheme.Colours.Error);
                     }
                 });
             });

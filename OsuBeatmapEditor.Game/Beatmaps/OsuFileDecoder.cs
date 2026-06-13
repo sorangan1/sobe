@@ -26,6 +26,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         {
             var result = new ParsedBeatmap();
             var timingPoints = new List<TimingPoint>();
+            var comboColours = new SortedDictionary<int, osu.Framework.Graphics.Colour4>();
             float sliderMultiplier = 1.4f;
             int comboNumber = 0;
             int comboIndex = 0;
@@ -98,6 +99,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         parseEventLine(line, result);
                         break;
 
+                    case "Colours":
+                        parseComboColour(line, comboColours);
+                        break;
+
                     case "TimingPoints":
                         parseTimingPoint(line, timingPoints, result);
                         break;
@@ -116,8 +121,32 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             for (int i = 0; i < result.TimingPointModels.Count; i++)
                 result.TimingPointModels[i] = result.TimingPointModels[i] with { Id = i };
 
+            result.ComboColours.AddRange(comboColours.Values);
+
             result.RebuildTimingDerived();
             return result;
+        }
+
+        /// <summary>Parses a <c>[Colours]</c> <c>ComboN : r,g,b</c> line into <paramref name="into"/> (keyed by N).</summary>
+        private static void parseComboColour(string line, SortedDictionary<int, osu.Framework.Graphics.Colour4> into)
+        {
+            int sep = line.IndexOf(':');
+            if (sep < 0)
+                return;
+
+            string key = line[..sep].Trim();
+            if (!key.StartsWith("Combo", StringComparison.OrdinalIgnoreCase)
+                || !int.TryParse(key.AsSpan("Combo".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out int n))
+                return;
+
+            string[] parts = line[(sep + 1)..].Split(',');
+            if (parts.Length < 3
+                || !byte.TryParse(parts[0].Trim(), out byte r)
+                || !byte.TryParse(parts[1].Trim(), out byte g)
+                || !byte.TryParse(parts[2].Trim(), out byte b))
+                return;
+
+            into[n] = new osu.Framework.Graphics.Colour4(r, g, b, 255);
         }
 
         private static void parseKeyValue(string line, string key, Action<string> apply)

@@ -76,6 +76,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Whether the editor shows the song's background image (true) or the custom colour (false).</summary>
         public readonly BindableBool UseSongBackground = new BindableBool(true);
 
+        /// <summary>
+        /// Whether hit objects are rendered with the beatmap's own combo colours (its <c>[Colours]</c>, or
+        /// the default skin palette when it has none) - true - or with the editor's custom palette
+        /// (<see cref="ComboColours"/>) - false.
+        /// </summary>
+        public readonly BindableBool UseMapColours = new BindableBool(true);
+
         /// <summary>Dim applied over the song background, 0 (no dim) to 1 (fully black).</summary>
         public readonly BindableFloat BackgroundDim = new BindableFloat(0.55f) { MinValue = 0f, MaxValue = 1f, Precision = 0.05f };
 
@@ -166,6 +173,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 f.ValueChanged += _ => save();
             DefaultCreator.ValueChanged += _ => save();
             UseSongBackground.ValueChanged += _ => save();
+            UseMapColours.ValueChanged += _ => save();
             BackgroundDim.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
@@ -205,6 +213,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("useSongBackground", out string? useSong) && bool.TryParse(useSong, out bool useSongValue))
                     UseSongBackground.Value = useSongValue;
+
+                if (data.TryGetValue("useMapColours", out string? useMap) && bool.TryParse(useMap, out bool useMapValue))
+                    UseMapColours.Value = useMapValue;
 
                 if (data.TryGetValue("backgroundDim", out string? dim) && float.TryParse(dim, out float dimValue))
                     BackgroundDim.Value = dimValue;
@@ -258,6 +269,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     data["f_" + key] = bindable.Value.ToString();
                 data["defaultCreator"] = DefaultCreator.Value;
                 data["useSongBackground"] = UseSongBackground.Value.ToString();
+                data["useMapColours"] = UseMapColours.Value.ToString();
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
                 data["version"] = settings_version.ToString();
 

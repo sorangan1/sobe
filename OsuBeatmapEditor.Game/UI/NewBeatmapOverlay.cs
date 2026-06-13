@@ -407,26 +407,16 @@ namespace OsuBeatmapEditor.Game.UI
             if (!request.IsValid)
                 return;
 
-            try
-            {
-                string osz = BeatmapArchiveWriter.Write(request);
-                bool launched = LazerImporter.Import(osz);
+            // Write the new set straight into osu!lazer's realm + file store (no importer, no launch).
+            string? error = BeatmapRealmCreator.CreateSet(request);
 
-                statusText.Colour = launched ? EditorTheme.Colours.Success : EditorTheme.Colours.Error;
-                statusText.Text = launched
-                    ? "Sent to osu!lazer - check your library."
-                    : "Could not launch osu!lazer.";
+            statusText.Colour = error == null ? EditorTheme.Colours.Success : EditorTheme.Colours.Error;
+            statusText.Text = error == null ? "Beatmap created." : $"Failed: {error}";
 
-                if (launched)
-                {
-                    Created?.Invoke(request);
-                    Scheduler.AddDelayed(Hide, 1200);
-                }
-            }
-            catch (Exception ex)
+            if (error == null)
             {
-                statusText.Colour = EditorTheme.Colours.Error;
-                statusText.Text = $"Failed: {ex.Message}";
+                Created?.Invoke(request);
+                Scheduler.AddDelayed(Hide, 1200);
             }
         }
 

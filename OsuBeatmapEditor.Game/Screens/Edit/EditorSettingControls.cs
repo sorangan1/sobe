@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using osu.Framework.Allocation;
+using osu.Framework.Audio;
 using osu.Framework.Bindables;
 using osu.Framework.Extensions;
 using osu.Framework.Graphics;
@@ -10,7 +13,9 @@ using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Graphics.UserInterface;
 using osu.Framework.Input.Events;
+using osu.Framework.Localisation;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.UI;
 using osuTK;
 using osuTK.Input;
 
@@ -268,6 +273,121 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             background.Colour = EditorTheme.Colours.Control;
             BorderThickness = 0;
             updateText();
+        }
+    }
+
+    /// <summary>
+    /// Dropdown that selects the application's audio output device, bound to the framework's
+    /// <see cref="AudioManager.AudioDevice"/> (an empty entry means "system default"). The framework
+    /// persists the choice in its own config, and the list refreshes live as devices are plugged in or
+    /// removed. Mirrors osu!lazer's AudioDevicesSettings.
+    /// </summary>
+    public partial class AudioDeviceSetting : CompositeDrawable
+    {
+        [Resolved]
+        private AudioManager audio { get; set; } = null!;
+
+        private AudioDeviceDropdown dropdown = null!;
+
+        public AudioDeviceSetting()
+        {
+            Width = 320;
+            AutoSizeAxes = Axes.Y;
+        }
+
+        [BackgroundDependencyLoader]
+        private void load()
+        {
+            InternalChild = dropdown = new AudioDeviceDropdown { RelativeSizeAxes = Axes.X };
+
+            // Populate before binding so the persisted device is a valid selection in the list.
+            updateItems();
+            dropdown.Current.BindTo(audio.AudioDevice);
+
+            audio.OnNewDevice += onDeviceChanged;
+            audio.OnLostDevice += onDeviceChanged;
+        }
+
+        // Device hotplug events can arrive off the update thread; marshal back before touching drawables.
+        private void onDeviceChanged(string _) => Schedule(updateItems);
+
+        private void updateItems()
+        {
+            var items = new List<string> { string.Empty };
+            items.AddRange(audio.AudioDeviceNames);
+
+            // Keep the currently selected device listed even if it's momentarily gone (e.g. unplugged).
+            string preferred = audio.AudioDevice.Value;
+            if (items.All(i => i != preferred))
+                items.Add(preferred);
+
+            dropdown.Items = items.Where(i => i != null).Distinct().ToList();
+        }
+
+        protected override void Dispose(bool isDisposing)
+        {
+            base.Dispose(isDisposing);
+
+            if (audio != null)
+            {
+                audio.OnNewDevice -= onDeviceChanged;
+                audio.OnLostDevice -= onDeviceChanged;
+            }
+        }
+
+        /// <summary>Renders the empty "system default" entry as a friendly label.</summary>
+        private partial class AudioDeviceDropdown : ThemedDropdown<string>
+        {
+            protected override LocalisableString GenerateItemText(string item)
+                => string.IsNullOrEmpty(item) ? "Default" : item;
+        }
+    }
+
+    /// <summary>A compact themed on/off switch two-way bound to a <see cref="BindableBool"/>.</summary>
+    public partial class ToggleSwitch : ClickableContainer
+    {
+        private readonly BindableBool current;
+        private Box track = null!;
+        private Container knob = null!;
+
+        public ToggleSwitch(BindableBool current)
+        {
+            this.current = current;
+            Size = new Vector2(46, 24);
+            Action = () => current.Value = !current.Value;
+        }
+
+        [BackgroundDependencyLoader]
+        private void load()
+        {
+            Children = new Drawable[]
+            {
+                new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Masking = true,
+                    CornerRadius = 12,
+                    Child = track = new Box { RelativeSizeAxes = Axes.Both },
+                },
+                knob = new Container
+                {
+                    Size = new Vector2(18),
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    Masking = true,
+                    CornerRadius = 9,
+                    Child = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Text },
+                },
+            };
+
+            current.BindValueChanged(v => update(v.NewValue, animate: true), true);
+        }
+
+        private void update(bool on, bool animate)
+        {
+            double d = animate ? EditorTheme.Motion.Fast : 0;
+            track.FadeColour(on ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, d, EditorTheme.Motion.Ease);
+            knob.MoveToX(on ? Width - knob.Width - 3 : 3, d, EditorTheme.Motion.Ease);
         }
     }
 }

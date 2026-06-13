@@ -129,7 +129,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         Difficulties = difficulties,
                         DataDirectory = dataDir,
                         Files = files,
-                        SearchText = $"{artist} {title} {author}".ToLowerInvariant(),
+                        SearchText = $"{artist} {title} {author} {string.Join(" ", difficulties.Select(d => d.DifficultyName))}".ToLowerInvariant(),
                         DateAdded = dateAdded,
                         DateModified = dateModified,
                     });

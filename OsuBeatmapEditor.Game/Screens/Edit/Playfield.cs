@@ -50,6 +50,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved]
         private EditorSettings settings { get; set; } = null!;
 
+        [Resolved]
+        private EditableBeatmap editable { get; set; } = null!;
+
         private bool moving;
         private Vector2 moveStart;
 
@@ -189,8 +192,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             settings.ObjectBorderThickness.ValueChanged += _ => rebuildAppearance();
             settings.SliderTickSize.ValueChanged += _ => rebuildAppearance();
             settings.ObjectFadeOut.ValueChanged += _ => rebuildAppearance();
-            foreach (var combo in settings.ComboColours)
-                combo.ValueChanged += _ => rebuildAppearance();
+            // Combo palette changes (editor palette, map colours, or the use-map-colours toggle) all funnel
+            // through EditableBeatmap.ColoursChanged - rebuild so objects pick up the new colours live.
+            editable.ColoursChanged += rebuildAppearance;
         }
 
         /// <summary>
@@ -276,6 +280,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (e.Button == MouseButton.Right && buildingSpinner)
             {
                 finishSpinner();
+                return true;
+            }
+
+            // A placement tool is armed but nothing has been started yet (we're still just previewing) -
+            // right-click returns to the selection tool, like pressing 1.
+            if (e.Button == MouseButton.Right && (PlacementActive || SliderPlacementActive || SpinnerPlacementActive))
+            {
+                SetPlacementActive(false);
+                SetSliderPlacementActive(false);
+                SetSpinnerPlacementActive(false);
                 return true;
             }
 
@@ -1166,7 +1180,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The configurable combo colour for an index, as an osuTK colour.</summary>
         private Color4 comboColour(int index)
         {
-            var c = settings.ComboColourFor(index);
+            var c = editable.ComboColourFor(index);
             return new Color4(c.R, c.G, c.B, c.A);
         }
     }

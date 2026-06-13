@@ -22,22 +22,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (!request.IsValid)
                 throw new InvalidOperationException("New beatmap request is incomplete.");
 
-            string audioFilename;
-            if (!string.IsNullOrWhiteSpace(request.AudioFileName))
-            {
-                // Reuse the source set's audio filename (its on-disk path is content-addressed, no extension).
-                audioFilename = sanitiseFilename(request.AudioFileName);
-            }
-            else
-            {
-                string audioExtension = Path.GetExtension(request.AudioPath).ToLowerInvariant();
-                if (string.IsNullOrEmpty(audioExtension))
-                    audioExtension = ".mp3";
-                audioFilename = $"audio{audioExtension}";
-            }
-
-            string osuFilename = sanitiseFilename(
-                $"{request.Artist} - {request.Title} ({request.Creator}) [{request.DifficultyName}].osu");
+            string audioFilename = ResolveAudioFilename(request);
+            string osuFilename = OsuFilename(request);
 
             string exportDir = Path.Combine(Path.GetTempPath(), "osu-editor-exports");
             Directory.CreateDirectory(exportDir);
@@ -53,7 +39,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             {
                 var osuEntry = archive.CreateEntry(osuFilename, CompressionLevel.NoCompression);
                 using (var writer = new StreamWriter(osuEntry.Open(), new UTF8Encoding(false)))
-                    writer.Write(buildOsuFile(request, audioFilename));
+                    writer.Write(BuildOsuText(request, audioFilename, uninheritedTimingOnly: false));
 
                 archive.CreateEntryFromFile(request.AudioPath, audioFilename, CompressionLevel.NoCompression);
             }
@@ -61,7 +47,29 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return oszPath;
         }
 
-        private static string buildOsuFile(NewBeatmapRequest request, string audioFilename)
+        /// <summary>The stored audio filename for the request (reused source name, or derived from the path's extension).</summary>
+        public static string ResolveAudioFilename(NewBeatmapRequest request)
+        {
+            if (!string.IsNullOrWhiteSpace(request.AudioFileName))
+                // Reuse the source set's audio filename (its on-disk path is content-addressed, no extension).
+                return sanitiseFilename(request.AudioFileName);
+
+            string audioExtension = Path.GetExtension(request.AudioPath).ToLowerInvariant();
+            if (string.IsNullOrEmpty(audioExtension))
+                audioExtension = ".mp3";
+            return $"audio{audioExtension}";
+        }
+
+        /// <summary>The .osu filename for the request, "{Artist} - {Title} ({Creator}) [{Diff}].osu".</summary>
+        public static string OsuFilename(NewBeatmapRequest request) =>
+            sanitiseFilename($"{request.Artist} - {request.Title} ({request.Creator}) [{request.DifficultyName}].osu");
+
+        /// <summary>
+        /// Builds the .osu text for a new beatmap. When <paramref name="uninheritedTimingOnly"/> is true, only
+        /// uninherited (red/BPM) timing points are kept - inherited (green/SV/kiai) points are dropped. No
+        /// bookmarks are ever written. Shared by the .osz exporter and the direct realm creator.
+        /// </summary>
+        public static string BuildOsuText(NewBeatmapRequest request, string audioFilename, bool uninheritedTimingOnly)
         {
             // Beat length in milliseconds for the uninherited (red) timing point.
             double beatLength = 60000.0 / request.Bpm;
@@ -118,10 +126,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             sb.Append("//Storyboard Sound Samples\n\n");
 
             sb.Append("[TimingPoints]\n");
-            if (request.TimingPointLines is { Count: > 0 })
+            var timingLines = request.TimingPointLines;
+            if (uninheritedTimingOnly && timingLines is { Count: > 0 })
+                timingLines = timingLines.Where(isUninherited).ToList();
+
+            if (timingLines is { Count: > 0 })
             {
-                // Carry over the source set's timing verbatim (BPM + any SV/kiai points).
-                foreach (string line in request.TimingPointLines)
+                // Carry over the source set's timing (verbatim, or BPM-only when filtered).
+                foreach (string line in timingLines)
                     sb.Append(line).Append('\n');
                 sb.Append('\n');
             }
@@ -134,6 +146,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             sb.Append("[HitObjects]\n");
 
             return sb.ToString();
+        }
+
+        /// <summary>A timing line is uninherited (red/BPM) when field 6 is "1"; legacy lines without it are uninherited.</summary>
+        private static bool isUninherited(string line)
+        {
+            string[] parts = line.Split(',');
+            return parts.Length <= 6 || parts[6].Trim() == "1";
         }
 
         private static string sanitiseFilename(string name)

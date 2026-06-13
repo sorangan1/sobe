@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Text;
+using osu.Framework.Graphics;
 
 namespace OsuBeatmapEditor.Game.Beatmaps
 {
@@ -20,13 +21,23 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             public string Title = "", TitleUnicode = "", Artist = "", ArtistUnicode = "", Creator = "", Version = "", Source = "", Tags = "";
             public float Hp, Cs, Ar, Od, StackLeniency = 0.7f;
             public float SliderMultiplier = 1.4f, SliderTickRate = 1f;
+
+            /// <summary>The map's own combo colours ([Colours] ComboN), in order. Empty = no [Colours] section.</summary>
+            public List<Colour4> ComboColours = new List<Colour4>();
         }
 
-        public static bool Save(BeatmapSetModel set, BeatmapDifficultyModel difficulty, ParsedBeatmap parsed, Edits edits)
+        /// <summary>
+        /// Produces the patched .osu text for an edited difficulty (re-emitting [HitObjects],
+        /// [TimingPoints] and [Editor] Bookmarks, and replacing [General]/[Metadata]/[Difficulty] lines
+        /// while preserving everything else verbatim), or <c>null</c> if the original .osu can't be resolved.
+        /// Shared by the .osz exporter (<see cref="Save"/>) and the in-place realm writer
+        /// (<see cref="BeatmapRealmWriter"/>).
+        /// </summary>
+        public static string? BuildPatchedOsu(BeatmapSetModel set, BeatmapDifficultyModel difficulty, ParsedBeatmap parsed, Edits edits)
         {
             string? osuPath = LazerFileStore.ResolvePath(set.DataDirectory, difficulty.OsuFileHash);
             if (osuPath == null)
-                return false;
+                return null;
 
             // Re-emit the [HitObjects] section from the (possibly edited) object list so deletions/edits
             // persist, while every other line is preserved verbatim.
@@ -48,7 +59,21 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 ? "Bookmarks: " + string.Join(",", parsed.Bookmarks)
                 : null;
 
-            string patched = patch(File.ReadAllLines(osuPath), edits, hitObjectLines, timingPointLines, bookmarksLine);
+            // The map's combo colours, re-emitted as [Colours] ComboN lines (empty list => no section).
+            var colourLines = edits.ComboColours
+                .Select((c, i) => $"Combo{i + 1} : {toByte(c.R)},{toByte(c.G)},{toByte(c.B)}")
+                .ToList();
+
+            return patch(File.ReadAllLines(osuPath), edits, hitObjectLines, timingPointLines, bookmarksLine, colourLines);
+        }
+
+        private static int toByte(float component) => (int)Math.Round(Math.Clamp(component, 0f, 1f) * 255f);
+
+        public static bool Save(BeatmapSetModel set, BeatmapDifficultyModel difficulty, ParsedBeatmap parsed, Edits edits)
+        {
+            string? patched = BuildPatchedOsu(set, difficulty, parsed, edits);
+            if (patched == null)
+                return false;
 
             // Which stored file is the difficulty we edited (so we replace its content, keep the rest).
             string? editedFile = null;
@@ -101,11 +126,12 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return LazerImporter.Import(oszPath);
         }
 
-        private static string patch(string[] lines, Edits e, IReadOnlyList<string> hitObjectLines, IReadOnlyList<string> timingPointLines, string? bookmarksLine)
+        private static string patch(string[] lines, Edits e, IReadOnlyList<string> hitObjectLines, IReadOnlyList<string> timingPointLines, string? bookmarksLine, IReadOnlyList<string> colourLines)
         {
             var sb = new StringBuilder();
             string section = string.Empty;
             bool editorSectionSeen = false;
+            bool coloursSectionSeen = false;
 
             foreach (string raw in lines)
             {
@@ -115,6 +141,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     section = trimmed[1..^1];
                     if (section == "Editor")
                         editorSectionSeen = true;
+                    if (section == "Colours")
+                        coloursSectionSeen = true;
                     sb.Append(raw).Append('\n');
 
                     // Replace the entire hit-object body with the current (edited) lines.
@@ -135,6 +163,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     if (section == "Editor" && bookmarksLine != null)
                         sb.Append(bookmarksLine).Append('\n');
 
+                    // Re-emit the (possibly edited) map combo colours at the top of the [Colours] section.
+                    if (section == "Colours")
+                    {
+                        foreach (string colour in colourLines)
+                            sb.Append(colour).Append('\n');
+                    }
+
                     continue;
                 }
 
@@ -144,6 +179,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
                 // Skip the original Bookmarks line; the current one was re-emitted under the [Editor] header.
                 if (section == "Editor" && trimmed.StartsWith("Bookmarks", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Skip the original ComboN lines; the current ones were re-emitted under the [Colours] header
+                // (other [Colours] keys like SliderTrackOverride / SliderBorder are kept verbatim).
+                if (section == "Colours" && trimmed.StartsWith("Combo", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 sb.Append(section switch
@@ -159,6 +199,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             // If the file had no [Editor] section but we have bookmarks, add one so they persist.
             if (!editorSectionSeen && bookmarksLine != null)
                 sb.Append("\n[Editor]\n").Append(bookmarksLine).Append('\n');
+
+            // Likewise add a [Colours] section if the file had none but the map now has combo colours.
+            if (!coloursSectionSeen && colourLines.Count > 0)
+            {
+                sb.Append("\n[Colours]\n");
+                foreach (string colour in colourLines)
+                    sb.Append(colour).Append('\n');
+            }
 
             return sb.ToString();
         }

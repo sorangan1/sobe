@@ -16,9 +16,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 {
     /// <summary>
     /// A right-aligned, scrollable list of beatmap sets with live search filtering and sorting.
-    /// Single-difficulty sets are one selectable card; multi-difficulty sets show a header card
-    /// with smaller, individually-selectable difficulty cards beneath. Selection (yellow border)
-    /// is separate from opening the editor.
+    /// Every set - including single-difficulty ones - shows a header card with its individually-selectable
+    /// difficulty card(s) beneath. Selection (yellow border) is separate from opening the editor.
     ///
     /// The carousel is virtualised like osu!lazer's: card layout (positions/heights) is computed up
     /// front, but the actual drawables are only materialised when they scroll into view (and disposed
@@ -71,6 +70,11 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private Card? selectedCard;
         private string? selectedKey;
 
+        // A selection to apply as soon as the matching card appears (e.g. after an async import + reload).
+        // Survives rebuilds until resolved, so a freshly created set/difficulty ends up selected + centred.
+        private string? pendingSelectIdentity;
+        private string? pendingSelectDiffName;
+
         private readonly Random random = new Random();
 
         private string filter = string.Empty;
@@ -112,16 +116,19 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             rebuild();
         }
 
-        /// <summary>Adds a freshly-created beatmap to the top of the list, flagged "new" and selected.</summary>
-        public void AddNewBeatmap(BeatmapSetModel set)
+        /// <summary>
+        /// Requests that the given difficulty (or the first difficulty of the set, when
+        /// <paramref name="difficultyName"/> is null) become selected and centred as soon as it appears in
+        /// the carousel. Used after creating a set/difficulty, which lands via an async realm reload. When
+        /// <paramref name="markNew"/> is set the set also gets the "new" accent.
+        /// </summary>
+        public void SelectWhenLoaded(string setIdentity, string? difficultyName = null, bool markNew = false)
         {
-            allSets.Insert(0, set);
-            newIdentities.Add(set.Identity);
+            pendingSelectIdentity = setIdentity;
+            pendingSelectDiffName = difficultyName;
+            if (markNew)
+                newIdentities.Add(setIdentity);
             rebuild();
-
-            var card = entries.FirstOrDefault(e => e.Set!.Identity == set.Identity);
-            if (card != null)
-                select(card);
         }
 
         public void SetFilter(string value)
@@ -250,81 +257,86 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
             foreach (var set in visible)
             {
+                // Defensive: BeatmapStore already drops sets with no osu! difficulties.
+                if (set.Difficulties.Count == 0)
+                    continue;
+
                 bool isNew = newIdentities.Contains(set.Identity);
 
-                if (set.Difficulties.Count <= 1)
+                // Every set - even a single-difficulty one - is laid out as a header card with its
+                // difficulty card(s) nested beneath, so single-diff sets behave like multi-diff sets.
+                var capturedSet = set;
+                var headerCard = new Card(null, null, BeatmapSetPanel.PANEL_HEIGHT, null!);
+                cards.Add(headerCard);
+
+                Card? firstDiff = null;
+
+                // Difficulties ordered easiest-to-hardest by star rating.
+                foreach (var diff in set.Difficulties.OrderBy(d => d.StarRating))
                 {
-                    var diff = set.Difficulties.Count == 1 ? set.Difficulties[0] : new BeatmapDifficultyModel();
-                    var capturedSet = set;
                     var capturedDiff = diff;
                     Card card = null!;
-                    card = new Card(set, diff, BeatmapSetPanel.PANEL_HEIGHT, () =>
+                    card = new Card(set, diff, BeatmapDiffPanel.PANEL_HEIGHT, () =>
                     {
-                        var panel = new BeatmapSetPanel(capturedSet, isNew, textures: Textures)
+                        var panel = new BeatmapDiffPanel(capturedSet, capturedDiff, Textures)
                         {
                             Anchor = Anchor.TopRight,
                             Origin = Anchor.TopRight,
+                            Width = 0.85f, // narrower than the set card, right-aligned so it reads as nested
                             Action = () => clickCard(card),
-                            ContextMenuItems = buildMenu(capturedSet, capturedDiff, includeEdit: capturedDiff.OsuFileHash.Length > 0, setLevel: true),
+                            ContextMenuItems = buildMenu(capturedSet, capturedDiff, includeEdit: true, setLevel: false),
                         };
                         return panel;
                     });
                     cards.Add(card);
                     entries.Add(card);
+                    firstDiff ??= card;
                 }
-                else
+
+                // The header's "create" actions use the easiest difficulty as the template/donor.
+                var headerTemplate = set.Difficulties.OrderBy(d => d.StarRating).First();
+
+                // Clicking the header selects the set's first difficulty.
+                headerCard.Factory = () => new BeatmapSetPanel(capturedSet, isNew, isHeader: true, textures: Textures)
                 {
-                    var capturedSet = set;
-                    var headerCard = new Card(null, null, BeatmapSetPanel.PANEL_HEIGHT, null!);
-                    cards.Add(headerCard);
-
-                    Card? firstDiff = null;
-
-                    // Difficulties ordered easiest-to-hardest by star rating.
-                    foreach (var diff in set.Difficulties.OrderBy(d => d.StarRating))
+                    Anchor = Anchor.TopRight,
+                    Origin = Anchor.TopRight,
+                    Action = () =>
                     {
-                        var capturedDiff = diff;
-                        Card card = null!;
-                        card = new Card(set, diff, BeatmapDiffPanel.PANEL_HEIGHT, () =>
-                        {
-                            var panel = new BeatmapDiffPanel(capturedSet, capturedDiff, Textures)
-                            {
-                                Anchor = Anchor.TopRight,
-                                Origin = Anchor.TopRight,
-                                Width = 0.85f, // narrower than the set card, right-aligned so it reads as nested
-                                Action = () => clickCard(card),
-                                ContextMenuItems = buildMenu(capturedSet, capturedDiff, includeEdit: true, setLevel: false),
-                            };
-                            return panel;
-                        });
-                        cards.Add(card);
-                        entries.Add(card);
-                        firstDiff ??= card;
-                    }
-
-                    // The header's "create" actions use the easiest difficulty as the template/donor.
-                    var headerTemplate = set.Difficulties.OrderBy(d => d.StarRating).First();
-
-                    // Clicking the header selects the set's first difficulty.
-                    headerCard.Factory = () => new BeatmapSetPanel(capturedSet, isNew, isHeader: true, textures: Textures)
-                    {
-                        Anchor = Anchor.TopRight,
-                        Origin = Anchor.TopRight,
-                        Action = () =>
-                        {
-                            if (firstDiff != null)
-                                select(firstDiff);
-                        },
-                        // No "Edit" on the header - it isn't a specific difficulty. Deletes the whole set.
-                        ContextMenuItems = buildMenu(capturedSet, headerTemplate, includeEdit: false, setLevel: true),
-                    };
-                }
+                        if (firstDiff != null)
+                            select(firstDiff);
+                    },
+                    // No "Edit" on the header - it isn't a specific difficulty. Deletes the whole set.
+                    ContextMenuItems = buildMenu(capturedSet, headerTemplate, includeEdit: false, setLevel: true),
+                };
             }
 
             layoutCards();
             updateEmptyMessage(visible.Count);
             restoreSelection();
+            applyPendingSelection();
             updateVisibility();
+        }
+
+        /// <summary>
+        /// If a <see cref="SelectWhenLoaded"/> target is now present, select + centre it and clear the
+        /// request. Otherwise the request is kept so a later rebuild/reload can resolve it.
+        /// </summary>
+        private void applyPendingSelection()
+        {
+            if (pendingSelectIdentity == null)
+                return;
+
+            Card? target = entries.FirstOrDefault(e =>
+                e.Set!.Identity == pendingSelectIdentity
+                && (pendingSelectDiffName == null || e.Diff!.DifficultyName == pendingSelectDiffName));
+
+            if (target == null)
+                return;
+
+            pendingSelectIdentity = null;
+            pendingSelectDiffName = null;
+            select(target);
         }
 
         /// <summary>Assigns each card a vertical position and sizes the scroll content.</summary>

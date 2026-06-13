@@ -61,6 +61,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float tick_pulse_amp = 0.18f; // how far it expands (fraction)
         private const float tick_base_alpha = 0.6f; // ticks sit slightly translucent until collected
         private const double tick_fade_ms = 90;     // how quickly a tick fades out as the ball reaches it
+        private const double tick_fade_in_ms = 150; // how quickly a tick fades in (lazer's DrawableSliderTick ANIM_DURATION)
         private Drawable? spinnerRotor;
         private Box? clickFlash;
 
@@ -70,6 +71,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         [Resolved]
         private EditorSettings settings { get; set; } = null!;
+
+        [Resolved]
+        private EditableBeatmap editable { get; set; } = null!;
 
         /// <summary>Configurable opacity for object fills/bodies.</summary>
         private float objectOpacity => settings.ObjectBackgroundOpacity.Value;
@@ -183,7 +187,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [BackgroundDependencyLoader]
         private void load()
         {
-            Colour4 cc = settings.ComboColourFor(hitObject.ComboIndex);
+            Colour4 cc = editable.ComboColourFor(hitObject.ComboIndex);
             Color4 combo = new Color4(cc.R, cc.G, cc.B, cc.A);
 
             if (hitObject.Kind == HitObjectKind.Slider && path is { Count: > 1 })
@@ -678,16 +682,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             bool forward = span % 2 == 0;
             float swept = (float)(forward ? frac * totalLength : (1 - frac) * totalLength);
 
-            // Lerp toward the target alpha (0 once collected) so the disappearance is a quick fade, not a snap;
-            // Abs(Elapsed) keeps it smooth when scrubbing backwards too.
-            float k = (float)Math.Clamp(Math.Abs(Time.Elapsed) / tick_fade_ms, 0, 1);
+            // Each tick's alpha is a pure function of how far ahead it still is from the ball (in osu!pixels
+            // along the sweep direction): full until the ball nears it, fading to 0 as the ball reaches/passes
+            // it. Computing it from position (not an incremental lerp) means it's correct at any playhead -
+            // it disappears the instant the ball arrives while scrubbing paused, and reappears on rewind.
+            // The fade window is the arc the ball covers in tick_fade_ms (so the on-screen fade speed matches).
+            float fadeArc = Math.Max(1f, (float)(totalLength * tick_fade_ms / spanDuration));
 
             for (int i = 0; i < tickDots.Count; i++)
             {
-                bool collected = forward ? tickArcLengths[i] <= swept : tickArcLengths[i] >= swept;
-                float target = collected ? 0f : tick_base_alpha;
-                var dot = tickDots[i];
-                dot.Alpha += (target - dot.Alpha) * k;
+                float distAhead = forward ? tickArcLengths[i] - swept : swept - tickArcLengths[i];
+                float fadeOut = Math.Clamp(distAhead / fadeArc, 0f, 1f);
+
+                // Progressive appearance (like lazer's DrawableSliderTick): each tick fades in over
+                // tick_fade_in_ms starting one preempt before its own time (its position along the first span),
+                // so the ticks pop in one-by-one as the slider approaches instead of all at once. Past that
+                // window (and on repeat spans) the factor is 1, leaving only the fade-out above.
+                double tickTime = start + tickArcLengths[i] / totalLength * spanDuration;
+                float fadeIn = (float)Math.Clamp((time - (tickTime - preempt)) / tick_fade_in_ms, 0, 1);
+
+                tickDots[i].Alpha = tick_base_alpha * fadeOut * fadeIn;
             }
         }
 

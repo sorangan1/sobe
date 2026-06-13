@@ -28,6 +28,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly float rightInset;
 
         private SpriteText timeText = null!;
+        private SpriteText percentText = null!;
         private SeekBar seekBar = null!;
 
         public EditorTimeline(Track? track, ParsedBeatmap? beatmap, Func<double>? timeSource = null, float rightInset = 0)
@@ -57,19 +58,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Colour = OsuColour.BackgroundRaised,
                     Alpha = 0.82f,
                 },
-                timeText = new SpriteText
+                new FillFlowContainer
                 {
                     Anchor = Anchor.CentreLeft,
                     Origin = Anchor.CentreLeft,
                     Margin = new MarginPadding { Left = 16 },
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 18, weight: "Bold", fixedWidth: true),
-                    Text = "00:00:000",
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new Vector2(10, 0),
+                    Children = new Drawable[]
+                    {
+                        timeText = new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Colour = OsuColour.Text,
+                            Font = FontUsage.Default.With(size: 18, weight: "Bold", fixedWidth: true),
+                            Text = "00:00:000",
+                        },
+                        // Percentage of the way through the track, next to the time.
+                        percentText = new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Colour = OsuColour.TextMuted,
+                            Font = FontUsage.Default.With(size: 14, weight: "SemiBold", fixedWidth: true),
+                            Text = "0%",
+                        },
+                    },
                 },
                 new Container
                 {
                     RelativeSizeAxes = Axes.Both,
-                    Padding = new MarginPadding { Left = 130, Right = 24 + rightInset, Vertical = 9 },
+                    Padding = new MarginPadding { Left = 200, Right = 24 + rightInset, Vertical = 9 },
                     Child = seekBar = new SeekBar(track, beatmap, () => currentTime),
                 },
             };
@@ -93,6 +114,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             lastShownMs = rounded;
             timeText.Text = format(rounded);
+
+            double length = track.Length;
+            percentText.Text = length > 0 ? $"{Math.Clamp((int)(ms / length * 100), 0, 100)}%" : "0%";
         }
 
         private static string format(long ms)

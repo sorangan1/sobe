@@ -45,6 +45,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private ToastOverlay? toasts { get; set; }
 
+        // OS clipboard, for writing the modding timestamp on copy (cached by the host; null-guarded for tests).
+        [Resolved(CanBeNull = true)]
+        private Clipboard? hostClipboard { get; set; }
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
@@ -85,7 +89,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private readonly Stack<Snapshot> undoStack = new Stack<Snapshot>();
         private readonly Stack<Snapshot> redoStack = new Stack<Snapshot>();
-        private readonly List<HitObjectModel> clipboard = new List<HitObjectModel>();
         private ParsedBeatmap parsed = new ParsedBeatmap();
 
         private Playfield playfield = null!;
@@ -149,7 +152,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (osuPath != null)
                 parsed = OsuFileDecoder.Decode(osuPath);
 
-            editable = new EditableBeatmap(parsed, settings.DefaultCreator.Value);
+            editable = new EditableBeatmap(parsed, settings.DefaultCreator.Value, settings);
 
             deps.CacheAs(settings);
             deps.CacheAs(editable);
@@ -413,8 +416,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             applyCombosTo(temp);
             temp.RemoveAll(o => o.Id == int.MinValue);
 
-            float diameter = (54.4f - 4.48f * editable.Cs.Value) * 2;
-            playfield.SetHitObjects(temp, diameter, ParsedBeatmap.PreemptFor(editable.Ar.Value));
+            playfield.SetHitObjects(temp, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
         }
 
         /// <summary>The composing tool the playfield currently has armed.</summary>
@@ -562,9 +564,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private void rebuildHitObjects()
         {
-            float diameter = (54.4f - 4.48f * editable.Cs.Value) * 2;
-            playfield.SetHitObjects(parsed.HitObjects, diameter, ParsedBeatmap.PreemptFor(editable.Ar.Value));
+            playfield.SetHitObjects(parsed.HitObjects, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
         }
+
+        /// <summary>
+        /// Hit-circle diameter in osu!pixels for the current CS (standard formula <c>(54.4 - 4.48·CS)·2</c>),
+        /// minus a manual visual override so our circles match osu!lazer's editor, which renders them a few
+        /// pixels smaller than the raw formula gives.
+        /// </summary>
+        private float circleDiameter() => (54.4f - 4.48f * editable.Cs.Value) * 2 - circle_diameter_override;
+
+        /// <summary>osu!pixels shaved off the hit-circle diameter to match lazer's editor (see <see cref="circleDiameter"/>).</summary>
+        private const float circle_diameter_override = 5f;
 
         // --- IEditorActions: editing operations invoked by the timeline/playfield ---
 
@@ -2225,20 +2236,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // --- Copy / cut / paste: clipboard of hit objects, time-shifted on paste (lazer-style) ---
 
-        /// <summary>Copies the selected objects (in time order) to the editor clipboard.</summary>
+        /// <summary>
+        /// Copies the selected objects (in time order) to the process-wide clipboard (so they can be pasted
+        /// into another map/difficulty), and writes an osu! modding timestamp to the OS clipboard - exactly
+        /// like osu!lazer, so Ctrl+C gives you a "00:12:345 (1,2,3) - " string ready to paste into forums/chat.
+        /// </summary>
         private void copySelection()
         {
-            if (selection.Selected.Count == 0)
-                return;
-
             var ids = new HashSet<int>(selection.Selected);
-            clipboard.Clear();
-            // parsed.HitObjects is kept time-sorted, so the clipboard preserves relative timing.
-            foreach (var o in parsed.HitObjects)
-            {
-                if (ids.Contains(o.Id))
-                    clipboard.Add(o);
-            }
+            var copied = parsed.HitObjects.Where(o => ids.Contains(o.Id)).OrderBy(o => o.StartTime).ToList();
+
+            // The modding timestamp is written even with no selection (just the current time), matching lazer.
+            writeModdingTimestamp(copied);
+
+            if (copied.Count > 0)
+                HitObjectClipboard.Set(copied);
+        }
+
+        /// <summary>Writes lazer's modding timestamp "mm:ss:fff (combo,combo,...) - " to the OS clipboard.</summary>
+        private void writeModdingTimestamp(IReadOnlyList<HitObjectModel> objects)
+        {
+            double time = objects.Count > 0 ? objects.Min(o => o.StartTime) : CurrentTime;
+            string stamp = objects.Count > 0
+                ? $"{formatTimestamp(time)} ({string.Join(",", objects.Select(o => o.ComboNumber))}) - "
+                : $"{formatTimestamp(time)} - ";
+
+            hostClipboard?.SetText(stamp);
+        }
+
+        /// <summary>Formats a time (ms) as the osu! editor/modding timestamp "mm:ss:fff".</summary>
+        private static string formatTimestamp(double ms)
+        {
+            var t = TimeSpan.FromMilliseconds(Math.Max(0, ms));
+            return $"{(int)t.TotalMinutes:00}:{t.Seconds:00}:{t.Milliseconds:000}";
         }
 
         private void cutSelection()
@@ -2250,21 +2280,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             DeleteSelected();
         }
 
-        /// <summary>Pastes the clipboard so its earliest object lands on the current snapped time, then selects it.</summary>
+        /// <summary>
+        /// Pastes the clipboard so its earliest object lands on the current snapped time, then selects it.
+        /// Reads the process-wide clipboard, so this works across maps/difficulties; pasted slider durations
+        /// are re-derived for this map's timing.
+        /// </summary>
         private void paste()
         {
-            if (clipboard.Count == 0)
+            if (!HitObjectClipboard.HasContent)
                 return;
 
+            var clip = HitObjectClipboard.Objects;
             int target = (int)Math.Round(snapTime(CurrentTime));
-            int baseTime = clipboard.Min(o => o.StartTime);
+            int baseTime = clip.Min(o => o.StartTime);
             int offset = target - baseTime;
 
             pushUndo();
 
             int id = nextId();
-            var newIds = new List<int>(clipboard.Count);
-            foreach (var o in clipboard)
+            var newIds = new List<int>(clip.Count);
+            foreach (var o in clip)
             {
                 newIds.Add(id);
                 parsed.HitObjects.Add(o with
@@ -2277,6 +2312,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            // Pasted sliders carry their source map's duration; re-time them for this map's SV/BPM.
+            recomputeSliderDurationsData();
             afterEdit();
             selection.SetRange(newIds);
         }
@@ -2630,29 +2667,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
-            // Tools: (1) select, (2) place hit circle, (3) place slider - matching osu!lazer's toolbox shortcuts.
+            // Tools: (1) select, (2) circle, (3) slider, (4) spinner - matching osu!lazer's toolbox shortcuts.
+            // Routed through applyTool so each one fully disarms the others (e.g. 1 also clears the spinner).
             if (e.Key == Key.Number1 && !e.Repeat)
             {
-                playfield.SetPlacementActive(false);
-                playfield.SetSliderPlacementActive(false);
+                applyTool(EditorTool.Selection);
                 return true;
             }
 
             if (e.Key == Key.Number2 && !e.Repeat)
             {
-                playfield.SetPlacementActive(true);
+                applyTool(EditorTool.Circle);
                 return true;
             }
 
             if (e.Key == Key.Number3 && !e.Repeat)
             {
-                playfield.SetSliderPlacementActive(true);
+                applyTool(EditorTool.Slider);
                 return true;
             }
 
             if (e.Key == Key.Number4 && !e.Repeat)
             {
-                playfield.SetSpinnerPlacementActive(true);
+                applyTool(EditorTool.Spinner);
                 return true;
             }
 
@@ -2795,18 +2832,32 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 StackLeniency = editable.StackLeniency.Value,
                 SliderMultiplier = editable.SliderMultiplier.Value,
                 SliderTickRate = editable.SliderTickRate.Value,
+                ComboColours = editable.MapColours.Select(c => c.Value).ToList(),
             };
 
-            bool ok = BeatmapSaver.Save(set, difficulty, parsed, edits);
+            // Existing maps are written in place directly in lazer's realm (exactly how lazer's own editor
+            // saves) - going through the .osz importer would make lazer file the edit as a duplicate set.
+            // Brand-new maps (no stored .osu yet) still round-trip through the importer.
+            bool ok;
+            if (!string.IsNullOrEmpty(difficulty.OsuFileHash))
+            {
+                string? error = BeatmapRealmWriter.Save(set, difficulty, parsed, edits);
+                ok = error == null;
+                if (!ok)
+                    toasts?.Push($"Save failed: {error}", EditorTheme.Colours.Error);
+            }
+            else
+            {
+                ok = BeatmapSaver.Save(set, difficulty, parsed, edits);
+                if (!ok)
+                    toasts?.Push("Save failed", EditorTheme.Colours.Error);
+            }
+
             if (ok)
             {
                 editable.IsDirty.Value = false;
                 DidSave = true;
                 toasts?.Push("Beatmap saved", EditorTheme.Colours.Success);
-            }
-            else
-            {
-                toasts?.Push("Save failed", EditorTheme.Colours.Error);
             }
             return ok;
         }

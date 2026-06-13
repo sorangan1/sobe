@@ -25,8 +25,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ("Color", buildColourSection),
             ("Objects", buildObjectsSection),
             ("Timeline", buildTimelineSection),
+            ("Audio", buildAudioSection),
             ("Shortcuts", buildShortcutsSection),
         };
+
+        private Drawable buildAudioSection() => section(
+            SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()));
 
         private Drawable buildObjectsSection() => section(
             colourRow("Combo colour 1", settings.ComboColour1),
@@ -51,12 +55,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             new NumberBox(value) { Width = 56, Height = EditorTheme.Sizing.InputHeight, Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
 
         private Drawable buildColourSection() => section(
+            toggleRow("Use beatmap (skin) colours", settings.UseMapColours),
             colourRow("Timing point (BPM)", settings.UninheritedColour),
             colourRow("Timing point (inherited)", settings.InheritedColour),
             colourRow("Bookmark", settings.BookmarkColour),
             colourRow("Preview point", settings.PreviewPointColour),
             colourRow("Kiai", settings.KiaiColour),
             colourRow("Editor background", settings.EditorBackgroundColour));
+
+        private Drawable toggleRow(string label, osu.Framework.Bindables.BindableBool value) =>
+            SettingsLayout.LabeledRow(label, new ToggleSwitch(value) { Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
 
         private Drawable buildShortcutsSection() => section(
             new SpriteText
