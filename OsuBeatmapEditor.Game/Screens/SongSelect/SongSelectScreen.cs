@@ -48,6 +48,18 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private NewBeatmapOverlay newBeatmapOverlay = null!;
         private NewDifficultyOverlay newDifficultyOverlay = null!;
         private ConfirmOverlay confirmOverlay = null!;
+        private EditorSettingsOverlay settingsOverlay = null!;
+
+        // Cached so the shared editor-settings overlay (resolved via DI) can be opened from here too.
+        private DependencyContainer dependencies = null!;
+        private EditorSettings editorSettings = null!;
+
+        protected override IReadOnlyDependencyContainer CreateChildDependencies(IReadOnlyDependencyContainer parent)
+        {
+            dependencies = new DependencyContainer(parent);
+            dependencies.CacheAs(editorSettings = new EditorSettings(parent.Get<GameHost>().Storage));
+            return dependencies;
+        }
 
         // Cached by the game host; absent under the standalone test browser, so calls are null-guarded.
         [Resolved(CanBeNull = true)]
@@ -157,6 +169,14 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Margin = new MarginPadding(30),
                         Action = onNewBeatmap,
                     },
+                    new OsuButton("Settings", OsuColour.Surface)
+                    {
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Size = new Vector2(140, 56),
+                        Margin = new MarginPadding { Left = 30 + 220 + 12, Bottom = 30 },
+                        Action = () => settingsOverlay.ToggleVisibility(),
+                    },
                     // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
                     // and the search box stay interactive.
                     rightArea = new Container
@@ -215,6 +235,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Confirmed = onCreateDifficultyConfirmed,
                     },
                     confirmOverlay = new ConfirmOverlay(),
+                    settingsOverlay = new EditorSettingsOverlay(),
                 },
                 },
             };
@@ -340,10 +361,15 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             if (newBeatmapOverlay.State.Value == Visibility.Visible)
                 return base.OnKeyDown(e);
 
-            // Ctrl+Space pauses/resumes the song preview.
+            // Ctrl+Space pauses/resumes the song preview (with a toast confirming which).
             if (e.Key == Key.Space && e.ControlPressed)
             {
-                currentPreview?.TogglePause();
+                if (currentPreview != null)
+                {
+                    bool playing = currentPreview.TogglePause();
+                    toasts?.Push(playing ? "Preview playing" : "Preview paused",
+                        playing ? EditorTheme.Colours.Success : EditorTheme.Colours.TextMuted);
+                }
                 return true;
             }
 
@@ -583,11 +609,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         }
 
         /// <summary>The mapper name configured in editor settings (used as the creator for new sets).</summary>
-        private string defaultCreator()
-        {
-            try { return new EditorSettings(storage).DefaultCreator.Value; }
-            catch { return string.Empty; }
-        }
+        private string defaultCreator() => editorSettings.DefaultCreator.Value;
 
         /// <summary>BPM of the first uninherited timing point, or 120 if none can be parsed.</summary>
         private static double firstBpm(IReadOnlyList<string> timingLines)
@@ -714,12 +736,22 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         /// </summary>
         private partial class PreviewTrack : CompositeDrawable
         {
+            // Gap between the track finishing and the preview looping back to the start, plus the fade-in length.
+            private const double loop_gap_ms = 700;
+            private const double loop_fade_ms = 450;
+
             private readonly BeatmapSetModel set;
             private readonly BeatmapDifficultyModel diff;
             private readonly ITrackStore trackStore;
 
             private Track? track;
             private int previewTime = -1;
+
+            // While true the preview should keep playing (and loop when the track ends). Cleared on pause/stop.
+            private bool looping;
+            private bool restarting;
+            private bool fading;
+            private double fadeProgress = 1;
 
             public PreviewTrack(BeatmapSetModel set, BeatmapDifficultyModel diff, ITrackStore trackStore)
             {
@@ -782,22 +814,74 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 // Don't clamp to track.Length here: the length may not be populated yet, and clamping
                 // to 0 would make the preview play from the start instead of the preview point.
                 track.Seek(Math.Max(0, time));
+                track.Volume.Value = 1;
                 track.Start();
+                fading = false;
+                fadeProgress = 1;
+                looping = true;
             }
 
-            /// <summary>Pauses the preview where it is, or resumes it if already paused (Ctrl+Space).</summary>
-            public void TogglePause()
+            /// <summary>Pauses the preview where it is, or resumes it if already paused (Ctrl+Space). Returns true if now playing.</summary>
+            public bool TogglePause()
             {
+                if (track == null)
+                    return false;
+
+                if (track.IsRunning)
+                {
+                    track.Stop();
+                    looping = false;
+                    return false;
+                }
+
+                track.Start();
+                looping = true;
+                return true;
+            }
+
+            public void Stop()
+            {
+                looping = false;
+                track?.Stop();
+            }
+
+            protected override void Update()
+            {
+                base.Update();
+
                 if (track == null)
                     return;
 
-                if (track.IsRunning)
-                    track.Stop();
-                else
-                    track.Start();
+                // Ease the volume up after a loop restart (a soft fade-in rather than a hard cut).
+                if (fading)
+                {
+                    fadeProgress = Math.Min(1, fadeProgress + Time.Elapsed / loop_fade_ms);
+                    track.Volume.Value = fadeProgress;
+                    if (fadeProgress >= 1)
+                        fading = false;
+                }
+
+                // The track has finished on its own: after a short gap, loop back to the start with a fade-in.
+                if (looping && !restarting && track.Length > 0 && !track.IsRunning && track.CurrentTime >= track.Length - 60)
+                {
+                    restarting = true;
+                    Scheduler.AddDelayed(restartFromStart, loop_gap_ms);
+                }
             }
 
-            public void Stop() => track?.Stop();
+            private void restartFromStart()
+            {
+                restarting = false;
+
+                if (track == null || !looping)
+                    return;
+
+                track.Seek(0);
+                track.Volume.Value = 0;
+                fadeProgress = 0;
+                fading = true;
+                track.Start();
+            }
 
             protected override void Dispose(bool isDisposing)
             {

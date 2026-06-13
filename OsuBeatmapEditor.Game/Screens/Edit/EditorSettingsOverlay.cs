@@ -52,7 +52,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             heightRow("Quarter line height", settings.QuarterLineHeight));
 
         private Drawable heightRow(string label, BindableFloat value) => SettingsLayout.LabeledRow(label,
-            new NumberBox(value) { Width = 56, Height = EditorTheme.Sizing.InputHeight, Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
+            controlWithReset(new NumberBox(value) { Width = 56, Height = EditorTheme.Sizing.InputHeight }, value));
 
         private Drawable buildColourSection() => section(
             toggleRow("Use beatmap (skin) colours", settings.UseMapColours),
@@ -60,11 +60,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             colourRow("Timing point (inherited)", settings.InheritedColour),
             colourRow("Bookmark", settings.BookmarkColour),
             colourRow("Preview point", settings.PreviewPointColour),
-            colourRow("Kiai", settings.KiaiColour),
-            colourRow("Editor background", settings.EditorBackgroundColour));
+            colourRow("Kiai", settings.KiaiColour));
 
         private Drawable toggleRow(string label, osu.Framework.Bindables.BindableBool value) =>
-            SettingsLayout.LabeledRow(label, new ToggleSwitch(value) { Anchor = Anchor.CentreRight, Origin = Anchor.CentreRight });
+            SettingsLayout.LabeledRow(label, controlWithReset(new ToggleSwitch(value), value));
 
         private Drawable buildShortcutsSection() => section(
             new SpriteText
@@ -75,39 +74,44 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             },
             new EditorTextBox(settings.DefaultCreator) { RelativeSizeAxes = Axes.X, Height = EditorTheme.Sizing.InputHeight },
             new Container { RelativeSizeAxes = Axes.X, Height = EditorTheme.Spacing.Md },
+            toggleRow("Show beta notice on open", settings.ShowBetaPopup),
+            new Container { RelativeSizeAxes = Axes.X, Height = EditorTheme.Spacing.Md },
             shortcutRow("Play / Pause", settings.PlayPauseKey),
             shortcutRow("Exit editor", settings.ExitKey),
             shortcutRow("Song setup", settings.SongSetupKey),
             shortcutRow("Settings", settings.SettingsKey),
             shortcutRow("Timing points", settings.TimingPointsKey),
+            shortcutRow("Hitsound lanes", settings.HitsoundsKey),
             shortcutRow("Distance snap toggle", settings.DistanceSnapKey),
             shortcutRow("Convert slider to stream", settings.ConvertStreamKey));
 
-        private Drawable shortcutRow(string label, Bindable<Shortcut> shortcut) => SettingsLayout.LabeledRow(label,
-            new FillFlowContainer
-            {
-                AutoSizeAxes = Axes.Both,
-                Direction = FillDirection.Horizontal,
-                Spacing = new Vector2(8, 0),
-                Children = new Drawable[]
-                {
-                    new KeyRebindButton(shortcut) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
-                    new ResetButton(shortcut.SetDefault) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
-                },
-            });
+        private Drawable shortcutRow(string label, Bindable<Shortcut> shortcut) =>
+            SettingsLayout.LabeledRow(label, controlWithReset(new KeyRebindButton(shortcut), shortcut));
 
-        private Drawable colourRow(string label, Bindable<Colour4> colour) => SettingsLayout.LabeledRow(label,
-            new FillFlowContainer
+        private Drawable colourRow(string label, Bindable<Colour4> colour) =>
+            SettingsLayout.LabeledRow(label, controlWithReset(new ColourSwatch(colour), colour));
+
+        /// <summary>
+        /// A control paired with a <see cref="BindableResetButton{T}"/> (to its right) that only appears once
+        /// the value has been changed from its default. Used as the right-hand control of a settings row.
+        /// </summary>
+        private static Drawable controlWithReset<T>(Drawable control, Bindable<T> bindable)
+        {
+            control.Anchor = Anchor.CentreLeft;
+            control.Origin = Anchor.CentreLeft;
+
+            return new FillFlowContainer
             {
                 AutoSizeAxes = Axes.Both,
                 Direction = FillDirection.Horizontal,
                 Spacing = new Vector2(8, 0),
                 Children = new Drawable[]
                 {
-                    new ColourSwatch(colour) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
-                    new ResetButton(colour.SetDefault) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
+                    control,
+                    new BindableResetButton<T>(bindable) { Anchor = Anchor.CentreLeft, Origin = Anchor.CentreLeft },
                 },
-            });
+            };
+        }
 
         private static Drawable section(params Drawable[] rows) => new FillFlowContainer
         {

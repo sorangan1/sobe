@@ -248,37 +248,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return (beatLength, sv);
         }
 
-        /// <summary>The sample set (1=Normal, 2=Soft, 3=Drum; 0=default) active at the given time.</summary>
-        private static int effectiveSampleSet(double time, List<TimingPoint> points)
-        {
-            int set = 0;
-            foreach (var p in points)
-            {
-                if (p.Time > time)
-                    break;
-                set = p.SampleSet;
-            }
-            return set;
-        }
-
-        /// <summary>The hitsound volume (0-100) active at the given time.</summary>
-        private static int effectiveVolume(double time, List<TimingPoint> points)
-        {
-            int volume = 100;
-            foreach (var p in points)
-            {
-                if (p.Time > time)
-                    break;
-                volume = p.Volume;
-            }
-            return volume;
-        }
 
         private static SampleBank toBank(int sampleSet) => sampleSet switch
         {
+            1 => SampleBank.Normal,
             2 => SampleBank.Soft,
             3 => SampleBank.Drum,
-            _ => SampleBank.Normal,
+            _ => SampleBank.Auto, // 0 (or unknown) = inherit the active timing point's set, resolved at playback
         };
 
         /// <summary>Reads the object's hitSound bitfield and resolves its sample banks and volume.</summary>
@@ -304,14 +280,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     int.TryParse(hsParts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out sampleVolume);
             }
 
-            int timingSet = effectiveSampleSet(time, timingPoints);
-            int resolvedNormal = normalSet > 0 ? normalSet : timingSet;
-            int resolvedAddition = additionSet > 0 ? additionSet : resolvedNormal;
+            // Banks are kept RAW (0 -> Auto): the inherit chain (addition->normal->timing point) is resolved at
+            // playback (EditorScreen.resolveBanksAt) so an "Auto" bank follows the timing points like in osu!.
+            // Store ONLY the object's explicit volume override (hitSample volume); 0 = inherit, also resolved per
+            // sample-event at its own time during playback (EditorScreen.volumeAt).
+            float volume = sampleVolume > 0 ? Math.Clamp(sampleVolume / 100f, 0f, 1f) : 0f;
 
-            // The object's own sample volume overrides the timing point's when non-zero.
-            int volume = sampleVolume > 0 ? sampleVolume : effectiveVolume(time, timingPoints);
-
-            return (hitSound, toBank(resolvedNormal), toBank(resolvedAddition), Math.Clamp(volume / 100f, 0f, 1f));
+            return (hitSound, toBank(normalSet), toBank(additionSet), volume);
         }
 
         /// <summary>
@@ -323,7 +298,6 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         private static IReadOnlyList<NodeSample> parseNodeSamples(string[] parts, int slides, double time, List<TimingPoint> timingPoints, int objHitSound, SampleBank objNormal, SampleBank objAddition)
         {
             int nodeCount = slides + 1;
-            int timingSet = effectiveSampleSet(time, timingPoints);
 
             string[] sounds = parts.Length > 8 ? parts[8].Split('|') : System.Array.Empty<string>();
             string[] sets = parts.Length > 9 ? parts[9].Split('|') : System.Array.Empty<string>();
@@ -333,6 +307,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             {
                 int hs = i < sounds.Length && int.TryParse(sounds[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out int s) ? s : objHitSound;
 
+                // Banks kept raw (0 -> Auto); a missing edgeSet falls back to the object's own banks. The
+                // inherit chain is resolved at playback (EditorScreen.resolveBanksAt), like the object level.
                 SampleBank normal = objNormal, addition = objAddition;
                 if (i < sets.Length)
                 {
@@ -341,10 +317,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         && int.TryParse(ns[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int normalSet)
                         && int.TryParse(ns[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int additionSet))
                     {
-                        int resolvedNormal = normalSet > 0 ? normalSet : timingSet;
-                        int resolvedAddition = additionSet > 0 ? additionSet : resolvedNormal;
-                        normal = toBank(resolvedNormal);
-                        addition = toBank(resolvedAddition);
+                        normal = toBank(normalSet);
+                        addition = toBank(additionSet);
                     }
                 }
 

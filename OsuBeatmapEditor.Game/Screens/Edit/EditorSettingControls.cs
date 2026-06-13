@@ -188,6 +188,30 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
     }
 
     /// <summary>
+    /// A <see cref="ResetButton"/> bound to a setting: it restores the bindable's default on click and is
+    /// only visible while the value differs from that default (so an unchanged field shows no reset button).
+    /// While hidden it collapses out of its layout flow (Alpha 0 → not present).
+    /// </summary>
+    public partial class BindableResetButton<T> : ResetButton
+    {
+        private readonly Bindable<T> bindable;
+
+        public BindableResetButton(Bindable<T> bindable)
+            : base(bindable.SetDefault)
+        {
+            this.bindable = bindable;
+            Alpha = 0;
+        }
+
+        [BackgroundDependencyLoader]
+        private void loadVisibility()
+        {
+            bindable.BindValueChanged(_ =>
+                this.FadeTo(bindable.IsDefault ? 0 : 1, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease), true);
+        }
+    }
+
+    /// <summary>
     /// Button that rebinds a keyboard shortcut: click, then press the desired combination. Modifier keys
     /// (Ctrl/Shift/Alt) held while pressing a normal key are captured as part of the shortcut - pressing a
     /// modifier alone just waits for the main key. Escape cancels without changing the binding.

@@ -50,9 +50,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         public SliderControlPoint(Vector2 p, SliderPathType? type = null) : this(p.X, p.Y, type) { }
     }
 
-    /// <summary>A hitsound sample bank (the .osu sample set: 1 = Normal, 2 = Soft, 3 = Drum).</summary>
+    /// <summary>
+    /// A hitsound sample bank (the .osu sample set). <see cref="Auto"/> = 0 = inherit the active timing point's
+    /// sample set (resolved at playback, like volume); 1 = Normal, 2 = Soft, 3 = Drum.
+    /// </summary>
     public enum SampleBank
     {
+        Auto,
         Normal,
         Soft,
         Drum,

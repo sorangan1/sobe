@@ -39,9 +39,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public readonly BindableFloat BeatLineHeight = new BindableFloat(16f) { MinValue = 2f, MaxValue = 40f, Precision = 1f };
         public readonly BindableFloat QuarterLineHeight = new BindableFloat(10f) { MinValue = 2f, MaxValue = 40f, Precision = 1f };
 
-        /// <summary>Custom editor background colour, shown when the song background is toggled off.</summary>
-        public readonly Bindable<Colour4> EditorBackgroundColour = new Bindable<Colour4>(Colour4.FromHex("1a1a2e"));
-
         // The four combo colours cycled per new combo (map content). Editable so the user can recolour objects.
         public readonly Bindable<Colour4> ComboColour1 = new Bindable<Colour4>(Colour4.FromHex("FF7FA3"));
         public readonly Bindable<Colour4> ComboColour2 = new Bindable<Colour4>(Colour4.FromHex("66C7FF"));
@@ -73,8 +70,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>How long (ms) already-played objects linger and fade out in the editor. Defaults to 600.</summary>
         public readonly BindableFloat ObjectFadeOut = new BindableFloat(600f) { MinValue = 100f, MaxValue = 2000f, Precision = 50f };
 
-        /// <summary>Whether the editor shows the song's background image (true) or the custom colour (false).</summary>
-        public readonly BindableBool UseSongBackground = new BindableBool(true);
+        /// <summary>
+        /// Whether the beta-notice popup is shown when the editor opens. The user can opt out from the
+        /// popup itself (and back in via this setting).
+        /// </summary>
+        public readonly BindableBool ShowBetaPopup = new BindableBool(true);
 
         /// <summary>
         /// Whether hit objects are rendered with the beatmap's own combo colours (its <c>[Colours]</c>, or
@@ -97,6 +97,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Opens the editor settings dialog.</summary>
         public readonly Bindable<Shortcut> SettingsKey = new Bindable<Shortcut>(new Shortcut(Key.O));
+
+        /// <summary>Toggles the expanded hitsound-lanes editor (Clap/Whistle/Finish) in the top timeline.</summary>
+        public readonly Bindable<Shortcut> HitsoundsKey = new Bindable<Shortcut>(new Shortcut(Key.H));
 
         /// <summary>Toggles distance snapping (placement spaced from the previous object by time, like lazer).</summary>
         public readonly Bindable<Shortcut> DistanceSnapKey = new Bindable<Shortcut>(new Shortcut(Key.Y));
@@ -130,7 +133,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["bookmark"] = BookmarkColour,
                 ["preview"] = PreviewPointColour,
                 ["kiai"] = KiaiColour,
-                ["editorbg"] = EditorBackgroundColour,
                 ["measureline"] = MeasureLineColour,
                 ["beatline"] = BeatLineColour,
                 ["halfbeatline"] = HalfBeatLineColour,
@@ -148,6 +150,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["timingpoints"] = TimingPointsKey,
                 ["songsetup"] = SongSetupKey,
                 ["settings"] = SettingsKey,
+                ["hitsounds"] = HitsoundsKey,
                 ["distancesnap"] = DistanceSnapKey,
                 ["convertstream"] = ConvertStreamKey,
             };
@@ -172,7 +175,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var f in floats.Values)
                 f.ValueChanged += _ => save();
             DefaultCreator.ValueChanged += _ => save();
-            UseSongBackground.ValueChanged += _ => save();
+            ShowBetaPopup.ValueChanged += _ => save();
             UseMapColours.ValueChanged += _ => save();
             BackgroundDim.ValueChanged += _ => save();
 
@@ -211,8 +214,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (data.TryGetValue("defaultCreator", out string? creator))
                     DefaultCreator.Value = creator;
 
-                if (data.TryGetValue("useSongBackground", out string? useSong) && bool.TryParse(useSong, out bool useSongValue))
-                    UseSongBackground.Value = useSongValue;
+                if (data.TryGetValue("showBetaPopup", out string? showBeta) && bool.TryParse(showBeta, out bool showBetaValue))
+                    ShowBetaPopup.Value = showBetaValue;
 
                 if (data.TryGetValue("useMapColours", out string? useMap) && bool.TryParse(useMap, out bool useMapValue))
                     UseMapColours.Value = useMapValue;
@@ -268,7 +271,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 foreach (var (key, bindable) in floats)
                     data["f_" + key] = bindable.Value.ToString();
                 data["defaultCreator"] = DefaultCreator.Value;
-                data["useSongBackground"] = UseSongBackground.Value.ToString();
+                data["showBetaPopup"] = ShowBetaPopup.Value.ToString();
                 data["useMapColours"] = UseMapColours.Value.ToString();
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
                 data["version"] = settings_version.ToString();

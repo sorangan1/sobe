@@ -53,7 +53,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                 Anchor = Anchor.Centre,
                                 Origin = Anchor.Centre,
                                 Colour = OsuColour.Text,
-                                Font = FontUsage.Default.With(size: 17, weight: "Bold"),
+                                Font = FontUsage.Default.With(size: 19, weight: "Bold"),
                             },
                         },
                         new OsuButton("+", OsuColour.Surface) { Size = new Vector2(24), FontSize = 18, CornerRadius = 4, Action = () => beatSnap.Step(1) },

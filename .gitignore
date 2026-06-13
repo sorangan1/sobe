@@ -13,6 +13,16 @@ artifacts/
 # OS
 .DS_Store
 
+# Claude Code / AI tooling — keep local only, never push
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+.cursor/
+.cursorrules
+.aider*
+.codeium/
+.continue/
+
 # Inspectcode / test
 inspectcodereport.xml
 CodeAnalysisReport.xml

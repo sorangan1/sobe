@@ -37,6 +37,9 @@ namespace OsuBeatmapEditor.Game.UI
             if ((hitSound & 0b1000) != 0) play($"{bankName(additionBank)}-hitclap", volume);
         }
 
+        /// <summary>Plays one slider-tick sound (osu!'s <c>{bank}-slidertick</c>) for the slider's sample bank.</summary>
+        public void PlaySliderTick(SampleBank bank, float volume) => play($"{bankName(bank)}-slidertick", volume);
+
         private void play(string name, float volume)
         {
             ISample? sample = get(name);

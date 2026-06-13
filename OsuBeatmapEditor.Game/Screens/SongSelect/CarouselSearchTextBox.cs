@@ -41,7 +41,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             // claim it when free, so dropdowns / other inputs keep focus while they're active.
             var input = GetContainingInputManager();
             if (input != null && input.FocusedDrawable == null)
-                input.ChangeFocus(this);
+                GetContainingFocusManager()?.ChangeFocus(this);
         }
 
         protected override bool OnKeyDown(KeyDownEvent e)

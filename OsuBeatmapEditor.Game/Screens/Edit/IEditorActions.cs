@@ -121,5 +121,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Seeks the editor playhead to the given time (ms), clamped to the track.</summary>
         void SeekTo(double time);
+
+        // --- Hitsound lanes editor (the expanded Clap/Whistle/Finish grid in the top timeline) ---
+
+        /// <summary>
+        /// Sets (or clears) a whistle/finish/clap addition bit on one object (<paramref name="nodeIndex"/> &lt; 0)
+        /// or a single slider node. Pass <paramref name="pushUndoStep"/> = false to fold the edit into the
+        /// previous undo step (so a paint drag across many cells collapses to one undo). Plays the result.
+        /// </summary>
+        void SetHitsoundAddition(int objectId, int nodeIndex, int bit, bool on, bool pushUndoStep);
+
+        /// <summary>Sets one object's (or slider node's) sample bank: the addition bank when <paramref name="addition"/>, else the normal bank.</summary>
+        void SetHitsoundBank(int objectId, int nodeIndex, bool addition, SampleBank bank);
     }
 }

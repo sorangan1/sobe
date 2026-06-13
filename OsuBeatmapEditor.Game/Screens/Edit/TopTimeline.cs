@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using osu.Framework.Allocation;
+using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Effects;
@@ -38,6 +39,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly ParsedBeatmap beatmap;
         private readonly Func<double> currentTime;
         private readonly double trackLength;
+        private readonly BindableBool hitsoundMode;
 
         [Resolved]
         private EditorSelection selection { get; set; } = null!;
@@ -76,6 +78,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Spinner resize state (dragging a spinner's tail changes its end time / duration).
         private bool spinnerResizing;
 
+        // Hitsound-lane paint state: while a stroke is held, drag applies the same on/off to every column
+        // it crosses (lazer-less, but the natural way to hitsound a stream in one gesture).
+        private bool hitsoundPainting;
+        private bool paintTurnOn;
+        private int paintLaneIndex;
+        private bool paintFirstApplied;
+        private bool hitsoundDragged; // a lane drag happened this press, so the mouse-up shouldn't single-click
+        private readonly HashSet<(int ObjectId, int NodeIndex)> paintedColumns = new HashSet<(int, int)>();
+
         private Container content = null!;
         private Container breakLayer = null!;
         private Container timingLayer = null!;
@@ -85,10 +96,35 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container previewLayer = null!;
         private readonly List<Box> gridPool = new List<Box>();
 
+        // --- Hitsound lanes (the expanded Clap/Whistle/Finish editor) ---
+        private const int hs_whistle = 0b0010, hs_finish = 0b0100, hs_clap = 0b1000;
+
+        /// <summary>The three addition lanes, top to bottom, with their hitSound bit and accent colour.</summary>
+        private static readonly (string Label, int Bit, Color4 Colour)[] hitsoundLaneDefs =
+        {
+            ("CLAP", hs_clap, EditorTheme.Colours.Velocity),    // green
+            ("WHISTLE", hs_whistle, EditorTheme.Colours.Bookmark), // blue
+            ("FINISH", hs_finish, EditorTheme.Colours.Kiai),    // orange
+        };
+
+        // Band tints/separators (fixed, drawn behind the cells); the scrolling cells; the left label gutter (on top).
+        private Container laneChrome = null!;
+        private Container laneCellsRoot = null!;
+        private Container laneLabels = null!;
+        private readonly Container[] laneCellContainers = new Container[3];
+
         // Selection state, mirroring lazer: a shared selection + a live drag box.
         private readonly List<ObjBounds> objectBounds = new List<ObjBounds>();
         private readonly Dictionary<int, Container> blueprints = new Dictionary<int, Container>();
         private readonly Dictionary<int, float> blueprintBaseX = new Dictionary<int, float>();
+
+        // Virtualisation: only objects whose time falls in (or near) the visible window get a realised drawable,
+        // so a map with thousands of objects stays cheap to zoom/scroll. objectBounds keeps ALL objects (cheap
+        // structs) for hit-testing; the heavy blueprints + hitsound cells are realised/derealised on demand.
+        private readonly HashSet<int> realizedIds = new HashSet<int>();
+        private readonly Dictionary<int, int> objectIndexById = new Dictionary<int, int>();
+        private readonly Dictionary<int, List<Drawable>> objectCells = new Dictionary<int, List<Drawable>>();
+        private double maxObjectDuration;
         // The circle markers (head/tail) per object, so selection can recolour their borders + glow.
         private readonly Dictionary<int, List<CircularContainer>> blueprintCircles = new Dictionary<int, List<CircularContainer>>();
         // Per slider, its selectable node circles keyed by node index (0 = head, Slides = tail), for red node selection.
@@ -102,11 +138,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // plays (the timeline scrolls under a stationary cursor) without needing the mouse to move.
         private Vector2 lastDragScreenPos;
 
-        public TopTimeline(ParsedBeatmap beatmap, Func<double> currentTime, double trackLength)
+        public TopTimeline(ParsedBeatmap beatmap, Func<double> currentTime, double trackLength, BindableBool hitsoundMode)
         {
             this.beatmap = beatmap;
             this.currentTime = currentTime;
             this.trackLength = trackLength;
+            this.hitsoundMode = hitsoundMode;
 
             RelativeSizeAxes = Axes.X;
             Height = HEIGHT;
@@ -123,6 +160,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             InternalChildren = new Drawable[]
             {
                 new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.82f },
+                // Hitsound-lane band tints + separators (fixed; drawn behind the scrolling cells). Hidden
+                // until the lanes editor is expanded.
+                laneChrome = new Container { RelativeSizeAxes = Axes.X, Alpha = 0 },
                 // The 1px white baseline that objects rest on (like a table top) and ticks hang below.
                 new Box
                 {
@@ -162,7 +202,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Width = 2.5f,
                     Colour = OsuColour.Pink,
                 },
+                // Per-node hitsound cells: a manually-scrolled layer ABOVE the playhead so the cells sit over the
+                // centre pink line (mirrors content.X each frame in updateLaneLayout). Hidden until expanded.
+                laneCellsRoot = new Container { Alpha = 0 },
+                // Left-edge lane labels (fixed, drawn on top of the scrolling cells). Hidden until expanded.
+                laneLabels = new Container { RelativeSizeAxes = Axes.X, Alpha = 0 },
             };
+
+            buildLaneChrome();
 
             buildObjects();
 
@@ -176,6 +223,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             settings.BookmarkColour.ValueChanged += _ => buildTimingPoints();
             // Recolour the timeline objects live when the combo palette/toggle/map colours change.
             editable.ColoursChanged += buildObjects;
+            // Toggling the hitsound editor adds/removes the per-object lane cells: rebuild the visible set.
+            hitsoundMode.BindValueChanged(_ => buildObjects());
         }
 
         protected override void Update()
@@ -195,6 +244,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 content.Width = neededWidth;
 
             updateGrid();
+            updateLaneLayout();
+            updateVisibleObjects();
 
             // While a rubber-band box is held, keep extending the selection as the timeline scrolls under a
             // stationary cursor during playback (otherwise it only updates when the mouse actually moves).
@@ -273,88 +324,532 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             objectLayer.Clear();
             previewLayer.Clear();
             objectBounds.Clear();
+            objectIndexById.Clear();
             blueprints.Clear();
             blueprintBaseX.Clear();
             blueprintCircles.Clear();
             sliderNodeCircles.Clear();
             sliderBars.Clear();
+            realizedIds.Clear();
+            objectCells.Clear();
+            for (int i = 0; i < 3; i++)
+                laneCellContainers[i]?.Clear();
 
             buildTimingPoints();
             buildBreaks();
 
+            // Build the lightweight bounds for ALL objects (hit-testing needs the full set); the heavy drawables
+            // are realised lazily for the visible window only.
+            maxObjectDuration = 0;
             for (int i = 0; i < beatmap.HitObjects.Count; i++)
             {
                 var o = beatmap.HitObjects[i];
-                float x = (float)(o.StartTime * pixelsPerMs);
-                Colour4 comboColour = editable.ComboColourFor(o.ComboIndex);
-                Color4 combo = new Color4(comboColour.R, comboColour.G, comboColour.B, comboColour.A);
-
-                // Children are positioned relative to the blueprint (local 0 = the object's start).
-                // An explicit width keeps the marker visible through the masked timeline as it scrolls.
-                var blueprint = new Container
-                {
-                    RelativeSizeAxes = Axes.Y,
-                    X = x,
-                    Width = (float)(o.Duration * pixelsPerMs) + HEIGHT,
-                };
-
-                var circles = new List<CircularContainer>();
-
-                CircularContainer addDot(float dx, Color4 colour, int? comboNumber)
-                {
-                    var c = dot(dx, colour, comboNumber);
-                    circles.Add(c);
-                    blueprint.Add(c);
-                    return c;
-                }
-
-                switch (o.Kind)
-                {
-                    case HitObjectKind.Slider:
-                        float w = (float)(o.Duration * pixelsPerMs);
-                        // The body spans the head's left edge to the tail's right edge so it lines up with
-                        // both circles, which then sit on top at the ends.
-                        var bodyBar = bar(-object_size / 2f, w + object_size, combo);
-                        blueprint.Add(bodyBar);
-                        // bar() rests the body at 0.55 alpha; remember that so a body selection can tint it.
-                        sliderBars[o.Id] = (bodyBar, new Color4(combo.R, combo.G, combo.B, 0.55f));
-                        // Reverse indicator: a tick at each repeat boundary when the slider repeats (Slides >= 2).
-                        for (int k = 1; k < o.Slides; k++)
-                            blueprint.Add(repeatTick(w * k / o.Slides));
-                        var tailDot = addDot(w, combo, null);            // tail (on the end tick)
-                        var headDot = addDot(0, combo, o.ComboNumber);   // head, drawn on top
-                        // A reverse triangle only on the slider's tail (end), pointing back toward the head.
-                        if (o.Slides >= 2)
-                            blueprint.Add(reverseArrow(w, -90));
-                        // Head = node 0, tail = node Slides; these are individually selectable for hitsounding.
-                        sliderNodeCircles[o.Id] = new Dictionary<int, CircularContainer>
-                        {
-                            [0] = headDot,
-                            [Math.Max(1, o.Slides)] = tailDot,
-                        };
-                        break;
-
-                    case HitObjectKind.Spinner:
-                        float sw = (float)(o.Duration * pixelsPerMs);
-                        // A muted body spanning the spin, with end caps so the start/end are readable.
-                        blueprint.Add(bar(-object_size / 2f, sw + object_size, OsuColour.TextMuted));
-                        addDot(sw, OsuColour.TextMuted, null); // end
-                        addDot(0, OsuColour.TextMuted, null);  // start, on top
-                        break;
-
-                    default:
-                        addDot(0, combo, o.ComboNumber);
-                        break;
-                }
-
-                blueprintCircles[o.Id] = circles;
-                objectLayer.Add(blueprint);
-                blueprints[o.Id] = blueprint;
-                blueprintBaseX[o.Id] = x;
                 objectBounds.Add(new ObjBounds(o.Id, o.StartTime, o.StartTime + o.Duration, o.Kind));
+                objectIndexById[o.Id] = i;
+                if (o.Duration > maxObjectDuration)
+                    maxObjectDuration = o.Duration;
             }
 
+            updateVisibleObjects();
             refreshSelectionVisuals();
+        }
+
+        /// <summary>The realised drawable for a single object (its timeline marker plus, when the hitsound editor
+        /// is open, its lane cells). Built on demand by <see cref="updateVisibleObjects"/> as it scrolls into view.</summary>
+        private void realizeObject(int index)
+        {
+            var o = beatmap.HitObjects[index];
+            if (realizedIds.Contains(o.Id))
+                return;
+
+            float x = (float)(o.StartTime * pixelsPerMs);
+            Colour4 comboColour = editable.ComboColourFor(o.ComboIndex);
+            Color4 combo = new Color4(comboColour.R, comboColour.G, comboColour.B, comboColour.A);
+
+            // Children are positioned relative to the blueprint (local 0 = the object's start).
+            // An explicit width keeps the marker visible through the masked timeline as it scrolls.
+            var blueprint = new Container
+            {
+                RelativeSizeAxes = Axes.Y,
+                X = x,
+                Width = (float)(o.Duration * pixelsPerMs) + HEIGHT,
+            };
+
+            var circles = new List<CircularContainer>();
+
+            CircularContainer addDot(float dx, Color4 colour, int? comboNumber)
+            {
+                var c = dot(dx, colour, comboNumber);
+                circles.Add(c);
+                blueprint.Add(c);
+                return c;
+            }
+
+            switch (o.Kind)
+            {
+                case HitObjectKind.Slider:
+                    float w = (float)(o.Duration * pixelsPerMs);
+                    // The body spans the head's left edge to the tail's right edge so it lines up with
+                    // both circles, which then sit on top at the ends.
+                    var bodyBar = bar(-object_size / 2f, w + object_size, combo);
+                    blueprint.Add(bodyBar);
+                    // bar() rests the body at 0.55 alpha; remember that so a body selection can tint it.
+                    sliderBars[o.Id] = (bodyBar, new Color4(combo.R, combo.G, combo.B, 0.55f));
+                    // Reverse indicator: a tick at each repeat boundary when the slider repeats (Slides >= 2).
+                    for (int k = 1; k < o.Slides; k++)
+                        blueprint.Add(repeatTick(w * k / o.Slides));
+                    var tailDot = addDot(w, combo, null);            // tail (on the end tick)
+                    var headDot = addDot(0, combo, o.ComboNumber);   // head, drawn on top
+                    // A reverse triangle only on the slider's tail (end), pointing back toward the head.
+                    if (o.Slides >= 2)
+                        blueprint.Add(reverseArrow(w, -90));
+                    // Head = node 0, tail = node Slides; these are individually selectable for hitsounding.
+                    sliderNodeCircles[o.Id] = new Dictionary<int, CircularContainer>
+                    {
+                        [0] = headDot,
+                        [Math.Max(1, o.Slides)] = tailDot,
+                    };
+                    break;
+
+                case HitObjectKind.Spinner:
+                    float sw = (float)(o.Duration * pixelsPerMs);
+                    // A muted body spanning the spin, with end caps so the start/end are readable.
+                    blueprint.Add(bar(-object_size / 2f, sw + object_size, OsuColour.TextMuted));
+                    addDot(sw, OsuColour.TextMuted, null); // end
+                    addDot(0, OsuColour.TextMuted, null);  // start, on top
+                    break;
+
+                default:
+                    addDot(0, combo, o.ComboNumber);
+                    break;
+            }
+
+            blueprintCircles[o.Id] = circles;
+            objectLayer.Add(blueprint);
+            blueprints[o.Id] = blueprint;
+            blueprintBaseX[o.Id] = x;
+            realizedIds.Add(o.Id);
+
+            applyObjectSelectionVisual(o.Id);
+
+            if (hitsoundMode.Value)
+                realizeCells(o);
+        }
+
+        /// <summary>Removes a previously-realised object's drawables (marker + lane cells) once it scrolls away.</summary>
+        private void derealizeObject(int id)
+        {
+            if (!realizedIds.Remove(id))
+                return;
+
+            if (blueprints.TryGetValue(id, out var bp))
+                bp.Expire();
+
+            blueprints.Remove(id);
+            blueprintBaseX.Remove(id);
+            blueprintCircles.Remove(id);
+            sliderNodeCircles.Remove(id);
+            sliderBars.Remove(id);
+
+            if (objectCells.Remove(id, out var cells))
+            {
+                foreach (var c in cells)
+                    c.Expire();
+            }
+        }
+
+        /// <summary>
+        /// Realises the object markers/cells whose time falls within the visible window (plus a screen of margin so
+        /// they appear before scrolling in), and derealises those that have scrolled away. Runs every frame but is
+        /// O(visible), not O(map size) - the key to staying smooth on dense maps.
+        /// </summary>
+        private void updateVisibleObjects()
+        {
+            if (objectBounds.Count == 0)
+                return;
+
+            double now = currentTime();
+            double half = pixelsPerMs > 0 ? (DrawWidth / 2f) / pixelsPerMs : 0;
+            double pad = pixelsPerMs > 0 ? (DrawWidth / 2f) / pixelsPerMs : 0; // half a screen of margin each side
+            double from = now - half - pad;
+            double to = now + half + pad;
+
+            // Realise: objects whose [start,end] intersects the window. Start the scan at the first object that
+            // could still be on screen (account for the longest slider/spinner reaching back into the window).
+            // Each newly-realised object applies its own selection visual, so no O(map) refresh is needed here.
+            int lo = lowerBoundByStart(from - maxObjectDuration);
+            for (int i = lo; i < objectBounds.Count; i++)
+            {
+                var b = objectBounds[i];
+                if (b.StartTime > to)
+                    break;
+                if (b.EndTime >= from && !realizedIds.Contains(b.Id))
+                    realizeObject(i);
+            }
+
+            // Derealise: any realised object now fully outside the window.
+            if (realizedIds.Count > 0)
+            {
+                _toDerealize.Clear();
+                foreach (int id in realizedIds)
+                {
+                    if (objectIndexById.TryGetValue(id, out int idx))
+                    {
+                        var b = objectBounds[idx];
+                        if (b.EndTime < from || b.StartTime > to)
+                            _toDerealize.Add(id);
+                    }
+                }
+
+                foreach (int id in _toDerealize)
+                    derealizeObject(id);
+            }
+        }
+
+        private readonly List<int> _toDerealize = new List<int>();
+
+        /// <summary>Index of the first object whose StartTime is >= the given time (objectBounds is time-sorted).</summary>
+        private int lowerBoundByStart(double time)
+        {
+            int lo = 0, hi = objectBounds.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (objectBounds[mid].StartTime < time)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            return lo;
+        }
+
+        /// <summary>Builds and registers one object's hitsound lane cells (used while the hitsound editor is open).</summary>
+        private void realizeCells(HitObjectModel o)
+        {
+            if (laneCellContainers[0] == null)
+                return;
+
+            var cells = new List<Drawable>(6);
+            foreach (var (time, sample) in hitsoundColumns(o))
+            {
+                float x = (float)(time * pixelsPerMs);
+                for (int lane = 0; lane < 3; lane++)
+                {
+                    var def = hitsoundLaneDefs[lane];
+                    bool on = (sample.HitSound & def.Bit) != 0;
+                    // The cell's letter shows the note's NORMAL bank; the addition bank lives in the bank bar.
+                    var cell = makeCell(x, def.Colour, on, sample.NormalBank);
+                    laneCellContainers[lane].Add(cell);
+                    cells.Add(cell);
+                }
+            }
+
+            objectCells[o.Id] = cells;
+        }
+
+        // --- Hitsound lanes ---
+
+        /// <summary>Builds the static lane chrome: per-lane tint bands + separators (behind the cells), the three
+        /// scrolling cell containers, and the left-edge labels. Called once on load; geometry is relative thirds
+        /// so it follows the lane region as the timeline expands (see <see cref="updateLaneLayout"/>).</summary>
+        private void buildLaneChrome()
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                var def = hitsoundLaneDefs[i];
+
+                // A faint lane-coloured band with a 1px separator at its bottom edge.
+                laneChrome.Add(new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    RelativePositionAxes = Axes.Y,
+                    Height = 1f / 3f,
+                    Y = i / 3f,
+                    Children = new Drawable[]
+                    {
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = def.Colour, Alpha = 0.06f },
+                        new Box
+                        {
+                            Anchor = Anchor.BottomLeft,
+                            Origin = Anchor.BottomLeft,
+                            RelativeSizeAxes = Axes.X,
+                            Height = 1,
+                            Colour = EditorTheme.Colours.Border,
+                            Alpha = 0.6f,
+                        },
+                    },
+                });
+
+                // The scrolling cells for this lane.
+                laneCellsRoot.Add(laneCellContainers[i] = new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    RelativePositionAxes = Axes.Y,
+                    Height = 1f / 3f,
+                    Y = i / 3f,
+                });
+
+                // The fixed left-edge label, with a small backing so scrolling cells stay readable behind it.
+                laneLabels.Add(new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    RelativePositionAxes = Axes.Y,
+                    Height = 1f / 3f,
+                    Y = i / 3f,
+                    Child = new Container
+                    {
+                        Anchor = Anchor.CentreLeft,
+                        Origin = Anchor.CentreLeft,
+                        Margin = new MarginPadding { Left = 8 },
+                        AutoSizeAxes = Axes.Both,
+                        Masking = true,
+                        CornerRadius = 4,
+                        Children = new Drawable[]
+                        {
+                            new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.85f },
+                            new SpriteText
+                            {
+                                Padding = new MarginPadding { Horizontal = 6, Vertical = 2 },
+                                Text = def.Label,
+                                Colour = def.Colour,
+                                Font = FontUsage.Default.With(size: 11, weight: "Bold"),
+                            },
+                        },
+                    },
+                });
+            }
+        }
+
+        /// <summary>Positions/sizes the three lane regions below the object band each frame, fading them in as the
+        /// timeline expands. The region is everything below the fixed object band (<see cref="HEIGHT"/>px).</summary>
+        private void updateLaneLayout()
+        {
+            float region = Math.Max(0, DrawHeight - HEIGHT);
+            float alpha = Math.Clamp(region / 60f, 0, 1);
+
+            laneChrome.Alpha = laneLabels.Alpha = laneCellsRoot.Alpha = alpha;
+            laneChrome.Y = laneLabels.Y = laneCellsRoot.Y = HEIGHT;
+            laneChrome.Height = laneLabels.Height = laneCellsRoot.Height = region;
+
+            // laneCellsRoot lives outside `content` (so it draws above the playhead); mirror the scroll manually.
+            laneCellsRoot.X = content.X;
+            laneCellsRoot.Width = content.Width;
+        }
+
+        /// <summary>Enumerates the hitsound-bearing columns of an object: a circle/spinner is one column at its
+        /// start; a slider is one column per node (head, each repeat, tail) using its per-node samples.</summary>
+        private IEnumerable<(double Time, NodeSample Sample)> hitsoundColumns(HitObjectModel o)
+        {
+            if (o.Kind == HitObjectKind.Slider && o.Slides >= 1)
+            {
+                int nodes = o.Slides + 1;
+                for (int k = 0; k < nodes; k++)
+                {
+                    double t = o.StartTime + o.Duration * k / o.Slides;
+                    NodeSample ns = o.NodeSamples != null && k < o.NodeSamples.Count
+                        ? o.NodeSamples[k]
+                        : new NodeSample(o.HitSound, o.NormalBank, o.AdditionBank);
+                    yield return (t, ns);
+                }
+            }
+            else
+            {
+                yield return (o.StartTime, new NodeSample(o.HitSound, o.NormalBank, o.AdditionBank));
+            }
+        }
+
+        private static char bankLetter(SampleBank bank) => bank switch
+        {
+            SampleBank.Normal => 'N',
+            SampleBank.Soft => 'S',
+            SampleBank.Drum => 'D',
+            _ => 'A', // Auto
+        };
+
+        /// <summary>One hitsound cell: a filled lane-coloured chip with the addition-bank letter when the addition
+        /// is on, or a faint hollow slot when off.</summary>
+        private Drawable makeCell(float x, Color4 colour, bool on, SampleBank bank) => new Container
+        {
+            Anchor = Anchor.CentreLeft,
+            Origin = Anchor.Centre,
+            X = x,
+            Size = new Vector2(17),
+            Masking = true,
+            CornerRadius = 4,
+            BorderThickness = on ? 0 : 1.5f,
+            BorderColour = on ? colour : EditorTheme.Colours.BorderStrong,
+            Children = new Drawable[]
+            {
+                new Box
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Colour = on ? colour : EditorTheme.Colours.Surface,
+                    Alpha = on ? 1f : 0.35f,
+                },
+                new SpriteText
+                {
+                    Anchor = Anchor.Centre,
+                    Origin = Anchor.Centre,
+                    Text = on ? bankLetter(bank).ToString() : string.Empty,
+                    Colour = OsuColour.BackgroundDark,
+                    Font = FontUsage.Default.With(size: 10, weight: "Bold"),
+                },
+            },
+        };
+
+        // --- Hitsound-lane input (paint / toggle / bank cycle) ---
+
+        /// <summary>Whether the lanes editor is open and the given local Y falls in the lane region; outputs the lane.</summary>
+        private bool tryLaneAt(Vector2 screenPosition, out int lane)
+        {
+            lane = -1;
+            float region = DrawHeight - HEIGHT;
+            if (!hitsoundMode.Value || region < 12)
+                return false;
+
+            float y = ToLocalSpace(screenPosition).Y;
+            if (y < HEIGHT || y > DrawHeight)
+                return false;
+
+            lane = Math.Clamp((int)((y - HEIGHT) / (region / 3f)), 0, 2);
+            return true;
+        }
+
+        /// <summary>The node column nearest the given time (within a cell's reach), as an (objectId, nodeIndex) pair.</summary>
+        private bool tryColumnAt(double time, out int objectId, out int nodeIndex)
+        {
+            objectId = -1;
+            nodeIndex = -1;
+            double best = 12 / pixelsPerMs; // within ~12px of a column
+
+            foreach (var o in beatmap.HitObjects)
+            {
+                foreach (var (t, ni) in hitsoundColumnIndices(o))
+                {
+                    double d = Math.Abs(t - time);
+                    if (d < best)
+                    {
+                        best = d;
+                        objectId = o.Id;
+                        nodeIndex = ni;
+                    }
+                }
+            }
+
+            return objectId >= 0;
+        }
+
+        /// <summary>The hitsound columns of an object as (time, nodeIndex): nodeIndex = -1 for a circle/spinner.</summary>
+        private IEnumerable<(double Time, int NodeIndex)> hitsoundColumnIndices(HitObjectModel o)
+        {
+            if (o.Kind == HitObjectKind.Slider && o.Slides >= 1)
+            {
+                for (int k = 0; k <= o.Slides; k++)
+                    yield return (o.StartTime + o.Duration * k / o.Slides, k);
+            }
+            else
+            {
+                yield return (o.StartTime, -1);
+            }
+        }
+
+        /// <summary>Whether a given lane's addition is currently on for the (object, node) column.</summary>
+        private bool cellOn(int objectId, int nodeIndex, int bit)
+        {
+            int idx = beatmap.HitObjects.FindIndex(o => o.Id == objectId);
+            if (idx < 0)
+                return false;
+
+            var o = beatmap.HitObjects[idx];
+            if (o.Kind == HitObjectKind.Slider && nodeIndex >= 0)
+            {
+                int hs = o.NodeSamples != null && nodeIndex < o.NodeSamples.Count ? o.NodeSamples[nodeIndex].HitSound : o.HitSound;
+                return (hs & bit) != 0;
+            }
+
+            return (o.HitSound & bit) != 0;
+        }
+
+        /// <summary>The NORMAL sample bank currently in force for the (object, node) column (shown on the cells).</summary>
+        private SampleBank cellBank(int objectId, int nodeIndex)
+        {
+            int idx = beatmap.HitObjects.FindIndex(o => o.Id == objectId);
+            if (idx < 0)
+                return SampleBank.Auto;
+
+            var o = beatmap.HitObjects[idx];
+            if (o.Kind == HitObjectKind.Slider && nodeIndex >= 0 && o.NodeSamples != null && nodeIndex < o.NodeSamples.Count)
+                return o.NodeSamples[nodeIndex].NormalBank;
+
+            return o.NormalBank;
+        }
+
+        /// <summary>Left-click on a cell: creates the hitsound (turns the addition on). No-op if already on.</summary>
+        private void createCellAt(double time, int lane)
+        {
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+                return;
+
+            int bit = hitsoundLaneDefs[lane].Bit;
+            if (!cellOn(objectId, nodeIndex, bit))
+                actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: true, pushUndoStep: true);
+        }
+
+        /// <summary>
+        /// Shift+left-click on a cell: cycles the note's NORMAL bank Auto -> Normal -> Soft -> Drum -> Auto (the
+        /// addition bank is set separately in the bank bar). If the cell is off, it's created first.
+        /// </summary>
+        private void cycleBankAt(double time, int lane)
+        {
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+                return;
+
+            int bit = hitsoundLaneDefs[lane].Bit;
+            if (!cellOn(objectId, nodeIndex, bit))
+            {
+                actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: true, pushUndoStep: true);
+                return;
+            }
+
+            SampleBank next = cellBank(objectId, nodeIndex) switch
+            {
+                SampleBank.Auto => SampleBank.Normal,
+                SampleBank.Normal => SampleBank.Soft,
+                SampleBank.Soft => SampleBank.Drum,
+                _ => SampleBank.Auto, // Drum -> Auto
+            };
+            actions.SetHitsoundBank(objectId, nodeIndex, addition: false, next);
+        }
+
+        /// <summary>Right-click on a cell: deletes (clears) that lane's addition for the column under the cursor.</summary>
+        private void deleteCellAt(double time, int lane)
+        {
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+                return;
+
+            int bit = hitsoundLaneDefs[lane].Bit;
+            if (cellOn(objectId, nodeIndex, bit))
+                actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: false, pushUndoStep: true);
+        }
+
+        /// <summary>Applies the active paint stroke's on/off to the column under the cursor (once per column).</summary>
+        private void paintCellAt(double time, int lane)
+        {
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+                return;
+
+            var key = (objectId, nodeIndex);
+            if (!paintedColumns.Add(key))
+                return;
+
+            int bit = hitsoundLaneDefs[lane].Bit;
+            if (cellOn(objectId, nodeIndex, bit) == paintTurnOn)
+                return; // already in the desired state - don't churn an undo step
+
+            // The first cell that actually changes opens the undo step; the rest fold into it.
+            bool first = !paintFirstApplied;
+            paintFirstApplied = true;
+            actions.SetHitsoundAddition(objectId, nodeIndex, bit, paintTurnOn, pushUndoStep: first);
         }
 
         /// <summary>The editable timing-point id matching a derived marker (by time + red/green), or -1 if none.</summary>
@@ -438,7 +933,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     {
                         Anchor = Anchor.TopLeft,
                         Origin = Anchor.TopCentre,
-                        RelativeSizeAxes = Axes.Y,
+                        // Confined to the object band so it doesn't extend down through the hitsound lanes.
+                        Height = HEIGHT,
                         Width = 2f,
                         X = x,
                         Colour = colour,
@@ -721,6 +1217,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnMouseDown(MouseDownEvent e)
         {
+            // In the hitsound lanes, defer to click/drag/up handlers (left cycles, right deletes, drag paints).
+            if (tryLaneAt(e.ScreenSpaceMousePosition, out _))
+            {
+                hitsoundDragged = false;
+                return true;
+            }
+
             // Right-click quick-delete (M2): remove the object under the cursor, or the whole selection
             // if that object is part of it - matching osu!lazer's right-click delete.
             if (e.Button == MouseButton.Right)
@@ -743,6 +1246,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnClick(ClickEvent e)
         {
+            // In the hitsound lanes: left-click creates the hitsound, Shift+left-click cycles its bank (N/S/D).
+            if (tryLaneAt(e.ScreenSpaceMousePosition, out int lane))
+            {
+                double laneTime = timeAt(e.ScreenSpaceMousePosition);
+                if (e.ShiftPressed)
+                    cycleBankAt(laneTime, lane);
+                else
+                    createCellAt(laneTime, lane);
+                return true;
+            }
+
             double time = timeAt(e.ScreenSpaceMousePosition);
             float localY = ToLocalSpace(e.ScreenSpaceMousePosition).Y;
             int hit = objectAt(time, localY);
@@ -826,6 +1340,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnDragStart(DragStartEvent e)
         {
+            // A drag in the hitsound lanes paints a whole row: left adds the addition, right erases it.
+            if ((e.Button == MouseButton.Left || e.Button == MouseButton.Right) && tryLaneAt(e.ScreenSpaceMouseDownPosition, out int paintLane))
+            {
+                hitsoundPainting = true;
+                hitsoundDragged = true;
+                paintLaneIndex = paintLane;
+                paintTurnOn = e.Button == MouseButton.Left;
+                paintFirstApplied = false;
+                paintedColumns.Clear();
+                paintCellAt(timeAt(e.ScreenSpaceMouseDownPosition), paintLane);
+                return true;
+            }
+
             double startTime = timeAt(e.ScreenSpaceMouseDownPosition);
             int id = objectAt(startTime, ToLocalSpace(e.ScreenSpaceMouseDownPosition).Y);
 
@@ -883,7 +1410,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void OnDrag(DragEvent e)
         {
-            if (moving)
+            if (hitsoundPainting)
+                paintCellAt(timeAt(e.ScreenSpaceMousePosition), paintLaneIndex);
+            else if (moving)
                 actions.MoveSelectionTime(timeAt(e.ScreenSpaceMousePosition) - moveStartTime, moveGrabbedId);
             else if (repeatDragging)
                 actions.DragSliderRepeatTo(timeAt(e.ScreenSpaceMousePosition));
@@ -898,6 +1427,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void OnDragEnd(DragEndEvent e)
         {
+            if (hitsoundPainting)
+            {
+                hitsoundPainting = false;
+                paintedColumns.Clear();
+                return;
+            }
+
             if (moving)
             {
                 moving = false;
@@ -921,6 +1457,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             dragBox?.Expire();
             dragBox = null;
+        }
+
+        protected override void OnMouseUp(MouseUpEvent e)
+        {
+            // A right-click (no drag) in the hitsound lanes deletes that cell's addition. A right-DRAG is handled
+            // by the paint stroke (hitsoundDragged), so it isn't double-processed here.
+            if (e.Button == MouseButton.Right && !hitsoundDragged && tryLaneAt(e.ScreenSpaceMousePosition, out int lane))
+                deleteCellAt(timeAt(e.ScreenSpaceMousePosition), lane);
+
+            base.OnMouseUp(e);
         }
 
         private void updateDragSelection(Vector2 screenPosition)
@@ -1017,13 +1563,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// Marks the selection by giving the selected objects' circle markers a glowing yellow border, plus a
         /// single glowing yellow line running parallel to the baseline across the selection's time extent.
         /// </summary>
-        private void refreshSelectionVisuals()
+        /// <summary>Applies the selection visual (circle borders, red node, yellow body tint) to one realised object.</summary>
+        private void applyObjectSelectionVisual(int id)
         {
-            selectionLayer.Clear();
-            selectionLayer.X = 0; // reset any live move-preview offset
-
-            // Recolour every object's circle borders: glowing yellow when selected, plain white otherwise.
-            foreach (var (id, circles) in blueprintCircles)
+            if (blueprintCircles.TryGetValue(id, out var circles))
             {
                 bool sel = selection.Contains(id);
                 foreach (var c in circles)
@@ -1035,8 +1578,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // A selected slider node (for hitsounding) overrides its circle to glowing red.
-            if (nodeSelection.Selected is { } node
-                && sliderNodeCircles.TryGetValue(node.ObjectId, out var nodes)
+            if (nodeSelection.Selected is { } node && node.ObjectId == id
+                && sliderNodeCircles.TryGetValue(id, out var nodes)
                 && nodes.TryGetValue(node.NodeIndex, out var nodeCircle))
             {
                 nodeCircle.BorderColour = EditorTheme.Colours.Error;
@@ -1044,14 +1587,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 nodeCircle.EdgeEffect = redGlow(0.6f, 6f);
             }
 
-            // A selected slider body tints its bar yellow; all other bars rest at their combo colour.
-            foreach (var (id, entry) in sliderBars)
+            // A selected slider body tints its bar yellow; otherwise it rests at its combo colour.
+            if (sliderBars.TryGetValue(id, out var entry))
             {
                 bool bodySelected = nodeSelection.IsBodySelected(id);
                 entry.Bar.Colour = bodySelected
                     ? new Color4(OsuColour.Yellow.R, OsuColour.Yellow.G, OsuColour.Yellow.B, 0.8f)
                     : entry.RestColour;
             }
+        }
+
+        private void refreshSelectionVisuals()
+        {
+            selectionLayer.Clear();
+            selectionLayer.X = 0; // reset any live move-preview offset
+
+            // Apply each realised object's selection visual (borders / node / body tint).
+            foreach (var id in realizedIds)
+                applyObjectSelectionVisual(id);
 
             double minStart = double.MaxValue;
             double maxEnd = double.MinValue;

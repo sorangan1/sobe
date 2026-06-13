@@ -124,7 +124,7 @@ namespace OsuBeatmapEditor.Game.Graphics
 
         /// <summary>
         /// The type scale. Compact and few steps; pick by role, not by eyeballing a pixel size. The framework's
-        /// default font is used throughout; <paramref name="numeric"/> requests fixed-width digits for values
+        /// default font is used throughout; the <c>numeric</c> argument requests fixed-width digits for values
         /// that update live (times, BPM, counts) so they don't jitter as the digits change.
         /// </summary>
         public static class Type
@@ -135,20 +135,20 @@ namespace OsuBeatmapEditor.Game.Graphics
             /// <summary>22 / Bold — rare, the largest header (e.g. a modal's main title).</summary>
             public static FontUsage Display(bool numeric = false) => f(22, "Bold", numeric);
 
-            /// <summary>18 / Bold — overlay & panel titles.</summary>
+            /// <summary>18 / Bold — overlay and panel titles.</summary>
             public static FontUsage Title(bool numeric = false) => f(18, "Bold", numeric);
 
-            /// <summary>15 / SemiBold — section headings, prominent values.</summary>
-            public static FontUsage Heading(bool numeric = false) => f(15, "SemiBold", numeric);
+            /// <summary>16 / SemiBold — section headings, prominent values.</summary>
+            public static FontUsage Heading(bool numeric = false) => f(16, "SemiBold", numeric);
 
-            /// <summary>13 / Regular — default UI body text.</summary>
-            public static FontUsage Body(bool numeric = false) => f(13, "Regular", numeric);
+            /// <summary>14 / Regular — default UI body text.</summary>
+            public static FontUsage Body(bool numeric = false) => f(14, "Regular", numeric);
 
-            /// <summary>13 / SemiBold — emphasised body (button text, active labels).</summary>
-            public static FontUsage BodyStrong(bool numeric = false) => f(13, "SemiBold", numeric);
+            /// <summary>14 / SemiBold — emphasised body (button text, active labels).</summary>
+            public static FontUsage BodyStrong(bool numeric = false) => f(14, "SemiBold", numeric);
 
-            /// <summary>12 / SemiBold — control labels, chips, tabs.</summary>
-            public static FontUsage Label(bool numeric = false) => f(12, "SemiBold", numeric);
+            /// <summary>13 / SemiBold — control labels, chips, tabs.</summary>
+            public static FontUsage Label(bool numeric = false) => f(13, "SemiBold", numeric);
 
             /// <summary>11 / Regular — captions, faint meta, pill readouts.</summary>
             public static FontUsage Caption(bool numeric = false) => f(11, "Regular", numeric);

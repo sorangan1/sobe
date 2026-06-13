@@ -22,7 +22,7 @@ namespace OsuBeatmapEditor.Game
 
             if (host.Window != null)
             {
-                host.Window.Title = "osu! Beatmap Editor";
+                host.Window.Title = AppInfo.FullName;
                 // Enforce a usable minimum editor size; the window may be larger.
                 host.Window.MinSize = new Size(1280, 720);
             }

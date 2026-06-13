@@ -194,9 +194,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
         private static int bankToSet(SampleBank bank) => bank switch
         {
+            SampleBank.Normal => 1,
             SampleBank.Soft => 2,
             SampleBank.Drum => 3,
-            _ => 1,
+            _ => 0, // Auto -> 0 (inherit the timing point's sample set)
         };
 
         private static string shiftCurve(string curve, int dx, int dy)

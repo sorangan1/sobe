@@ -224,7 +224,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (AutoFocus)
                     Schedule(() =>
                     {
-                        GetContainingInputManager()?.ChangeFocus(this);
+                        GetContainingFocusManager()?.ChangeFocus(this);
                         SelectAll();
                     });
             }
