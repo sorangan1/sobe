@@ -74,6 +74,10 @@ jobs:
           </dict>
           </plist>
           PLIST
+          # Ad-hoc signature: free (no Apple Developer cert), and stops Apple Silicon from refusing the
+          # bundle as "damaged". It does NOT remove the Gatekeeper prompt — users still clear quarantine
+          # (see README). Real signing/notarisation needs a paid Developer ID and would slot in here.
+          codesign --force --deep --sign - "$APP"
           zip -ry sobe-${{ matrix.name }}.zip "$APP"
 
       - name: Upload to Release

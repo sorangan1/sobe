@@ -8,6 +8,9 @@ lazer's database — no `.osz` round-trip, no launching osu!.
 > ⚠️ **Beta (v0.9.0).** This is an early build. Many features work, but expect rough edges and
 > bugs. Keep backups of maps you care about.
 
+> 🤖 **Vibecoded.** sobe was built largely by "vibe coding" — iterating with an AI assistant
+> rather than hand-writing every line. Treat the code accordingly.
+
 ## Features
 
 - Full compose view: circles, sliders (multi-anchor + control-point editing), spinners
@@ -22,12 +25,25 @@ lazer's database — no `.osz` round-trip, no launching osu!.
 Grab a build for your platform from the [**Releases**](../../releases) page:
 
 - **Windows** — `sobe-windows-x64.zip` → unzip and run `OsuBeatmapEditor.exe`
-  (Windows SmartScreen may warn since the build is unsigned: *More info → Run anyway*).
 - **macOS** — `sobe-macos-arm64.zip` (Apple Silicon) or `sobe-macos-x64.zip` (Intel) → unzip
-  and open `sobe.app`. The build is unsigned, so the first launch needs
-  **right-click → Open** (or *System Settings → Privacy & Security → Open Anyway*).
+  and open `sobe.app`
 
 osu!lazer must be installed, since sobe edits its library.
+
+### Opening the unsigned builds
+
+These builds are **not code-signed** (signing requires paid Apple/Windows certificates), so the OS
+will warn you the first time. This is expected.
+
+- **Windows:** SmartScreen shows "Windows protected your PC" → click **More info → Run anyway**.
+- **macOS:** if you see "sobe can't be opened" or "is damaged", remove the download quarantine flag:
+
+  ```bash
+  xattr -dr com.apple.quarantine /path/to/sobe.app
+  ```
+
+  Then open it normally. (For a single try you can also **right-click → Open**, or allow it under
+  *System Settings → Privacy & Security → Open Anyway*.)
 
 ## Building from source
 
@@ -51,3 +67,7 @@ when a `v*` tag is pushed.
 
 Built on [osu!Framework](https://github.com/ppy/osu-framework) and default-skin samples from
 `ppy.osu.game.resources`. Not affiliated with ppy.
+
+## License
+
+[MIT](LICENSE).
