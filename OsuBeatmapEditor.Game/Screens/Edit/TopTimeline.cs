@@ -10,6 +10,7 @@ using osu.Framework.Graphics.Effects;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
+using osu.Framework.Utils;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
@@ -66,6 +67,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private int divisor => beatSnap.Value.Value;
 
         private float pixelsPerMs = 0.4f;
+        // The zoom we ease toward. Scroll sets it instantly (and snaps pixelsPerMs to match); the hitsound
+        // min-zoom enforcement (panel open / divisor change) only sets the target so the change animates.
+        private float targetPixelsPerMs = 0.4f;
 
         // Move-drag state (dragging an object shifts the selection in time).
         private bool moving;
@@ -231,29 +235,32 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Toggling the hitsound editor adds/removes the per-object lane cells: rebuild the visible set.
             hitsoundMode.BindValueChanged(_ =>
             {
-                // Opening the lanes editor forces a zoom-in if needed so the cells never overlap.
+                // Opening the lanes editor eases the zoom in (via targetPixelsPerMs) if needed so cells never overlap.
                 if (hitsoundMode.Value)
-                    pixelsPerMs = Math.Max(pixelsPerMs, minPixelsPerMs());
+                    targetPixelsPerMs = Math.Max(targetPixelsPerMs, minPixelsPerMs());
                 buildObjects();
             });
 
-            // A finer divisor raises the minimum zoom (cells sit closer); zoom in if we'd now overlap.
+            // A finer divisor raises the minimum zoom (cells sit closer); ease the zoom in if we'd now overlap.
             beatSnap.Value.BindValueChanged(_ =>
             {
-                if (!hitsoundMode.Value)
-                    return;
-                float m = minPixelsPerMs();
-                if (pixelsPerMs < m)
-                {
-                    pixelsPerMs = m;
-                    buildObjects();
-                }
+                if (hitsoundMode.Value)
+                    targetPixelsPerMs = Math.Max(targetPixelsPerMs, minPixelsPerMs());
             });
         }
 
         protected override void Update()
         {
             base.Update();
+
+            // Ease the zoom toward its target (used by the hitsound min-zoom enforcement) rather than snapping.
+            if (Math.Abs(pixelsPerMs - targetPixelsPerMs) > 1e-4f)
+            {
+                pixelsPerMs = (float)Interpolation.Lerp(targetPixelsPerMs, pixelsPerMs, Math.Exp(-0.018 * Time.Elapsed));
+                if (Math.Abs(pixelsPerMs - targetPixelsPerMs) < 1e-3f)
+                    pixelsPerMs = targetPixelsPerMs;
+                buildObjects(); // object/cell positions depend on the zoom
+            }
 
             // Scroll the content so the current time sits under the centre playhead.
             content.X = DrawWidth / 2f - (float)(currentTime() * pixelsPerMs);
@@ -1318,7 +1325,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (Math.Abs(next - pixelsPerMs) < 1e-5f)
                 return true;
 
-            pixelsPerMs = next;
+            // Scrolling is instant (responsive): snap both the value and its ease target.
+            pixelsPerMs = targetPixelsPerMs = next;
             buildObjects(); // object positions/widths depend on the zoom
             return true;
         }
