@@ -110,12 +110,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // Toggles the expanded hitsound-lanes editor in the top timeline (the playfield shrinks to make room).
         private readonly BindableBool hitsoundMode = new BindableBool();
+
+        // Mod-preview toggles: visualise the map as it would play under HardRock (flipped + harder AR/CS) and
+        // Hidden (objects fade out, no approach circles). Purely visual - they never touch the saved map.
+        private readonly BindableBool hardRockMod = new BindableBool();
+        private readonly BindableBool hiddenMod = new BindableBool();
         // Smoothly-interpolated current top-bar height, lerped toward its collapsed/expanded target each frame.
         private float topHeightCurrent = top_bar_height;
         private SpriteText bpmText = null!;
         private SpriteText svText = null!;
         private SpriteText distanceSnapText = null!;
         private BeatDivisorControl beatDivisorControl = null!;
+        private FillFlowContainer modButtons = null!;
         private FillFlowContainer leftPanels = null!;
         private HitsoundBankBar hitsoundBankBar = null!;
         private double lastDistanceSpacing = double.NaN;
@@ -287,10 +293,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
-                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 96 },
+                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 132 },
                     Colour = EditorTheme.Colours.Selection,
                     Font = EditorTheme.Type.Label(),
                     Alpha = 0,
+                },
+                // Mod-preview chips (HardRock / Hidden), just below the SV readout - toggle to view the map
+                // as it would play under those mods. osu!-style acronym chips in each mod's signature colour.
+                modButtons = new FillFlowContainer
+                {
+                    Anchor = Anchor.TopRight,
+                    Origin = Anchor.TopRight,
+                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 96 },
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new Vector2(6, 0),
+                    Children = new Drawable[]
+                    {
+                        new ModToggleButton(hiddenMod, "HD", EditorTheme.Colours.Selection, "Hidden - objects fade out, no approach circles"),
+                        new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS"),
+                    },
                 },
                 leftPanels = new FillFlowContainer
                 {
@@ -395,7 +417,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // Tick rate isn't part of the per-object model, so force a redraw to refresh the tick dots.
                 playfield.RebuildObjects();
             });
+
+            // Toggling a mod re-renders the playfield: HardRock changes CS (diameter) + AR (preempt) and flips
+            // the field vertically; Hidden changes the per-object fade. Both are pure visualisation.
+            hardRockMod.BindValueChanged(_ => onModsChanged());
+            hiddenMod.BindValueChanged(_ => onModsChanged(), true);
         }
+
+        /// <summary>Re-applies the active mod-preview state to the playfield (diameter/preempt + flip + fade).</summary>
+        private void onModsChanged()
+        {
+            playfield.SetMods(hardRockMod.Value, hiddenMod.Value);
+            rebuildHitObjects();
+        }
+
+        /// <summary>Circle size after the active mods (HardRock multiplies CS by 1.3, capped at 10).</summary>
+        private float effectiveCs() => hardRockMod.Value ? Math.Min(10f, editable.Cs.Value * 1.3f) : editable.Cs.Value;
+
+        /// <summary>Approach rate after the active mods (HardRock multiplies AR by 1.4, capped at 10).</summary>
+        private float effectiveAr() => hardRockMod.Value ? Math.Min(10f, editable.Ar.Value * 1.4f) : editable.Ar.Value;
+
+        /// <summary>Approach-circle preempt window (ms) for the mod-adjusted AR.</summary>
+        private double effectivePreempt() => ParsedBeatmap.PreemptFor(effectiveAr());
 
         /// <summary>
         /// Spacing (osu!pixels) between a slider's ticks: <c>100 · SliderMultiplier · SV / SliderTickRate</c>
@@ -464,7 +507,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             beatDivisorControl.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 8 };
             bpmText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 46 };
             svText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 70 };
-            distanceSnapText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 96 };
+            modButtons.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 96 };
+            distanceSnapText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 132 };
 
             // The Song Setup / Settings buttons slide down with the timeline so they stay just below it.
             toolButtons.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 6 };
@@ -512,7 +556,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             applyCombosTo(temp);
             temp.RemoveAll(o => o.Id == int.MinValue);
 
-            playfield.SetHitObjects(temp, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
+            playfield.SetHitObjects(temp, circleDiameter(), effectivePreempt());
         }
 
         /// <summary>The composing tool the playfield currently has armed.</summary>
@@ -716,7 +760,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private void rebuildHitObjects()
         {
-            playfield.SetHitObjects(parsed.HitObjects, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
+            playfield.SetHitObjects(parsed.HitObjects, circleDiameter(), effectivePreempt());
         }
 
         /// <summary>
@@ -724,7 +768,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// minus a manual visual override so our circles match osu!lazer's editor, which renders them a few
         /// pixels smaller than the raw formula gives.
         /// </summary>
-        private float circleDiameter() => (54.4f - 4.48f * editable.Cs.Value) * 2 - circle_diameter_override;
+        private float circleDiameter() => (54.4f - 4.48f * effectiveCs()) * 2 - circle_diameter_override;
 
         /// <summary>osu!pixels shaved off the hit-circle diameter to match lazer's editor (see <see cref="circleDiameter"/>).</summary>
         private const float circle_diameter_override = 5f;

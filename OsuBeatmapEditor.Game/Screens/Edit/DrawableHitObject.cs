@@ -38,6 +38,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // lifetime, before [Resolved] settings are injected) so already-played notes stay visible, lazer-style.
         private readonly double fadeOut;
 
+        // Mod-preview flags. hidden = Hidden (objects fade out before the hit, no approach circle); flipText =
+        // HardRock flips the whole play area, so text drawn here must be counter-flipped to read upright.
+        private readonly bool hidden;
+        private readonly bool flipText;
+
         private Container? approachCircle;
         private Container? hitRing;
         private Drawable? sliderBall;
@@ -119,13 +124,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The diagonal offset a stacked object is nudged by, per the osu! stacking convention.</summary>
         public static Vector2 StackOffsetFor(int stackHeight, float diameter) => new Vector2(stackHeight * diameter * -0.05f);
 
-        public DrawableHitObject(HitObjectModel hitObject, float diameter, double preempt, double fadeOut, double tickDistance = 0)
+        public DrawableHitObject(HitObjectModel hitObject, float diameter, double preempt, double fadeOut, double tickDistance = 0, bool hidden = false, bool flipText = false)
         {
             this.hitObject = hitObject;
             this.diameter = diameter;
             this.preempt = preempt;
             this.fadeOut = fadeOut;
             this.tickDistance = tickDistance;
+            this.hidden = hidden;
+            this.flipText = flipText;
             path = hitObject.Path;
 
             RelativeSizeAxes = Axes.Both;
@@ -354,6 +361,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Origin = Anchor.Centre,
             Text = hitObject.ComboNumber.ToString(),
             Colour = Color4.White,
+            // Counter-flip when HardRock flips the whole play area, so the number stays upright.
+            Scale = new Vector2(1, flipText ? -1 : 1),
             Font = FontUsage.Default.With(size: diameter * 0.5f, weight: "Bold"),
         };
 
@@ -548,12 +557,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Fade in over TimeFadeIn from start-preempt, hold, then fade out (lazer scales the window for AR>10).
             double fadeIn = time_fade_in * Math.Min(1, preempt / preempt_min);
 
-            using (BeginAbsoluteSequence(start - preempt))
-                this.FadeInFromZero(fadeIn);
-            using (BeginAbsoluteSequence(visibleEnd))
-                this.FadeOut(fadeOut);
+            if (hidden)
+            {
+                // Hidden (osu!'s OsuModHidden): fade in over the first 40% of the preempt, then fade out over the
+                // next 30% so a circle is gone before it's hit; a slider/spinner fades across its whole body.
+                double hdFadeIn = preempt * 0.4;
+                double hdFadeOutStart = start - preempt + hdFadeIn;
+                double hdFadeOut = hasDuration ? Math.Max(1, visibleEnd - hdFadeOutStart) : preempt * 0.3;
 
-            if (approachCircle != null)
+                using (BeginAbsoluteSequence(start - preempt))
+                    this.FadeInFromZero(hdFadeIn);
+                using (BeginAbsoluteSequence(hdFadeOutStart))
+                    this.FadeOut(hdFadeOut);
+            }
+            else
+            {
+                using (BeginAbsoluteSequence(start - preempt))
+                    this.FadeInFromZero(fadeIn);
+                using (BeginAbsoluteSequence(visibleEnd))
+                    this.FadeOut(fadeOut);
+            }
+
+            // Hidden suppresses the approach circle entirely.
+            if (approachCircle != null && !hidden)
             {
                 approachCircle.Alpha = 0;
                 approachCircle.Scale = new Vector2(approach_start_scale);

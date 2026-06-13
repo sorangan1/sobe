@@ -90,6 +90,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private IReadOnlyList<HitObjectModel> currentHitObjects = Array.Empty<HitObjectModel>();
         private float currentDiameter = 40f;
 
+        // Mod-preview state: HardRock flips the play area vertically (about its centre, like osu!'s HR), Hidden
+        // makes objects fade out before they're hit. Set by the editor; purely visual, never saved.
+        private bool modHardRock;
+        private bool modHidden;
+
         // Each live follow-point connection plus the endpoints/ids it was built from, so a position drag can
         // recreate just the connections touching the selection instead of rebuilding the whole map (which lags).
         private sealed class FollowPointConnection
@@ -204,6 +209,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// sync can't see in the per-object models changes (e.g. slider tick rate / velocity affect the ticks).
         /// </summary>
         public void RebuildObjects() => rebuildAppearance();
+
+        /// <summary>
+        /// Sets the active mod-preview state and re-renders. HardRock flips the play area vertically (handled in
+        /// <see cref="Update"/>); Hidden changes the per-object fade. Both feed into every drawable, so force a
+        /// full rebuild even when the circle size / preempt are unchanged.
+        /// </summary>
+        public void SetMods(bool hardRock, bool hidden)
+        {
+            if (modHardRock == hardRock && modHidden == hidden)
+                return;
+
+            modHardRock = hardRock;
+            modHidden = hidden;
+            rebuildAppearance();
+        }
 
         /// <summary>Rebuilds every hit-object drawable so appearance-setting changes take effect immediately.</summary>
         private void rebuildAppearance()
@@ -756,7 +776,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     hitObjectContainer.Remove(existing);
 
                 double tick = o.Kind == HitObjectKind.Slider ? SliderTickDistance?.Invoke(o) ?? 0 : 0;
-                var drawable = new DrawableHitObject(o, circleDiameter, preempt, settings.ObjectFadeOut.Value, tick);
+                var drawable = new DrawableHitObject(o, circleDiameter, preempt, settings.ObjectFadeOut.Value, tick, modHidden, modHardRock);
                 drawableMap[o.Id] = drawable;
                 modelMap[o.Id] = o;
                 hitObjectContainer.Add(drawable);
@@ -1022,8 +1042,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 DrawWidth / ParsedBeatmap.PLAYFIELD_WIDTH,
                 DrawHeight / ParsedBeatmap.PLAYFIELD_HEIGHT) * 0.97f;
 
+            // HardRock flips the play area vertically about its centre (y' = 384 - y), exactly like osu!'s HR.
+            // Flipping the whole container keeps input (ToLocalSpace), overlays and selection consistent for
+            // free; the upside-down combo numbers are counter-flipped inside the drawables that draw text.
             if (scale > 0)
-                playArea.Scale = new Vector2(scale);
+                playArea.Scale = new Vector2(scale, modHardRock ? -scale : scale);
 
             // Hit objects + follow points animate themselves via scheduled transforms against the audio clock
             // (set in SetClock); the lifetime container only updates/draws the ones currently on screen.
@@ -1124,6 +1147,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             placementFill.Colour = colour;
             placementNumber.Text = number.ToString();
             placementNumber.Font = FontUsage.Default.With(size: currentDiameter * 0.5f, weight: "Bold");
+            // Counter-flip the ghost's number so it stays upright while HardRock flips the play area.
+            placementNumber.Scale = new Vector2(1, modHardRock ? -1 : 1);
 
             if (SliderPlacementActive)
                 updateSliderTrace(pos);
