@@ -40,8 +40,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float top_bar_height = TopTimeline.HEIGHT;
         private const float bottom_bar_height = EditorTimeline.HEIGHT;
 
-        // Fraction of the screen the playfield shrinks to when the hitsound-lanes editor is expanded.
-        private const float hitsound_playfield_fraction = 0.38f;
+        // Height of each hitsound lane row when the editor is expanded; the three lanes (plus the object band)
+        // give the timeline its extra height. Kept compact so the playfield stays large.
+        private const float hitsound_lane_height = 44f;
 
         private readonly BeatmapSetModel set;
         private readonly BeatmapDifficultyModel difficulty;
@@ -112,6 +113,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private HitsoundBankBar hitsoundBankBar = null!;
         private double lastDistanceSpacing = double.NaN;
         private ToolPanel toolPanel = null!;
+        private FillFlowContainer toolButtons = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
         private SongSettingsOverlay songSettingsOverlay = null!;
         private BetaNoticeOverlay betaOverlay = null!;
@@ -218,7 +220,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Origin = Anchor.TopLeft,
                     TimingPillClicked = onTimingPillClicked,
                 },
-                buildToolButtons(),
+                toolButtons = buildToolButtons(),
                 bottomTimeline = new EditorTimeline(track, parsed, () => CurrentTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
                 playbackControl = new PlaybackControl(track, () => track?.IsRunning ?? false, togglePlay)
                 {
@@ -424,19 +426,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
-        /// Drives the expand/collapse of the hitsound-lanes editor: when active the top timeline grows so the
-        /// playfield shrinks to <see cref="hitsound_playfield_fraction"/> of the screen, and the compose area's
-        /// top padding follows. Eased per-frame (no transform on padding) so the move reads as a smooth slide.
+        /// Drives the expand/collapse of the hitsound-lanes editor: when active the top timeline grows by three
+        /// compact <see cref="hitsound_lane_height"/> lane rows (the playfield shrinks to suit), and the compose
+        /// area's top padding follows. Eased per-frame (no transform on padding) so the move reads as a smooth slide.
         /// </summary>
         private void updateHitsoundLayout()
         {
             float target = top_bar_height;
             if (hitsoundMode.Value)
-            {
-                // Leave the playfield at the requested fraction; the timeline takes the rest above the bottom bar.
-                float expanded = DrawHeight - bottom_bar_height - DrawHeight * hitsound_playfield_fraction;
-                target = Math.Max(top_bar_height, expanded);
-            }
+                // The object band (top_bar_height) plus three compact lane rows.
+                target = top_bar_height + 3 * hitsound_lane_height;
 
             if (Math.Abs(topHeightCurrent - target) < 0.5f)
                 topHeightCurrent = target;
@@ -452,8 +451,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             svText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 70 };
             distanceSnapText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 96 };
 
-            // The lazer-style bank bar sits just below the expanded timeline, on the left.
-            hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 8 };
+            // The Song Setup / Settings buttons slide down with the timeline so they stay just below it.
+            toolButtons.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 6 };
+
+            // The lazer-style bank bar sits below the tool buttons (which are ~24px tall) on the left.
+            hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 40 };
         }
 
         // Cache key for the live combo preview shown while a placement tool is armed (snapped time + state).
@@ -2781,7 +2783,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // Small Song Setup / Settings buttons tucked into the top-left, just below the top timeline.
         // Exit is via the configured exit key.
-        private Drawable buildToolButtons() => new FillFlowContainer
+        private FillFlowContainer buildToolButtons() => new FillFlowContainer
         {
             Anchor = Anchor.TopLeft,
             Origin = Anchor.TopLeft,

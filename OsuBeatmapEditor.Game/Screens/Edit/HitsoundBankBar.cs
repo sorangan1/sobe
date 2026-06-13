@@ -49,17 +49,81 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 new FillFlowContainer
                 {
                     AutoSizeAxes = Axes.Both,
-                    Direction = FillDirection.Horizontal,
+                    Direction = FillDirection.Vertical,
                     Padding = new MarginPadding(EditorTheme.Spacing.Sm),
-                    Spacing = new Vector2(EditorTheme.Spacing.Md, 0),
+                    Spacing = new Vector2(0, EditorTheme.Spacing.Sm),
                     Children = new Drawable[]
                     {
-                        group("Normal", normalChips, b => SetNormalBank?.Invoke(b)),
-                        group("Addition", additionChips, b => SetAdditionBank?.Invoke(b)),
+                        // Bank selectors.
+                        new FillFlowContainer
+                        {
+                            AutoSizeAxes = Axes.Both,
+                            Direction = FillDirection.Horizontal,
+                            Spacing = new Vector2(EditorTheme.Spacing.Md, 0),
+                            Children = new Drawable[]
+                            {
+                                group("Normal", normalChips, b => SetNormalBank?.Invoke(b)),
+                                group("Addition", additionChips, b => SetAdditionBank?.Invoke(b)),
+                            },
+                        },
+                        // Hairline divider.
+                        new Box { RelativeSizeAxes = Axes.X, Height = 1, Colour = EditorTheme.Colours.Border },
+                        // Controls legend (how to use the lane grid).
+                        new FillFlowContainer
+                        {
+                            AutoSizeAxes = Axes.Both,
+                            Direction = FillDirection.Horizontal,
+                            Spacing = new Vector2(EditorTheme.Spacing.Lg, 0),
+                            Children = new Drawable[]
+                            {
+                                legendEntry("L-Click", "add"),
+                                legendEntry("R-Click", "remove"),
+                                legendEntry("Shift + L", "cycle bank"),
+                                legendEntry("Drag", "paint (L add / R erase)"),
+                            },
+                        },
                     },
                 },
             };
         }
+
+        /// <summary>A keycap-style chip plus a short description, used in the controls legend.</summary>
+        private static Drawable legendEntry(string keys, string description) => new FillFlowContainer
+        {
+            AutoSizeAxes = Axes.Both,
+            Direction = FillDirection.Horizontal,
+            Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
+            Children = new Drawable[]
+            {
+                new Container
+                {
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    AutoSizeAxes = Axes.Both,
+                    Masking = true,
+                    CornerRadius = EditorTheme.Radius.Sm,
+                    Children = new Drawable[]
+                    {
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
+                        new SpriteText
+                        {
+                            Padding = new MarginPadding { Horizontal = 5, Vertical = 2 },
+                            Text = keys,
+                            Colour = EditorTheme.Colours.Text,
+                            Font = EditorTheme.Type.Caption(),
+                        },
+                    },
+                },
+                new SpriteText
+                {
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    Text = description,
+                    Colour = EditorTheme.Colours.TextMuted,
+                    Font = EditorTheme.Type.Caption(),
+                },
+            },
+        };
 
         private static FillFlowContainer group(string caption, Dictionary<SampleBank, Chip> into, Action<SampleBank> onClick)
         {

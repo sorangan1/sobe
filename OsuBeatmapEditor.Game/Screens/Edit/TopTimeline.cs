@@ -107,10 +107,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ("FINISH", hs_finish, EditorTheme.Colours.Kiai),    // orange
         };
 
+        // Hitsound-lane cell visuals + the fixed opaque label gutter on the left of the lanes.
+        private const float cell_size = 28f;
+        private const float lane_gutter = 96f;
+
         // Band tints/separators (fixed, drawn behind the cells); the scrolling cells; the left label gutter (on top).
         private Container laneChrome = null!;
         private Container laneCellsRoot = null!;
         private Container laneLabels = null!;
+        private Container laneEffects = null!;
         private readonly Container[] laneCellContainers = new Container[3];
 
         // Selection state, mirroring lazer: a shared selection + a live drag box.
@@ -589,7 +594,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Y = i / 3f,
                 });
 
-                // The fixed left-edge label, with a small backing so scrolling cells stay readable behind it.
+                // A fixed-width OPAQUE gutter column on the left holds the lane label (room for more controls later).
                 laneLabels.Add(new Container
                 {
                     RelativeSizeAxes = Axes.Both,
@@ -598,26 +603,46 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Y = i / 3f,
                     Child = new Container
                     {
-                        Anchor = Anchor.CentreLeft,
-                        Origin = Anchor.CentreLeft,
-                        Margin = new MarginPadding { Left = 8 },
-                        AutoSizeAxes = Axes.Both,
+                        Anchor = Anchor.TopLeft,
+                        Origin = Anchor.TopLeft,
+                        RelativeSizeAxes = Axes.Y,
+                        Width = lane_gutter,
                         Masking = true,
-                        CornerRadius = 4,
                         Children = new Drawable[]
                         {
-                            new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.85f },
+                            new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Surface },
+                            // A thin lane-coloured accent down the left edge of the gutter.
+                            new Box
+                            {
+                                RelativeSizeAxes = Axes.Y,
+                                Width = 3,
+                                Colour = def.Colour,
+                            },
+                            // Right-edge divider separating the gutter from the cells.
+                            new Box
+                            {
+                                Anchor = Anchor.TopRight,
+                                Origin = Anchor.TopRight,
+                                RelativeSizeAxes = Axes.Y,
+                                Width = 1,
+                                Colour = EditorTheme.Colours.Border,
+                            },
                             new SpriteText
                             {
-                                Padding = new MarginPadding { Horizontal = 6, Vertical = 2 },
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Margin = new MarginPadding { Left = 14 },
                                 Text = def.Label,
                                 Colour = def.Colour,
-                                Font = FontUsage.Default.With(size: 11, weight: "Bold"),
+                                Font = FontUsage.Default.With(size: 13, weight: "Bold"),
                             },
                         },
                     },
                 });
             }
+
+            // Transient action-feedback effects (flash + ring), scrolling with the cells, drawn above them.
+            laneCellsRoot.Add(laneEffects = new Container { RelativeSizeAxes = Axes.Both });
         }
 
         /// <summary>Positions/sizes the three lane regions below the object band each frame, fading them in as the
@@ -673,9 +698,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Anchor = Anchor.CentreLeft,
             Origin = Anchor.Centre,
             X = x,
-            Size = new Vector2(17),
+            Size = new Vector2(cell_size),
             Masking = true,
-            CornerRadius = 4,
+            CornerRadius = 6,
             BorderThickness = on ? 0 : 1.5f,
             BorderColour = on ? colour : EditorTheme.Colours.BorderStrong,
             Children = new Drawable[]
@@ -692,10 +717,61 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Origin = Anchor.Centre,
                     Text = on ? bankLetter(bank).ToString() : string.Empty,
                     Colour = OsuColour.BackgroundDark,
-                    Font = FontUsage.Default.With(size: 10, weight: "Bold"),
+                    Font = FontUsage.Default.With(size: 15, weight: "Bold"),
                 },
             },
         };
+
+        /// <summary>
+        /// Plays a brief action-feedback burst on a lane cell: a soft flash plus an expanding (or, when
+        /// <paramref name="positive"/> is false, contracting) ring — the same feel as the playfield circle hit
+        /// effects. Spawned on add / cycle / delete / paint so edits read instantly.
+        /// </summary>
+        private void spawnCellFeedback(double columnTime, int lane, Color4 colour, bool positive)
+        {
+            if (laneEffects == null)
+                return;
+
+            float x = (float)(columnTime * pixelsPerMs);
+
+            var flash = new Container
+            {
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                RelativeSizeAxes = Axes.Both,
+                Masking = true,
+                CornerRadius = 6,
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour },
+            };
+
+            var ring = new CircularContainer
+            {
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                RelativeSizeAxes = Axes.Both,
+                Masking = true,
+                BorderThickness = 2.5f,
+                BorderColour = colour,
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour, Alpha = 0, AlwaysPresent = true },
+            };
+
+            var fx = new Container
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.Centre,
+                RelativePositionAxes = Axes.Y,
+                Position = new Vector2(x, (lane + 0.5f) / 3f),
+                Size = new Vector2(cell_size),
+                Children = new Drawable[] { ring, flash },
+            };
+
+            laneEffects.Add(fx);
+
+            flash.FadeTo(positive ? 0.6f : 0.5f).FadeOut(240, Easing.OutQuint);
+            ring.FadeTo(0.9f).FadeOut(300, Easing.OutQuint);
+            ring.ScaleTo(1f).ScaleTo(positive ? 1.7f : 0.5f, 300, Easing.OutQuint);
+            fx.Delay(320).Expire();
+        }
 
         // --- Hitsound-lane input (paint / toggle / bank cycle) ---
 
@@ -716,11 +792,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>The node column nearest the given time (within a cell's reach), as an (objectId, nodeIndex) pair.</summary>
-        private bool tryColumnAt(double time, out int objectId, out int nodeIndex)
+        private bool tryColumnAt(double time, out int objectId, out int nodeIndex, out double columnTime)
         {
             objectId = -1;
             nodeIndex = -1;
-            double best = 12 / pixelsPerMs; // within ~12px of a column
+            columnTime = 0;
+            double best = (cell_size / 2f + 2) / pixelsPerMs; // within about half a cell of a column
 
             foreach (var o in beatmap.HitObjects)
             {
@@ -732,6 +809,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         best = d;
                         objectId = o.Id;
                         nodeIndex = ni;
+                        columnTime = t;
                     }
                 }
             }
@@ -787,12 +865,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Left-click on a cell: creates the hitsound (turns the addition on). No-op if already on.</summary>
         private void createCellAt(double time, int lane)
         {
-            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
                 return;
 
             int bit = hitsoundLaneDefs[lane].Bit;
             if (!cellOn(objectId, nodeIndex, bit))
+            {
                 actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: true, pushUndoStep: true);
+                spawnCellFeedback(columnTime, lane, hitsoundLaneDefs[lane].Colour, positive: true);
+            }
         }
 
         /// <summary>
@@ -801,13 +882,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         private void cycleBankAt(double time, int lane)
         {
-            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
                 return;
 
             int bit = hitsoundLaneDefs[lane].Bit;
             if (!cellOn(objectId, nodeIndex, bit))
             {
                 actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: true, pushUndoStep: true);
+                spawnCellFeedback(columnTime, lane, hitsoundLaneDefs[lane].Colour, positive: true);
                 return;
             }
 
@@ -819,23 +901,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 _ => SampleBank.Auto, // Drum -> Auto
             };
             actions.SetHitsoundBank(objectId, nodeIndex, addition: false, next);
+            spawnCellFeedback(columnTime, lane, hitsoundLaneDefs[lane].Colour, positive: true);
         }
 
         /// <summary>Right-click on a cell: deletes (clears) that lane's addition for the column under the cursor.</summary>
         private void deleteCellAt(double time, int lane)
         {
-            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
                 return;
 
             int bit = hitsoundLaneDefs[lane].Bit;
             if (cellOn(objectId, nodeIndex, bit))
+            {
                 actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: false, pushUndoStep: true);
+                spawnCellFeedback(columnTime, lane, EditorTheme.Colours.Error, positive: false);
+            }
         }
 
         /// <summary>Applies the active paint stroke's on/off to the column under the cursor (once per column).</summary>
         private void paintCellAt(double time, int lane)
         {
-            if (!tryColumnAt(time, out int objectId, out int nodeIndex))
+            if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
                 return;
 
             var key = (objectId, nodeIndex);
@@ -850,6 +936,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             bool first = !paintFirstApplied;
             paintFirstApplied = true;
             actions.SetHitsoundAddition(objectId, nodeIndex, bit, paintTurnOn, pushUndoStep: first);
+            spawnCellFeedback(columnTime, lane,
+                paintTurnOn ? hitsoundLaneDefs[lane].Colour : EditorTheme.Colours.Error, positive: paintTurnOn);
         }
 
         /// <summary>The editable timing-point id matching a derived marker (by time + red/green), or -1 if none.</summary>

@@ -15,6 +15,6 @@ namespace OsuBeatmapEditor.Game
         /// <summary>
         /// Current build version. The editor is pre-1.0 and feature-rich but unstable, hence the beta tag.
         /// </summary>
-        public const string Version = "0.9.0-beta";
+        public const string Version = "0.9.1-beta";
     }
 }
