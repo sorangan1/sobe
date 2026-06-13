@@ -24,6 +24,7 @@ Grab a build for your platform from the [**Releases**](../../releases) page:
 - **Windows** — `sobe-windows-x64.zip` → unzip and run `OsuBeatmapEditor.exe`
 - **macOS** — `sobe-macos-arm64.zip` (Apple Silicon) or `sobe-macos-x64.zip` (Intel) → unzip
   and open `sobe.app`
+- **Linux** — `sobe-linux-x64.zip` → unzip, then `chmod +x OsuBeatmapEditor` and run `./OsuBeatmapEditor`
 
 osu!lazer must be installed, since sobe edits its library.
 
@@ -53,12 +54,13 @@ dotnet run --project OsuBeatmapEditor.Desktop
 To produce a self-contained build manually:
 
 ```bash
-dotnet publish OsuBeatmapEditor.Desktop -c Release -r osx-arm64 --self-contained
-# or -r win-x64 / -r osx-x64
+dotnet publish OsuBeatmapEditor.Desktop -c Release -r linux-x64 --self-contained
+# or -r win-x64 / -r osx-arm64 / -r osx-x64
 ```
 
-Releases are built automatically by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-when a `v*` tag is pushed.
+Full, per-platform instructions (including Linux runtime dependencies) are in
+[`docs/BUILD.md`](docs/BUILD.md). Releases are built automatically by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*` tag is pushed.
 
 ## Acknowledgements
 
