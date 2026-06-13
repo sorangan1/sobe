@@ -125,6 +125,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly List<SliderControlPoint> sliderAnchors = new List<SliderControlPoint>();
         private double lastAnchorClickTime = double.MinValue;
         private SmoothPath? sliderPreview;
+        // Node markers shown on each anchor (and the cursor) while a slider is being drawn.
+        private Container? sliderNodes;
 
         // Live control-point editor for the currently-selected single slider.
         private SliderControlPointVisualiser? controlPoints;
@@ -475,6 +477,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     PathRadius = Math.Max(2f, currentDiameter / 2f - 2f),
                     Colour = new Color4(OsuColour.Pink.R, OsuColour.Pink.G, OsuColour.Pink.B, 0.55f),
                 });
+                // Node markers sit on top of the trace so the anchors stay visible as the slider is drawn.
+                overlayLayer.Add(sliderNodes = new Container { RelativeSizeAxes = Axes.Both });
             }
 
             // Ignore a duplicate anchor right on top of the previous one.
@@ -514,6 +518,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             sliderAnchors.Clear();
             sliderPreview?.Expire();
             sliderPreview = null;
+            sliderNodes?.Expire();
+            sliderNodes = null;
             actions.ClearSliderPreview();
         }
 
@@ -1130,6 +1136,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             var pts = new List<SliderControlPoint>(sliderAnchors) { new SliderControlPoint(clampToPlayfield(cursor)) };
+            updateSliderNodes(pts);
+
             var path = SliderGeometry.ComputePath(SliderGeometry.InferSegmentTypes(pts));
 
             if (path.Count < 2)
@@ -1145,6 +1153,36 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // Show, in real time, how long the slider will occupy on the top timeline.
             actions.PreviewSliderPlacement(pts);
+        }
+
+        /// <summary>Redraws a small handle on each committed anchor (and the cursor) of the slider being drawn.</summary>
+        private void updateSliderNodes(IReadOnlyList<SliderControlPoint> pts)
+        {
+            if (sliderNodes == null)
+                return;
+
+            sliderNodes.Clear();
+
+            float size = Math.Max(6f, currentDiameter * 0.26f);
+            for (int i = 0; i < pts.Count; i++)
+            {
+                bool red = pts[i].IsSegmentStart && i > 0;
+                sliderNodes.Add(new CircularContainer
+                {
+                    Origin = Anchor.Centre,
+                    Position = pts[i].Position,
+                    Size = new Vector2(size),
+                    Masking = true,
+                    BorderThickness = 2f,
+                    BorderColour = Color4.White,
+                    Child = new Box
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Colour = red ? OsuColour.Pink : Color4.White,
+                        Alpha = red ? 0.95f : 0.85f,
+                    },
+                });
+            }
         }
 
         /// <summary>The combo colour and number a circle placed at the current time would receive.</summary>

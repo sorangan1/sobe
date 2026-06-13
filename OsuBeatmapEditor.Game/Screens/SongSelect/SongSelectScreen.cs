@@ -24,6 +24,7 @@ using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.Screens.Edit;
 using OsuBeatmapEditor.Game.UI;
+using OsuBeatmapEditor.Game.Updates;
 using osuTK;
 using osuTK.Graphics;
 using osuTK.Input;
@@ -49,6 +50,14 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private NewDifficultyOverlay newDifficultyOverlay = null!;
         private ConfirmOverlay confirmOverlay = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
+        private UpdateBanner updateBanner = null!;
+        private UpdatePromptOverlay updatePrompt = null!;
+
+        // App-wide update mechanism (cached at the game root; absent under the test browser).
+        [Resolved(CanBeNull = true)]
+        private UpdateManager? updates { get; set; }
+
+        private bool updatesInitialised;
 
         // Cached so the shared editor-settings overlay (resolved via DI) can be opened from here too.
         private DependencyContainer dependencies = null!;
@@ -161,6 +170,13 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Origin = Anchor.TopLeft,
                         Margin = new MarginPadding { Left = 40, Top = 40 },
                     },
+                    // Usage statistics, sitting just above the New Beatmap button.
+                    new StatisticsDisplay
+                    {
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Margin = new MarginPadding { Left = 32, Bottom = 30 + 56 + 14 },
+                    },
                     newBeatmapButton = new OsuButton("New Beatmap", OsuColour.Pink)
                     {
                         Anchor = Anchor.BottomLeft,
@@ -236,6 +252,15 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     },
                     confirmOverlay = new ConfirmOverlay(),
                     settingsOverlay = new EditorSettingsOverlay(),
+                    // Update notice, top-centre over the carousel.
+                    updateBanner = new UpdateBanner
+                    {
+                        Anchor = Anchor.TopCentre,
+                        Origin = Anchor.TopCentre,
+                        Margin = new MarginPadding { Top = 20 },
+                    },
+                    // One-time "automatic updates?" prompt, on top of everything.
+                    updatePrompt = new UpdatePromptOverlay(),
                 },
                 },
             };
@@ -301,6 +326,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         {
             base.OnEntering(e);
 
+            initUpdates();
+
             rightArea.MoveToX(40).FadeOut();
             rightArea.MoveToX(0, 500, Easing.OutQuint).FadeIn(500, Easing.OutQuint);
 
@@ -316,6 +343,48 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             base.OnSuspending(e);
             // Don't let the preview keep playing over the editor's own audio.
             currentPreview?.Stop();
+        }
+
+        /// <summary>
+        /// Wires up the self-update flow once: kicks off a background version check, shows the one-time
+        /// "automatic updates?" prompt on first launch, and auto-downloads when an update appears and the
+        /// user has opted into automatic updates. The banner reflects progress and offers the restart.
+        /// </summary>
+        private void initUpdates()
+        {
+            if (updatesInitialised || updates == null)
+                return;
+
+            updatesInitialised = true;
+
+            updates.CheckForUpdatesOnce();
+            updates.State.BindValueChanged(_ => maybeAutoPrepare());
+
+            if (!editorSettings.AutoUpdatePrompted.Value)
+            {
+                updatePrompt.Chosen = enable =>
+                {
+                    editorSettings.AutoUpdate.Value = enable;
+                    editorSettings.AutoUpdatePrompted.Value = true;
+                    maybeAutoPrepare();
+                };
+                updatePrompt.Show();
+            }
+        }
+
+        /// <summary>Starts downloading the available update if the user has enabled automatic updates.</summary>
+        private void maybeAutoPrepare()
+        {
+            if (updates == null)
+                return;
+
+            if (editorSettings.AutoUpdatePrompted.Value
+                && editorSettings.AutoUpdate.Value
+                && updates.State.Value == UpdateState.UpdateAvailable
+                && updates.CanSelfInstall)
+            {
+                _ = updates.PrepareAsync();
+            }
         }
 
         public override void OnResuming(ScreenTransitionEvent e)

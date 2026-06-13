@@ -83,7 +83,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             for (int i = 0; i < controlPoints.Count; i++)
             {
-                var piece = new ControlPointPiece(i, controlPoints[i].IsSegmentStart, diameter * 0.34f)
+                var piece = new ControlPointPiece(i, controlPoints[i].IsSegmentStart, diameter * 0.26f)
                 {
                     Position = controlPoints[i].Position,
                     Moved = handleMoved,

@@ -86,6 +86,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Dim applied over the song background, 0 (no dim) to 1 (fully black).</summary>
         public readonly BindableFloat BackgroundDim = new BindableFloat(0.55f) { MinValue = 0f, MaxValue = 1f, Precision = 0.05f };
 
+        /// <summary>Whether the app checks for and installs updates automatically on launch.</summary>
+        public readonly BindableBool AutoUpdate = new BindableBool(true);
+
+        /// <summary>Whether the one-time "enable automatic updates?" prompt has been answered.</summary>
+        public readonly BindableBool AutoUpdatePrompted = new BindableBool(false);
+
         public readonly Bindable<Shortcut> PlayPauseKey = new Bindable<Shortcut>(new Shortcut(Key.Space));
         public readonly Bindable<Shortcut> ExitKey = new Bindable<Shortcut>(new Shortcut(Key.Escape));
 
@@ -178,6 +184,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ShowBetaPopup.ValueChanged += _ => save();
             UseMapColours.ValueChanged += _ => save();
             BackgroundDim.ValueChanged += _ => save();
+            AutoUpdate.ValueChanged += _ => save();
+            AutoUpdatePrompted.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
             // the loading guard is clear.
@@ -222,6 +230,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("backgroundDim", out string? dim) && float.TryParse(dim, out float dimValue))
                     BackgroundDim.Value = dimValue;
+
+                if (data.TryGetValue("autoUpdate", out string? autoUp) && bool.TryParse(autoUp, out bool autoUpValue))
+                    AutoUpdate.Value = autoUpValue;
+
+                if (data.TryGetValue("autoUpdatePrompted", out string? prompted) && bool.TryParse(prompted, out bool promptedValue))
+                    AutoUpdatePrompted.Value = promptedValue;
 
                 int version = data.TryGetValue("version", out string? vRaw) && int.TryParse(vRaw, out int v) ? v : 0;
                 migrate(version);
@@ -274,6 +288,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["showBetaPopup"] = ShowBetaPopup.Value.ToString();
                 data["useMapColours"] = UseMapColours.Value.ToString();
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
+                data["autoUpdate"] = AutoUpdate.Value.ToString();
+                data["autoUpdatePrompted"] = AutoUpdatePrompted.Value.ToString();
                 data["version"] = settings_version.ToString();
 
                 using var stream = storage.GetStream(filename, FileAccess.Write, FileMode.Create);

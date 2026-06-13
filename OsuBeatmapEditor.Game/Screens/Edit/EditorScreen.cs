@@ -55,6 +55,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private Clipboard? hostClipboard { get; set; }
 
+        // App-wide usage statistics (cached by the game root; absent under the test browser).
+        [Resolved(CanBeNull = true)]
+        private Statistics.StatisticsTracker? statistics { get; set; }
+
+        /// <summary>Stable per-map key for the statistics tracker (independent of the .osu hash).</summary>
+        private string statisticsKey => Statistics.StatisticsTracker.MapKey(set.Artist, set.Title, set.Author, difficulty.DifficultyName);
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
@@ -188,6 +195,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void load(AudioManager audio, GameHost host)
         {
             this.host = host;
+            statistics?.EnterMap(statisticsKey);
             track = loadTrack(audio, host);
             backgroundTexture = loadBackgroundTexture(host);
 
@@ -244,6 +252,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Anchor = Anchor.BottomRight,
                     Origin = Anchor.BottomRight,
                     Margin = new MarginPadding { Right = 12, Bottom = bottom_bar_height + 12 },
+                },
+                // Per-map editing-time readout, stacked just above the FPS counter.
+                new MapStatsDisplay
+                {
+                    Anchor = Anchor.BottomRight,
+                    Origin = Anchor.BottomRight,
+                    Margin = new MarginPadding { Right = 12, Bottom = bottom_bar_height + 12 + 26 },
                 },
                 // Beat divisor sits on top, with the BPM and SV readouts stacked below it.
                 beatDivisorControl = new BeatDivisorControl
@@ -3265,6 +3280,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         public override bool OnExiting(ScreenExitEvent e)
         {
+            statistics?.ExitMap();
             LastTime = track?.CurrentTime ?? 0;
             track?.Stop();
 

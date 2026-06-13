@@ -5,6 +5,8 @@ using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Sprites;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.UI;
+using OsuBeatmapEditor.Game.Updates;
 using osuTK;
 
 namespace OsuBeatmapEditor.Game.Screens.Edit
@@ -17,6 +19,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved]
         private EditorSettings settings { get; set; } = null!;
 
+        [Resolved(CanBeNull = true)]
+        private UpdateManager? updates { get; set; }
+
         protected override string Heading => "Settings";
         protected override Bindable<string>? LastSectionStore => settings.LastSection;
 
@@ -26,8 +31,84 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ("Objects", buildObjectsSection),
             ("Timeline", buildTimelineSection),
             ("Audio", buildAudioSection),
+            ("Updates", buildUpdatesSection),
             ("Shortcuts", buildShortcutsSection),
         };
+
+        private Drawable buildUpdatesSection()
+        {
+            var status = new SpriteText { Colour = EditorTheme.Colours.TextMuted, Font = EditorTheme.Type.Body() };
+            var button = new OsuButton("Check for updates", OsuColour.Surface) { Size = new Vector2(190, 36) };
+
+            void refresh()
+            {
+                switch (updates?.State.Value)
+                {
+                    case Updates.UpdateState.Checking:
+                        status.Text = "Checking for updates...";
+                        button.Text = "Check for updates";
+                        break;
+
+                    case Updates.UpdateState.UpToDate:
+                        status.Text = "You're on the latest version.";
+                        button.Text = "Check again";
+                        break;
+
+                    case Updates.UpdateState.UpdateAvailable:
+                        status.Text = $"Version {updates.LatestVersion.Value} is available.";
+                        button.Text = updates.CanSelfInstall ? "Install from main menu" : "Open download page";
+                        break;
+
+                    case Updates.UpdateState.Downloading:
+                        status.Text = $"Downloading {updates.LatestVersion.Value}... {updates.Progress.Value * 100:0}%";
+                        button.Text = "Downloading...";
+                        break;
+
+                    case Updates.UpdateState.ReadyToRestart:
+                        status.Text = $"Version {updates.LatestVersion.Value} is ready - restart from the main menu.";
+                        button.Text = "Ready";
+                        break;
+
+                    case Updates.UpdateState.Failed:
+                        status.Text = "Couldn't check for updates.";
+                        button.Text = "Try again";
+                        break;
+
+                    default:
+                        status.Text = "Up to date checks run automatically on launch.";
+                        button.Text = "Check for updates";
+                        break;
+                }
+            }
+
+            button.Action = () =>
+            {
+                if (updates == null)
+                    return;
+
+                if (updates.State.Value == Updates.UpdateState.UpdateAvailable && !updates.CanSelfInstall)
+                    updates.OpenReleasesPage();
+                else
+                    updates.CheckForUpdatesOnce();
+
+                refresh();
+            };
+
+            updates?.State.BindValueChanged(_ => refresh());
+            updates?.Progress.BindValueChanged(_ => refresh());
+            refresh();
+
+            return section(
+                toggleRow("Automatic updates", settings.AutoUpdate),
+                new SpriteText
+                {
+                    Text = $"Current version: {AppInfo.Version}",
+                    Colour = EditorTheme.Colours.TextFaint,
+                    Font = EditorTheme.Type.Label(),
+                },
+                status,
+                button);
+        }
 
         private Drawable buildAudioSection() => section(
             SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()));
