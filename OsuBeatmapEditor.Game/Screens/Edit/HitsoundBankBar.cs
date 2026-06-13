@@ -54,12 +54,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Spacing = new Vector2(0, EditorTheme.Spacing.Sm),
                     Children = new Drawable[]
                     {
-                        // Bank selectors.
+                        // Bank selectors, stacked: Addition sits below Normal (keeps the panel narrow).
                         new FillFlowContainer
                         {
                             AutoSizeAxes = Axes.Both,
-                            Direction = FillDirection.Horizontal,
-                            Spacing = new Vector2(EditorTheme.Spacing.Md, 0),
+                            Direction = FillDirection.Vertical,
+                            Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
                             Children = new Drawable[]
                             {
                                 group("Normal", normalChips, b => SetNormalBank?.Invoke(b)),
@@ -68,12 +68,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         },
                         // Hairline divider.
                         new Box { RelativeSizeAxes = Axes.X, Height = 1, Colour = EditorTheme.Colours.Border },
-                        // Controls legend (how to use the lane grid).
+                        // Controls legend (how to use the lane grid), as a vertical list.
                         new FillFlowContainer
                         {
                             AutoSizeAxes = Axes.Both,
-                            Direction = FillDirection.Horizontal,
-                            Spacing = new Vector2(EditorTheme.Spacing.Lg, 0),
+                            Direction = FillDirection.Vertical,
+                            Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
                             Children = new Drawable[]
                             {
                                 legendEntry("L-Click", "add"),
@@ -95,11 +95,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
             Children = new Drawable[]
             {
+                // Fixed-width keycap so the descriptions line up down the list.
                 new Container
                 {
                     Anchor = Anchor.CentreLeft,
                     Origin = Anchor.CentreLeft,
-                    AutoSizeAxes = Axes.Both,
+                    Width = 78,
+                    AutoSizeAxes = Axes.Y,
                     Masking = true,
                     CornerRadius = EditorTheme.Radius.Sm,
                     Children = new Drawable[]
@@ -107,6 +109,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                         new SpriteText
                         {
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
                             Padding = new MarginPadding { Horizontal = 5, Vertical = 2 },
                             Text = keys,
                             Colour = EditorTheme.Colours.Text,
@@ -134,14 +138,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
                 Children = new Drawable[]
                 {
-                    new SpriteText
+                    // Fixed-width caption so the Normal / Addition chip rows line up when stacked.
+                    new Container
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
-                        Margin = new MarginPadding { Right = EditorTheme.Spacing.Xs },
-                        Text = caption,
-                        Colour = EditorTheme.Colours.TextMuted,
-                        Font = EditorTheme.Type.Caption(),
+                        Width = 62,
+                        AutoSizeAxes = Axes.Y,
+                        Child = new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Text = caption,
+                            Colour = EditorTheme.Colours.TextMuted,
+                            Font = EditorTheme.Type.Caption(),
+                        },
                     },
                 },
             };

@@ -744,20 +744,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour },
             };
 
-            var ring = new CircularContainer
+            // A rounded-square outline matching the cell shape (not a circle).
+            var ring = new Container
             {
                 Anchor = Anchor.Centre,
                 Origin = Anchor.Centre,
                 RelativeSizeAxes = Axes.Both,
                 Masking = true,
+                CornerRadius = 6,
                 BorderThickness = 2.5f,
                 BorderColour = colour,
                 Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour, Alpha = 0, AlwaysPresent = true },
             };
 
+            // Anchored top-left and offset by a fraction of the full lane region, so its centre lands exactly
+            // on the cell (the effect layer spans all three lanes, not a single lane third).
             var fx = new Container
             {
-                Anchor = Anchor.CentreLeft,
+                Anchor = Anchor.TopLeft,
                 Origin = Anchor.Centre,
                 RelativePositionAxes = Axes.Y,
                 Position = new Vector2(x, (lane + 0.5f) / 3f),
