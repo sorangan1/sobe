@@ -5,9 +5,6 @@ It reads the beatmaps already installed in your **osu!lazer** library, lets you 
 (objects, timing, hitsounds, metadata, colours…) and writes the changes straight back into
 lazer's database — no `.osz` round-trip, no launching osu!.
 
-> ⚠️ **Beta (v0.9.0).** This is an early build. Many features work, but expect rough edges and
-> bugs. Keep backups of maps you care about.
-
 > 🤖 **Vibecoded.** sobe was built largely by "vibe coding" — iterating with an AI assistant
 > rather than hand-writing every line. Treat the code accordingly.
 
