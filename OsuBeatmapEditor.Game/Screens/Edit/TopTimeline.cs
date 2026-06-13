@@ -229,7 +229,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Recolour the timeline objects live when the combo palette/toggle/map colours change.
             editable.ColoursChanged += buildObjects;
             // Toggling the hitsound editor adds/removes the per-object lane cells: rebuild the visible set.
-            hitsoundMode.BindValueChanged(_ => buildObjects());
+            hitsoundMode.BindValueChanged(_ =>
+            {
+                // Opening the lanes editor forces a zoom-in if needed so the cells never overlap.
+                if (hitsoundMode.Value)
+                    pixelsPerMs = Math.Max(pixelsPerMs, minPixelsPerMs());
+                buildObjects();
+            });
+
+            // A finer divisor raises the minimum zoom (cells sit closer); zoom in if we'd now overlap.
+            beatSnap.Value.BindValueChanged(_ =>
+            {
+                if (!hitsoundMode.Value)
+                    return;
+                float m = minPixelsPerMs();
+                if (pixelsPerMs < m)
+                {
+                    pixelsPerMs = m;
+                    buildObjects();
+                }
+            });
         }
 
         protected override void Update()
@@ -1293,13 +1312,41 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return false;
 
             float factor = e.ScrollDelta.Y > 0 ? 1.1f : 1 / 1.1f;
-            float next = Math.Clamp(pixelsPerMs * factor, min_px_per_ms, max_px_per_ms);
+            // While the hitsound lanes are open, don't let the user zoom out past the point where adjacent
+            // cells would overlap.
+            float next = Math.Clamp(pixelsPerMs * factor, minPixelsPerMs(), max_px_per_ms);
             if (Math.Abs(next - pixelsPerMs) < 1e-5f)
                 return true;
 
             pixelsPerMs = next;
             buildObjects(); // object positions/widths depend on the zoom
             return true;
+        }
+
+        /// <summary>
+        /// The smallest allowed zoom (px per ms). Normally <see cref="min_px_per_ms"/>, but while the hitsound
+        /// lanes editor is open it's raised so that one beat-snap division (the grid the cells sit on) is at
+        /// least a cell wide — so cells never overlap at the current divisor, while still letting the user zoom
+        /// out as the divisor gets coarser. Uses the fastest (smallest beat length) section to stay safe across
+        /// tempo changes. Clamped to <see cref="max_px_per_ms"/>.
+        /// </summary>
+        private float minPixelsPerMs()
+        {
+            if (!hitsoundMode.Value || beatmap.BeatPoints.Count == 0)
+                return min_px_per_ms;
+
+            double minBeat = double.MaxValue;
+            foreach (var bp in beatmap.BeatPoints)
+                if (bp.BeatLength > 0 && bp.BeatLength < minBeat)
+                    minBeat = bp.BeatLength;
+
+            if (minBeat == double.MaxValue)
+                return min_px_per_ms;
+
+            // ms between adjacent snap ticks at the current divisor; one cell must fit in that span.
+            double division = minBeat / divisor;
+            float need = (float)(cell_size / division);
+            return Math.Clamp(need, min_px_per_ms, max_px_per_ms);
         }
 
         // --- Selection (osu!lazer-style: click to select, CTRL to toggle, drag for a rubber-band box) ---
