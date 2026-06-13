@@ -252,12 +252,12 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     },
                     confirmOverlay = new ConfirmOverlay(),
                     settingsOverlay = new EditorSettingsOverlay(),
-                    // Update notice, top-centre over the carousel.
+                    // Update notice, bottom-left above the New Beatmap button (sits above the stats readout).
                     updateBanner = new UpdateBanner
                     {
-                        Anchor = Anchor.TopCentre,
-                        Origin = Anchor.TopCentre,
-                        Margin = new MarginPadding { Top = 20 },
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Margin = new MarginPadding { Left = 30, Bottom = 30 + 56 + 14 + 40 },
                     },
                     // One-time "automatic updates?" prompt, on top of everything.
                     updatePrompt = new UpdatePromptOverlay(),
