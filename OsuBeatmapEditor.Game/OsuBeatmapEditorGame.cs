@@ -12,6 +12,10 @@ namespace OsuBeatmapEditor.Game
     {
         private ScreenStack screenStack = null!;
 
+        // Shared, app-wide transient-notification layer. Cached so any screen can push toasts.
+        [Cached]
+        private readonly ToastOverlay toasts = new ToastOverlay();
+
         public override void SetHost(GameHost host)
         {
             base.SetHost(host);
@@ -36,6 +40,8 @@ namespace OsuBeatmapEditor.Game
                 screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both },
                 // In front of everything so the popup is always visible.
                 volume,
+                // Above even the volume popup so action confirmations are never hidden.
+                toasts,
             };
         }
 

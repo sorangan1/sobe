@@ -17,3 +17,10 @@ artifacts/
 inspectcodereport.xml
 CodeAnalysisReport.xml
 TestResults/
+
+# JetBrains per-user IDE state
+.idea/**/workspace.xml
+.idea/**/indexLayout.xml
+.idea/**/projectSettingsUpdater.xml
+.idea/**/vcs.xml
+.idea/**/.idea/workspace.xml

@@ -35,6 +35,19 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             }
         }
 
+        /// <summary>Reads a dynamic realm integer field defensively (the schema may omit it).</summary>
+        private static int? tryInt(Func<object?> getter)
+        {
+            try
+            {
+                return getter() is { } value ? Convert.ToInt32(value) : (int?)null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public static IReadOnlyList<BeatmapSetModel> LoadAll()
         {
             string? dataDir = LazerStorage.FindDataDirectory();
@@ -84,6 +97,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                             RulesetShortName = ruleset,
                             OsuFileHash = beatmap.Hash ?? string.Empty,
                             BackgroundFile = metadata?.BackgroundFile ?? string.Empty,
+                            AudioFile = metadata?.AudioFile ?? string.Empty,
+                            PreviewTime = tryInt(() => metadata?.PreviewTime) ?? -1,
                         });
                     }
 
@@ -114,7 +129,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         Difficulties = difficulties,
                         DataDirectory = dataDir,
                         Files = files,
-                        SearchText = $"{artist} {title} {author}".ToLowerInvariant(),
+                        SearchText = $"{artist} {title} {author} {string.Join(" ", difficulties.Select(d => d.DifficultyName))}".ToLowerInvariant(),
                         DateAdded = dateAdded,
                         DateModified = dateModified,
                     });

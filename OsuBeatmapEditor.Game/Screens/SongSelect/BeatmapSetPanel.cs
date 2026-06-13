@@ -18,9 +18,12 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
     /// A beatmap set in the carousel. For single-difficulty sets it is the selectable entry; for
     /// multi-difficulty sets it acts as a (non-editable) header above smaller per-difficulty cards.
     /// </summary>
-    public partial class BeatmapSetPanel : ClickableContainer, IHasContextMenu
+    public partial class BeatmapSetPanel : ClickableContainer, ICarouselPanel, IHasContextMenu
     {
         public const float PANEL_HEIGHT = 72;
+
+        /// <summary>Right-click menu entries; set by the carousel when the card is realised.</summary>
+        public MenuItem[] ContextMenuItems { get; set; } = Array.Empty<MenuItem>();
 
         private readonly BeatmapSetModel model;
         private readonly bool isNew;
@@ -33,13 +36,6 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         private bool selected;
 
-        /// <summary>Invoked by the "Edit" context-menu item (only set for editable, single-difficulty cards).</summary>
-        public Action? EditAction;
-
-        public MenuItem[] ContextMenuItems => EditAction == null
-            ? Array.Empty<MenuItem>()
-            : new MenuItem[] { new MenuItem("Edit", EditAction) };
-
         public BeatmapSetPanel(BeatmapSetModel model, bool isNew = false, bool isHeader = false, LargeTextureStore? textures = null)
         {
             this.model = model;
@@ -50,8 +46,11 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             RelativeSizeAxes = Axes.X;
             Height = PANEL_HEIGHT;
             Masking = true;
-            CornerRadius = 6;
+            CornerRadius = 8;
         }
+
+        /// <summary>How far a selected card slides left to read as selected (cards are right-anchored).</summary>
+        private const float selected_shift = 14;
 
         [BackgroundDependencyLoader]
         private void load()
@@ -109,6 +108,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 {
                     RelativeSizeAxes = Axes.Both,
                     Masking = true,
+                    CornerRadius = 8,
                     BorderThickness = 3,
                     BorderColour = OsuColour.Yellow,
                     Alpha = 0,
@@ -154,6 +154,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             selected = value;
             selectionOutline.FadeTo(value ? 1 : 0, 150, Easing.OutQuint);
             background.FadeColour(value ? OsuColour.BackgroundRaised : (isNew ? OsuColour.BackgroundRaised : OsuColour.Surface), 150, Easing.OutQuint);
+            this.MoveToX(value ? -selected_shift : 0, 200, Easing.OutQuint);
         }
 
         protected override bool OnHover(HoverEvent e)

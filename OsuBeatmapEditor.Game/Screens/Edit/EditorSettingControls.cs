@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using osu.Framework.Allocation;
+using osu.Framework.Audio;
 using osu.Framework.Bindables;
 using osu.Framework.Extensions;
 using osu.Framework.Graphics;
@@ -10,7 +13,9 @@ using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Graphics.UserInterface;
 using osu.Framework.Input.Events;
+using osu.Framework.Localisation;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.UI;
 using osuTK;
 using osuTK.Input;
 
@@ -36,8 +41,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
                         Text = label,
-                        Colour = OsuColour.Text,
-                        Font = FontUsage.Default.With(size: 17, weight: "SemiBold"),
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.Body(),
                     },
                     control,
                 },
@@ -109,11 +114,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public ColourSwatch(Bindable<Colour4> colour)
         {
             this.colour = colour;
-            Size = new Vector2(64, 26);
+            Size = new Vector2(64, EditorTheme.Sizing.InputHeight);
             Masking = true;
-            CornerRadius = 4;
-            BorderThickness = 2;
-            BorderColour = OsuColour.TextMuted;
+            CornerRadius = EditorTheme.Radius.Sm;
+            BorderThickness = EditorTheme.Sizing.BorderThickness;
+            BorderColour = EditorTheme.Colours.Border;
         }
 
         [BackgroundDependencyLoader]
@@ -147,9 +152,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public ResetButton(Action action)
         {
             Action = action;
-            Size = new Vector2(58, 26);
+            Size = new Vector2(58, EditorTheme.Sizing.InputHeight);
             Masking = true;
-            CornerRadius = 4;
+            CornerRadius = EditorTheme.Radius.Md;
         }
 
         [BackgroundDependencyLoader]
@@ -157,45 +162,49 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Children = new Drawable[]
             {
-                background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                 new SpriteText
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
                     Text = "Reset",
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 13, weight: "SemiBold"),
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.Label(),
                 },
             };
         }
 
         protected override bool OnHover(HoverEvent e)
         {
-            background.FadeColour(OsuColour.BackgroundRaised, 100);
+            background.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             return base.OnHover(e);
         }
 
         protected override void OnHoverLost(HoverLostEvent e)
         {
-            background.FadeColour(OsuColour.Surface, 100);
+            background.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             base.OnHoverLost(e);
         }
     }
 
-    /// <summary>Button that rebinds a keyboard shortcut: click, then press the desired key.</summary>
+    /// <summary>
+    /// Button that rebinds a keyboard shortcut: click, then press the desired combination. Modifier keys
+    /// (Ctrl/Shift/Alt) held while pressing a normal key are captured as part of the shortcut - pressing a
+    /// modifier alone just waits for the main key. Escape cancels without changing the binding.
+    /// </summary>
     public partial class KeyRebindButton : ClickableContainer
     {
-        private readonly Bindable<Key> key;
+        private readonly Bindable<Shortcut> shortcut;
         private Box background = null!;
         private SpriteText text = null!;
         private bool listening;
 
-        public KeyRebindButton(Bindable<Key> key)
+        public KeyRebindButton(Bindable<Shortcut> shortcut)
         {
-            this.key = key;
-            Size = new Vector2(150, 30);
+            this.shortcut = shortcut;
+            Size = new Vector2(150, EditorTheme.Sizing.RowHeight);
             Masking = true;
-            CornerRadius = 4;
+            CornerRadius = EditorTheme.Radius.Md;
         }
 
         public override bool AcceptsFocus => true;
@@ -205,25 +214,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Children = new Drawable[]
             {
-                background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                 text = new SpriteText
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 15, weight: "SemiBold"),
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.BodyStrong(),
                 },
             };
 
-            key.BindValueChanged(_ => updateText(), true);
+            shortcut.BindValueChanged(_ => updateText(), true);
         }
 
-        private void updateText() => text.Text = listening ? "Press a key..." : key.Value.ToString();
+        private void updateText()
+        {
+            text.Text = listening ? "Press keys..." : shortcut.Value.ToString();
+            text.Colour = listening ? EditorTheme.Colours.TextMuted : EditorTheme.Colours.Text;
+        }
 
         protected override bool OnClick(ClickEvent e)
         {
+            // Listening state: a soft accent tint + accent border - NOT the solid accent fill, which is
+            // reserved for primary/active controls (design system: the accent isn't a generic highlight).
             listening = true;
-            background.Colour = OsuColour.Pink;
+            background.Colour = EditorTheme.Colours.AccentSoft;
+            BorderThickness = EditorTheme.Sizing.BorderThickness;
+            BorderColour = EditorTheme.Colours.Accent;
             updateText();
             return true;
         }
@@ -233,8 +250,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!listening)
                 return false;
 
+            // Wait for a non-modifier key, then capture it together with whatever modifiers are held.
+            if (Shortcut.IsModifierKey(e.Key))
+                return true;
+
             if (e.Key != Key.Escape)
-                key.Value = e.Key;
+                shortcut.Value = new Shortcut(e.Key, e.ControlPressed, e.ShiftPressed, e.AltPressed);
 
             stopListening();
             return true;
@@ -249,8 +270,124 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void stopListening()
         {
             listening = false;
-            background.Colour = OsuColour.Surface;
+            background.Colour = EditorTheme.Colours.Control;
+            BorderThickness = 0;
             updateText();
+        }
+    }
+
+    /// <summary>
+    /// Dropdown that selects the application's audio output device, bound to the framework's
+    /// <see cref="AudioManager.AudioDevice"/> (an empty entry means "system default"). The framework
+    /// persists the choice in its own config, and the list refreshes live as devices are plugged in or
+    /// removed. Mirrors osu!lazer's AudioDevicesSettings.
+    /// </summary>
+    public partial class AudioDeviceSetting : CompositeDrawable
+    {
+        [Resolved]
+        private AudioManager audio { get; set; } = null!;
+
+        private AudioDeviceDropdown dropdown = null!;
+
+        public AudioDeviceSetting()
+        {
+            Width = 320;
+            AutoSizeAxes = Axes.Y;
+        }
+
+        [BackgroundDependencyLoader]
+        private void load()
+        {
+            InternalChild = dropdown = new AudioDeviceDropdown { RelativeSizeAxes = Axes.X };
+
+            // Populate before binding so the persisted device is a valid selection in the list.
+            updateItems();
+            dropdown.Current.BindTo(audio.AudioDevice);
+
+            audio.OnNewDevice += onDeviceChanged;
+            audio.OnLostDevice += onDeviceChanged;
+        }
+
+        // Device hotplug events can arrive off the update thread; marshal back before touching drawables.
+        private void onDeviceChanged(string _) => Schedule(updateItems);
+
+        private void updateItems()
+        {
+            var items = new List<string> { string.Empty };
+            items.AddRange(audio.AudioDeviceNames);
+
+            // Keep the currently selected device listed even if it's momentarily gone (e.g. unplugged).
+            string preferred = audio.AudioDevice.Value;
+            if (items.All(i => i != preferred))
+                items.Add(preferred);
+
+            dropdown.Items = items.Where(i => i != null).Distinct().ToList();
+        }
+
+        protected override void Dispose(bool isDisposing)
+        {
+            base.Dispose(isDisposing);
+
+            if (audio != null)
+            {
+                audio.OnNewDevice -= onDeviceChanged;
+                audio.OnLostDevice -= onDeviceChanged;
+            }
+        }
+
+        /// <summary>Renders the empty "system default" entry as a friendly label.</summary>
+        private partial class AudioDeviceDropdown : ThemedDropdown<string>
+        {
+            protected override LocalisableString GenerateItemText(string item)
+                => string.IsNullOrEmpty(item) ? "Default" : item;
+        }
+    }
+
+    /// <summary>A compact themed on/off switch two-way bound to a <see cref="BindableBool"/>.</summary>
+    public partial class ToggleSwitch : ClickableContainer
+    {
+        private readonly BindableBool current;
+        private Box track = null!;
+        private Container knob = null!;
+
+        public ToggleSwitch(BindableBool current)
+        {
+            this.current = current;
+            Size = new Vector2(46, 24);
+            Action = () => current.Value = !current.Value;
+        }
+
+        [BackgroundDependencyLoader]
+        private void load()
+        {
+            Children = new Drawable[]
+            {
+                new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Masking = true,
+                    CornerRadius = 12,
+                    Child = track = new Box { RelativeSizeAxes = Axes.Both },
+                },
+                knob = new Container
+                {
+                    Size = new Vector2(18),
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    Masking = true,
+                    CornerRadius = 9,
+                    Child = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Text },
+                },
+            };
+
+            current.BindValueChanged(v => update(v.NewValue, animate: true), true);
+        }
+
+        private void update(bool on, bool animate)
+        {
+            double d = animate ? EditorTheme.Motion.Fast : 0;
+            track.FadeColour(on ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, d, EditorTheme.Motion.Ease);
+            knob.MoveToX(on ? Width - knob.Width - 3 : 3, d, EditorTheme.Motion.Ease);
         }
     }
 }

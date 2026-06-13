@@ -26,6 +26,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         {
             var result = new ParsedBeatmap();
             var timingPoints = new List<TimingPoint>();
+            var comboColours = new SortedDictionary<int, osu.Framework.Graphics.Colour4>();
             float sliderMultiplier = 1.4f;
             int comboNumber = 0;
             int comboIndex = 0;
@@ -38,6 +39,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 line = line.Trim();
                 if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal))
                     continue;
+
+                // Header line: "osu file format vN" (controls some slider parsing edge cases).
+                if (section.Length == 0 && line.StartsWith("osu file format v", StringComparison.Ordinal)
+                    && int.TryParse(line.AsSpan("osu file format v".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out int ver))
+                {
+                    result.FormatVersion = ver;
+                    continue;
+                }
 
                 if (line.StartsWith('[') && line.EndsWith(']'))
                 {
@@ -83,10 +92,15 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         parseKeyValue(line, "OverallDifficulty", v => setFloat(v, x => result.OverallDifficulty = x));
                         parseKeyValue(line, "ApproachRate", v => setFloat(v, x => result.ApproachRate = x));
                         parseKeyValue(line, "SliderMultiplier", v => setFloat(v, x => { sliderMultiplier = x; result.SliderMultiplier = x; }));
+                        parseKeyValue(line, "SliderTickRate", v => setFloat(v, x => result.SliderTickRate = x));
                         break;
 
                     case "Events":
                         parseEventLine(line, result);
+                        break;
+
+                    case "Colours":
+                        parseComboColour(line, comboColours);
                         break;
 
                     case "TimingPoints":
@@ -103,43 +117,36 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             for (int i = 0; i < result.HitObjects.Count; i++)
                 result.HitObjects[i] = result.HitObjects[i] with { Id = i };
 
-            computeKiaiSections(timingPoints, result);
-            buildVelocityPoints(timingPoints, result);
+            // Assign each timing point a stable id, then derive the timeline/SV/kiai lists from them.
+            for (int i = 0; i < result.TimingPointModels.Count; i++)
+                result.TimingPointModels[i] = result.TimingPointModels[i] with { Id = i };
+
+            result.ComboColours.AddRange(comboColours.Values);
+
+            result.RebuildTimingDerived();
             return result;
         }
 
-        /// <summary>Bakes the effective slider-velocity multiplier over time: 1 at each red line, -100/beatLength at greens.</summary>
-        private static void buildVelocityPoints(List<TimingPoint> points, ParsedBeatmap result)
+        /// <summary>Parses a <c>[Colours]</c> <c>ComboN : r,g,b</c> line into <paramref name="into"/> (keyed by N).</summary>
+        private static void parseComboColour(string line, SortedDictionary<int, osu.Framework.Graphics.Colour4> into)
         {
-            double sv = 1;
-            foreach (var tp in points.OrderBy(p => p.Time))
-            {
-                sv = tp.Uninherited ? 1 : Math.Clamp(-100 / tp.BeatLength, 0.1, 10);
-                result.VelocityPoints.Add(new VelocityPoint(tp.Time, sv));
-            }
-        }
+            int sep = line.IndexOf(':');
+            if (sep < 0)
+                return;
 
-        private static void computeKiaiSections(List<TimingPoint> points, ParsedBeatmap result)
-        {
-            bool active = false;
-            int start = 0;
+            string key = line[..sep].Trim();
+            if (!key.StartsWith("Combo", StringComparison.OrdinalIgnoreCase)
+                || !int.TryParse(key.AsSpan("Combo".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out int n))
+                return;
 
-            foreach (var tp in points.OrderBy(p => p.Time))
-            {
-                if (tp.Kiai && !active)
-                {
-                    active = true;
-                    start = (int)tp.Time;
-                }
-                else if (!tp.Kiai && active)
-                {
-                    active = false;
-                    result.KiaiSections.Add(new KiaiSection(start, (int)tp.Time));
-                }
-            }
+            string[] parts = line[(sep + 1)..].Split(',');
+            if (parts.Length < 3
+                || !byte.TryParse(parts[0].Trim(), out byte r)
+                || !byte.TryParse(parts[1].Trim(), out byte g)
+                || !byte.TryParse(parts[2].Trim(), out byte b))
+                return;
 
-            if (active)
-                result.KiaiSections.Add(new KiaiSection(start, int.MaxValue));
+            into[n] = new osu.Framework.Graphics.Colour4(r, g, b, 255);
         }
 
         private static void parseKeyValue(string line, string key, Action<string> apply)
@@ -164,6 +171,16 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             string[] parts = line.Split(',');
             if (result.BackgroundFilename.Length == 0 && parts.Length >= 3 && parts[0].Trim() == "0")
                 result.BackgroundFilename = parts[2].Trim().Trim('"');
+
+            // Break event: 2,startTime,endTime (or "Break,start,end").
+            string kind = parts[0].Trim();
+            if ((kind == "2" || kind.Equals("Break", StringComparison.OrdinalIgnoreCase)) && parts.Length >= 3
+                && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double start)
+                && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double end)
+                && end > start)
+            {
+                result.Breaks.Add(new BreakPeriod((int)start, (int)end));
+            }
         }
 
         private static void parseTimingPoint(string line, List<TimingPoint> points, ParsedBeatmap result)
@@ -177,30 +194,25 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             // Newer formats carry an explicit uninherited flag; older ones use the sign of beatLength.
             bool uninherited = parts.Length >= 7 ? parts[6].Trim() == "1" : beatLength > 0;
 
-            // effects (parts[7]) bit 0 = kiai.
-            bool kiai = parts.Length >= 8
-                        && int.TryParse(parts[7].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int effects)
-                        && (effects & 1) != 0;
+            // effects (parts[7]) bit 0 = kiai; keep the whole field so other bits round-trip losslessly.
+            int effects = parts.Length >= 8 && int.TryParse(parts[7].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int ef) ? ef : 0;
+            bool kiai = (effects & 1) != 0;
+
+            // meter (parts[2]): beats per bar for an uninherited line.
+            int meter = parts.Length >= 3 && int.TryParse(parts[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int m) && m > 0 ? m : 4;
 
             // sampleSet (parts[3]): 0 = none/default (Normal), 1 = Normal, 2 = Soft, 3 = Drum.
             int sampleSet = parts.Length >= 4 && int.TryParse(parts[3].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int ss) ? ss : 0;
+
+            // sampleIndex (parts[4]): custom sample bank index; preserved for lossless re-emit.
+            int sampleIndex = parts.Length >= 5 && int.TryParse(parts[4].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int si) ? si : 0;
 
             // volume (parts[5]): 0-100; the active value applies to objects that don't override it.
             int volume = parts.Length >= 6 && int.TryParse(parts[5].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int vol) ? vol : 100;
 
             points.Add(new TimingPoint(time, beatLength, uninherited, kiai, sampleSet, volume));
-
-            // Display value: BPM for red (uninherited) lines, the SV multiplier for green (inherited) ones.
-            double markerValue = uninherited
-                ? (beatLength > 0 ? 60000.0 / beatLength : 0)
-                : Math.Clamp(-100 / beatLength, 0.1, 10);
-            result.TimingPoints.Add(new TimingMarker((int)time, uninherited, markerValue));
-
-            if (uninherited)
-            {
-                int meter = parts.Length >= 3 && int.TryParse(parts[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int m) && m > 0 ? m : 4;
-                result.BeatPoints.Add(new BeatPoint(time, beatLength, meter));
-            }
+            result.TimingPointModels.Add(new TimingPointModel(
+                result.TimingPointModels.Count, time, beatLength, meter, sampleSet, sampleIndex, volume, uninherited, effects, line));
         }
 
         private static void parseBookmarks(string value, ParsedBeatmap result)
@@ -302,6 +314,46 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return (hitSound, toBank(resolvedNormal), toBank(resolvedAddition), Math.Clamp(volume / 100f, 0f, 1f));
         }
 
+        /// <summary>
+        /// Resolves a slider's per-node hitsounds from its <c>edgeSounds</c> (parts[8]) and <c>edgeSets</c>
+        /// (parts[9]) fields - one <see cref="NodeSample"/> per node (head, each repeat, tail; count = slides + 1).
+        /// Missing fields fall back to the object's own hitSound and banks (legacy maps), and a node set of 0
+        /// resolves to the active timing-point sample set, exactly like the object-level resolution.
+        /// </summary>
+        private static IReadOnlyList<NodeSample> parseNodeSamples(string[] parts, int slides, double time, List<TimingPoint> timingPoints, int objHitSound, SampleBank objNormal, SampleBank objAddition)
+        {
+            int nodeCount = slides + 1;
+            int timingSet = effectiveSampleSet(time, timingPoints);
+
+            string[] sounds = parts.Length > 8 ? parts[8].Split('|') : System.Array.Empty<string>();
+            string[] sets = parts.Length > 9 ? parts[9].Split('|') : System.Array.Empty<string>();
+
+            var result = new NodeSample[nodeCount];
+            for (int i = 0; i < nodeCount; i++)
+            {
+                int hs = i < sounds.Length && int.TryParse(sounds[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out int s) ? s : objHitSound;
+
+                SampleBank normal = objNormal, addition = objAddition;
+                if (i < sets.Length)
+                {
+                    string[] ns = sets[i].Split(':');
+                    if (ns.Length >= 2
+                        && int.TryParse(ns[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int normalSet)
+                        && int.TryParse(ns[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int additionSet))
+                    {
+                        int resolvedNormal = normalSet > 0 ? normalSet : timingSet;
+                        int resolvedAddition = additionSet > 0 ? additionSet : resolvedNormal;
+                        normal = toBank(resolvedNormal);
+                        addition = toBank(resolvedAddition);
+                    }
+                }
+
+                result[i] = new NodeSample(hs, normal, addition);
+            }
+
+            return result;
+        }
+
         private static void parseHitObjectLine(string line, ParsedBeatmap result, List<TimingPoint> timingPoints, float sliderMultiplier, ref int comboNumber, ref int comboIndex, ref bool firstHitObject)
         {
             // Format: x,y,time,type,hitSound,objectParams...,hitSample
@@ -331,15 +383,21 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             // Type bitfield: bit 0 = circle, bit 1 = slider, bit 3 = spinner.
             if ((type & 0b1000) != 0)
             {
-                result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Spinner, null, ComboNumber: comboNumber, ComboIndex: comboIndex,
+                // Spinner format: x,y,time,type,hitSound,endTime,hitSample - parts[5] is the end time.
+                double endTime = parts.Length >= 6 && double.TryParse(parts[5], NumberStyles.Float, CultureInfo.InvariantCulture, out double et) ? et : time;
+                double spinnerDuration = Math.Max(0, endTime - time);
+
+                result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Spinner, null, Duration: spinnerDuration,
+                    ComboNumber: comboNumber, ComboIndex: comboIndex,
                     HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line));
             }
             else if ((type & 0b10) != 0 && parts.Length >= 6)
             {
-                (var path, double duration, int slides) = parseSlider(x, y, time, parts, timingPoints, sliderMultiplier);
-                (var anchors, char curveType) = SliderGeometry.ParseAnchors(line);
+                var controlPoints = SliderGeometry.ParseControlPoints(line, result.FormatVersion);
+                (var path, double duration, int slides) = parseSlider(time, parts, timingPoints, sliderMultiplier, controlPoints);
+                var nodeSamples = parseNodeSamples(parts, slides, time, timingPoints, hitSound, normalBank, additionBank);
                 result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Slider, path, duration, slides, comboNumber, comboIndex,
-                    hitSound, normalBank, additionBank, sampleVolume, line, Anchors: anchors, CurveType: curveType));
+                    hitSound, normalBank, additionBank, sampleVolume, line, ControlPoints: controlPoints, NodeSamples: nodeSamples));
             }
             else
             {
@@ -349,24 +407,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         }
 
         private static (IReadOnlyList<Vector2> path, double duration, int slides) parseSlider(
-            float headX, float headY, double time, string[] parts, List<TimingPoint> timingPoints, float sliderMultiplier)
+            double time, string[] parts, List<TimingPoint> timingPoints, float sliderMultiplier, IReadOnlyList<SliderControlPoint> controlPoints)
         {
-            // parts[5] = "<type>|x:y|...", parts[6] = slides (repeats), parts[7] = pixel length.
-            string[] curve = parts[5].Split('|');
-            char curveType = curve.Length > 0 && curve[0].Length > 0 ? curve[0][0] : 'L';
-
-            var controlPoints = new List<Vector2> { new Vector2(headX, headY) };
-            for (int i = 1; i < curve.Length; i++)
-            {
-                string[] xy = curve[i].Split(':');
-                if (xy.Length == 2
-                    && float.TryParse(xy[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float px)
-                    && float.TryParse(xy[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float py))
-                {
-                    controlPoints.Add(new Vector2(px, py));
-                }
-            }
-
+            // parts[6] = slides (repeats), parts[7] = pixel length.
             int slides = 1;
             if (parts.Length >= 7)
                 int.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out slides);
@@ -376,7 +419,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (parts.Length >= 8)
                 double.TryParse(parts[7], NumberStyles.Float, CultureInfo.InvariantCulture, out pixelLength);
 
-            var path = SliderPathCalculator.Calculate(controlPoints, curveType, pixelLength);
+            // Path geometry mirrors lazer's SliderPath (segmented spline + length trim/extend to pixelLength).
+            var path = SliderGeometry.ComputePath(controlPoints, pixelLength);
 
             // Slider travel time: pixelLength / velocity, velocity = SliderMultiplier * 100 * SV per beat.
             (double beatLength, double sv) = effectiveTiming(time, timingPoints);

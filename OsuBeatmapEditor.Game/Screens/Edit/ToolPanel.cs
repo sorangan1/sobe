@@ -35,7 +35,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             (EditorTool.Selection, 1, "Select"),
             (EditorTool.Circle, 2, "Circle"),
             (EditorTool.Slider, 3, "Slider"),
-            (EditorTool.Spinner, 4, "Spinner"),
+            (EditorTool.Spinner, 4, "Spinner"),  // placeable: click to start, scrub forward, click to end
         };
 
         public ToolPanel()
@@ -51,7 +51,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             foreach (var (tool, key, label) in entries)
             {
-                var row = new ToolRow(key, label, tool == EditorTool.Spinner, () => ToolSelected?.Invoke(tool));
+                var row = new ToolRow(key, label, disabled: false, () => ToolSelected?.Invoke(tool));
                 rows[tool] = row;
                 flow.Add(row);
             }
@@ -81,39 +81,40 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 this.disabled = disabled;
                 Action = onClick;
 
-                Size = new Vector2(124, 30);
+                Size = new Vector2(124, EditorTheme.Sizing.RowHeight);
                 Masking = true;
-                CornerRadius = 6;
+                CornerRadius = EditorTheme.Radius.Md;
                 Alpha = disabled ? 0.55f : 1f;
 
                 Children = new Drawable[]
                 {
-                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
                     new SpriteText
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
-                        X = 10,
+                        X = EditorTheme.Spacing.Lg,
                         Text = key.ToString(),
-                        Colour = OsuColour.TextMuted,
-                        Font = FontUsage.Default.With(size: 13, weight: "Bold"),
+                        Colour = EditorTheme.Colours.TextMuted,
+                        Font = EditorTheme.Type.Label(numeric: true),
                     },
                     this.label = new SpriteText
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
-                        X = 30,
+                        X = 32,
                         Text = text,
-                        Colour = disabled ? OsuColour.TextMuted : OsuColour.Text,
-                        Font = FontUsage.Default.With(size: 14, weight: "SemiBold"),
+                        Colour = disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.BodyStrong(),
                     },
                 };
             }
 
             public void SetActive(bool active)
             {
-                background.FadeColour(active ? OsuColour.Pink : OsuColour.Surface, 150, Easing.OutQuint);
-                label.FadeColour(active ? OsuColour.BackgroundDark : (disabled ? OsuColour.TextMuted : OsuColour.Text), 150, Easing.OutQuint);
+                // Active tool = the sanctioned solid-accent case (a persistent selected state, dark-on-accent).
+                background.FadeColour(active ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                label.FadeColour(active ? EditorTheme.Colours.Sunken : (disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text), EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             }
         }
     }

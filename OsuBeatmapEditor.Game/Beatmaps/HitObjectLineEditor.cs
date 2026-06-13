@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace OsuBeatmapEditor.Game.Beatmaps
 {
@@ -51,6 +52,19 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return string.Join(',', parts);
         }
 
+        /// <summary>Sets a spinner's end time (parts[5]), changing its duration. No-op for non-spinners.</summary>
+        public static string SetSpinnerEndTime(string raw, int endTime)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 6
+                || !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int type)
+                || (type & 0b1000) == 0)
+                return raw;
+
+            parts[5] = endTime.ToString(CultureInfo.InvariantCulture);
+            return string.Join(',', parts);
+        }
+
         /// <summary>Offsets the object's position (and a slider's control points) by (dx, dy).</summary>
         public static string ShiftPosition(string raw, int dx, int dy)
         {
@@ -78,19 +92,112 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// Rewrites a slider's head position (parts 0/1), curve field (part 5) and pixel length (part 7) from
         /// edited control points, leaving the slide count and hitsounds untouched. Used by control-point editing.
         /// </summary>
-        public static string SetSliderCurve(string raw, char type, IReadOnlyList<SliderAnchor> anchors, double pixelLength)
+        public static string SetSliderCurve(string raw, IReadOnlyList<SliderControlPoint> controlPoints, double pixelLength)
         {
             string[] parts = raw.Split(',');
-            if (parts.Length < 6 || anchors.Count == 0)
+            if (parts.Length < 6 || controlPoints.Count == 0)
                 return raw;
 
-            parts[0] = ((int)Math.Round(anchors[0].X)).ToString(CultureInfo.InvariantCulture);
-            parts[1] = ((int)Math.Round(anchors[0].Y)).ToString(CultureInfo.InvariantCulture);
-            parts[5] = SliderGeometry.CurveField(type, anchors);
+            parts[0] = ((int)Math.Round(controlPoints[0].X)).ToString(CultureInfo.InvariantCulture);
+            parts[1] = ((int)Math.Round(controlPoints[0].Y)).ToString(CultureInfo.InvariantCulture);
+            parts[5] = SliderGeometry.CurveField(controlPoints);
             if (parts.Length >= 8)
                 parts[7] = pixelLength.ToString("0.###", CultureInfo.InvariantCulture);
             return string.Join(',', parts);
         }
+
+        /// <summary>Sets a slider's repeat/slide count (the <c>slides</c> field) in its raw line.</summary>
+        public static string SetSliderSlides(string raw, int slides)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 7)
+                return raw;
+
+            parts[6] = slides.ToString(CultureInfo.InvariantCulture);
+            return string.Join(',', parts);
+        }
+
+        /// <summary>Sets the object's hitSound bitfield (part 4: bit1 whistle, bit2 finish, bit3 clap).</summary>
+        public static string SetHitSound(string raw, int hitSound)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 5)
+                return raw;
+
+            parts[4] = hitSound.ToString(CultureInfo.InvariantCulture);
+            return string.Join(',', parts);
+        }
+
+        /// <summary>
+        /// Sets the object's normal and addition sample banks in its <c>hitSample</c> field
+        /// (the trailing "normalSet:additionSet:index:volume:filename"), preserving index/volume/filename.
+        /// </summary>
+        public static string SetSampleBanks(string raw, SampleBank normal, SampleBank addition)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 5)
+                return raw;
+
+            // The hitSample field is the trailing colon-delimited token; add one if the line omits it.
+            string last = parts[^1];
+            string[] hs = last.Contains(':') ? last.Split(':') : new[] { "0", "0", "0", "0", "" };
+            if (hs.Length < 5)
+                System.Array.Resize(ref hs, 5);
+            for (int i = 0; i < hs.Length; i++)
+                hs[i] ??= string.Empty;
+
+            hs[0] = ((int)bankToSet(normal)).ToString(CultureInfo.InvariantCulture);
+            hs[1] = ((int)bankToSet(addition)).ToString(CultureInfo.InvariantCulture);
+
+            parts[^1] = string.Join(':', hs);
+            return string.Join(',', parts);
+        }
+
+        /// <summary>
+        /// Rewrites a slider's per-node hitsounds: <c>edgeSounds</c> (part 8) and <c>edgeSets</c> (part 9).
+        /// No-op unless the line is a slider with a curve and length already present (parts 5-7).
+        /// </summary>
+        public static string SetSliderNodeSamples(string raw, IReadOnlyList<NodeSample> nodes)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 8 || nodes.Count == 0
+                || !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int type)
+                || (type & 0b10) == 0)
+                return raw;
+
+            string sounds = string.Join('|', nodes.Select(n => n.HitSound.ToString(CultureInfo.InvariantCulture)));
+            string sets = string.Join('|', nodes.Select(n => $"{(int)bankToSet(n.NormalBank)}:{(int)bankToSet(n.AdditionBank)}"));
+
+            // edgeSounds and edgeSets sit between length (7) and hitSample (last). Insert them if absent.
+            if (parts.Length <= 8)
+            {
+                var list = new List<string>(parts) { sounds, sets };
+                parts = list.ToArray();
+            }
+            else
+            {
+                parts[8] = sounds;
+                if (parts.Length > 9)
+                    parts[9] = sets;
+                else
+                {
+                    var list = new List<string>(parts) { sets };
+                    parts = list.ToArray();
+                }
+            }
+
+            return string.Join(',', parts);
+        }
+
+        /// <summary>The .osu sample-set integer for a bank (Normal = 1, Soft = 2, Drum = 3).</summary>
+        public static int SampleSet(SampleBank bank) => bankToSet(bank);
+
+        private static int bankToSet(SampleBank bank) => bank switch
+        {
+            SampleBank.Soft => 2,
+            SampleBank.Drum => 3,
+            _ => 1,
+        };
 
         private static string shiftCurve(string curve, int dx, int dy)
         {

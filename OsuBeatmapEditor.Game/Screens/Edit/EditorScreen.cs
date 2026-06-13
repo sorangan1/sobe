@@ -9,6 +9,7 @@ using osu.Framework.Audio.Sample;
 using osu.Framework.Audio.Track;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
+using osu.Framework.Graphics.Primitives;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Graphics.Textures;
@@ -40,28 +41,71 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly BeatmapSetModel set;
         private readonly BeatmapDifficultyModel difficulty;
 
+        // Cached by the game host; absent under the standalone test browser, so calls are null-guarded.
+        [Resolved(CanBeNull = true)]
+        private ToastOverlay? toasts { get; set; }
+
+        // OS clipboard, for writing the modding timestamp on copy (cached by the host; null-guarded for tests).
+        [Resolved(CanBeNull = true)]
+        private Clipboard? hostClipboard { get; set; }
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
+        private readonly NodeSelection nodeSelection = new NodeSelection();
         private readonly BeatSnapDivisor beatDivisor = new BeatSnapDivisor();
         private readonly Dictionary<int, HitObjectModel> moveSnapshot = new Dictionary<int, HitObjectModel>();
+
+        // Slider repeat (reverse) drag state: the slider being reshaped, the pre-drag map snapshot for undo,
+        // and whether the count actually changed during the drag.
+        private int repeatDragId = -1;
+        private HitObjectModel repeatDragOriginal;
+        private Snapshot? repeatDragSnapshot;
+        private bool repeatDragChanged;
+
+        // Spinner duration drag (dragging a spinner's tail on the top timeline to change its end time).
+        private int spinnerDragId = -1;
+        private HitObjectModel spinnerDragOriginal;
+        private Snapshot? spinnerDragSnapshot;
+        private bool spinnerDragChanged;
+
+        // Selection-transform (rotate/scale/flip) state: the pre-gesture object snapshot, the surrounding
+        // quad it had, the pre-gesture map snapshot for undo, and whether the gesture changed anything.
+        private Dictionary<int, HitObjectModel>? transformSnapshot;
+        private RectangleF transformQuad;
+        private Snapshot? transformUndo;
+        private bool transformChanged;
         private int moveTimeDelta;
         private Vector2 movePosDelta;
         private Vector2 moveMin, moveMax;
 
-        private readonly Stack<List<HitObjectModel>> undoStack = new Stack<List<HitObjectModel>>();
-        private readonly Stack<List<HitObjectModel>> redoStack = new Stack<List<HitObjectModel>>();
-        private readonly List<HitObjectModel> clipboard = new List<HitObjectModel>();
+        // Distance snapping: when on, placement is spaced from the previous object proportionally to the time
+        // gap (so streams keep slider velocity). Spacing multiplier is adjusted with Alt+scroll, like lazer.
+        private bool distanceSnapEnabled;
+        private double distanceSpacing = 1.0;
+
+        /// <summary>An undo snapshot of the editable map state (objects + timing points).</summary>
+        private sealed record Snapshot(List<HitObjectModel> Objects, List<TimingPointModel> TimingPoints);
+
+        private readonly Stack<Snapshot> undoStack = new Stack<Snapshot>();
+        private readonly Stack<Snapshot> redoStack = new Stack<Snapshot>();
         private ParsedBeatmap parsed = new ParsedBeatmap();
 
         private Playfield playfield = null!;
         private TopTimeline topTimeline = null!;
         private SpriteText bpmText = null!;
         private SpriteText svText = null!;
+        private SpriteText distanceSnapText = null!;
+        private double lastDistanceSpacing = double.NaN;
         private ToolPanel toolPanel = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
         private SongSettingsOverlay songSettingsOverlay = null!;
+        private TimingPointsOverlay timingPointsOverlay = null!;
+        private EditorTimeline bottomTimeline = null!;
         private ConfirmExitOverlay confirmExit = null!;
+        private RotationPopover rotationPopover = null!;
+        private TimingPillPopover timingPillPopover = null!;
+        private PlaybackControl playbackControl = null!;
 
         private GameHost host = null!;
         private ITrackStore? trackStore;
@@ -71,6 +115,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private int hitsoundIndex;
         private double lastHitsoundTime;
         private bool needHitsoundResync = true;
+
+        /// <summary>A single scheduled hitsound playback: object heads, each slider node, and spinner ends.</summary>
+        private readonly record struct SampleEvent(double Time, int HitSound, SampleBank Normal, SampleBank Addition, float Volume);
+
+        /// <summary>All hitsound events for the map, time-sorted; rebuilt after every edit (see <see cref="rebuildSampleEvents"/>).</summary>
+        private readonly List<SampleEvent> sampleEvents = new List<SampleEvent>();
+
+        /// <summary>The hitsounds applied to newly placed objects (set from the left-panel palette when nothing is selected).</summary>
+        private int pendingHitSound;
+        private SampleBank pendingNormalBank = SampleBank.Normal;
+        private SampleBank pendingAdditionBank = SampleBank.Normal;
         private LargeTextureStore? textures;
         private Texture? backgroundTexture;
         private ScheduledDelegate? circleSizeRebuild;
@@ -97,11 +152,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (osuPath != null)
                 parsed = OsuFileDecoder.Decode(osuPath);
 
-            editable = new EditableBeatmap(parsed, settings.DefaultCreator.Value);
+            editable = new EditableBeatmap(parsed, settings.DefaultCreator.Value, settings);
 
             deps.CacheAs(settings);
             deps.CacheAs(editable);
             deps.CacheAs(selection);
+            deps.CacheAs(nodeSelection);
             deps.CacheAs(beatDivisor);
             deps.CacheAs<IEditorActions>(this);
             return deps;
@@ -126,6 +182,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             var sampleStore = audio.GetSampleStore(
                 new NamespacedResourceStore<byte[]>(new DllResourceStore(OsuBeatmapEditorResources.ResourceAssembly), "Samples"));
             hitsounds = new HitsoundPlayer(sampleStore);
+            rebuildSampleEvents();
 
             InternalChildren = new Drawable[]
             {
@@ -140,9 +197,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     Anchor = Anchor.TopLeft,
                     Origin = Anchor.TopLeft,
+                    TimingPillClicked = onTimingPillClicked,
                 },
                 buildToolButtons(),
-                new EditorTimeline(track, parsed, () => CurrentTime) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
+                bottomTimeline = new EditorTimeline(track, parsed, () => CurrentTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
+                playbackControl = new PlaybackControl(track, () => track?.IsRunning ?? false, togglePlay)
+                {
+                    Anchor = Anchor.BottomRight,
+                    Origin = Anchor.BottomRight,
+                },
                 new BackgroundToggleButton(settings.UseSongBackground, settings.BackgroundDim, backgroundTexture != null)
                 {
                     Anchor = Anchor.BottomLeft,
@@ -160,16 +223,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
                     Margin = new MarginPadding { Right = 16, Top = top_bar_height + 8 },
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 18, weight: "Bold"),
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.Heading(numeric: true),
                 },
                 svText = new SpriteText
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
                     Margin = new MarginPadding { Right = 16, Top = top_bar_height + 30 },
-                    Colour = new Color4(0.30f, 0.82f, 0.40f, 1f),
-                    Font = FontUsage.Default.With(size: 16, weight: "Bold"),
+                    Colour = EditorTheme.Colours.Velocity,
+                    Font = EditorTheme.Type.Heading(numeric: true),
                 },
                 new BeatDivisorControl
                 {
@@ -177,32 +240,76 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Origin = Anchor.TopRight,
                     Margin = new MarginPadding { Right = 16, Top = top_bar_height + 54 },
                 },
-                toolPanel = new ToolPanel
+                distanceSnapText = new SpriteText
+                {
+                    Anchor = Anchor.TopRight,
+                    Origin = Anchor.TopRight,
+                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 84 },
+                    Colour = EditorTheme.Colours.Selection,
+                    Font = EditorTheme.Type.Label(),
+                    Alpha = 0,
+                },
+                new FillFlowContainer
                 {
                     Anchor = Anchor.CentreLeft,
                     Origin = Anchor.CentreLeft,
                     Margin = new MarginPadding { Left = 12 },
-                    ToolSelected = applyTool,
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Vertical,
+                    Spacing = new Vector2(0, EditorTheme.Spacing.Md),
+                    Children = new Drawable[]
+                    {
+                        toolPanel = new ToolPanel { ToolSelected = applyTool },
+                        new HitsoundPanel
+                        {
+                            StateProvider = CurrentHitsoundState,
+                            ToggleAddition = ToggleAddition,
+                            SetNormalBank = SetNormalBank,
+                            SetAdditionBank = SetAdditionBank,
+                        },
+                    },
                 },
                 settingsOverlay = new EditorSettingsOverlay(),
                 songSettingsOverlay = new SongSettingsOverlay(),
+                timingPointsOverlay = new TimingPointsOverlay(parsed, () => CurrentTime),
                 confirmExit = new ConfirmExitOverlay
                 {
                     OnSave = () => { save(); this.Exit(); },
                     OnDiscard = this.Exit,
                 },
+                rotationPopover = new RotationPopover
+                {
+                    OnRotate = (degrees, aroundPlayfield) => RotateSelectionBy(degrees, aroundPlayfield),
+                },
+                timingPillPopover = new TimingPillPopover
+                {
+                    OnApply = UpdateTimingPoint,
+                    OnDelete = DeleteTimingPoint,
+                },
             };
 
             playfield.TimeSource = () => CurrentTime;
             playfield.SnappedTimeSource = () => snapTime(CurrentTime);
+            playfield.PlacementSnap = SnapPlacement;
+            playfield.SliderTickDistance = sliderTickDistance;
+
+            // A node selection only makes sense while its slider is selected; drop it otherwise.
+            selection.Changed += () =>
+            {
+                if (nodeSelection.Selected is { } n && !selection.Contains(n.ObjectId))
+                    nodeSelection.Clear();
+            };
 
             // Live difficulty: AR changes the approach window (and the stack window); CS rebuilds (debounced).
             editable.Ar.BindValueChanged(v =>
             {
-                playfield.Preempt = ParsedBeatmap.PreemptFor(v.NewValue);
                 applyStacking();
                 rebuildHitObjects();
             }, true);
+
+            // Hit objects animate against the interpolated audio clock (set in load), so transforms track playback.
+            if (audioClock != null)
+                playfield.SetClock(audioClock);
             editable.Cs.BindValueChanged(_ =>
             {
                 circleSizeRebuild?.Cancel();
@@ -214,6 +321,35 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 applyStacking();
                 rebuildHitObjects();
             });
+            // Changing the base slider velocity re-times every existing slider (its pixel length is unchanged).
+            editable.SliderMultiplier.BindValueChanged(v =>
+            {
+                parsed.SliderMultiplier = v.NewValue;
+                recomputeSliderDurations();
+            });
+            editable.SliderTickRate.BindValueChanged(v =>
+            {
+                parsed.SliderTickRate = v.NewValue;
+                // Tick rate isn't part of the per-object model, so force a redraw to refresh the tick dots.
+                playfield.RebuildObjects();
+            });
+        }
+
+        /// <summary>
+        /// Spacing (osu!pixels) between a slider's ticks: <c>100 · SliderMultiplier · SV / SliderTickRate</c>
+        /// (osu!'s scoring distance per tick), independent of BPM. 0 when the slider has no ticks.
+        /// </summary>
+        private double sliderTickDistance(HitObjectModel o)
+        {
+            if (o.Kind != HitObjectKind.Slider)
+                return 0;
+
+            double tickRate = editable.SliderTickRate.Value;
+            double mult = editable.SliderMultiplier.Value;
+            if (tickRate <= 0 || mult <= 0)
+                return 0;
+
+            return 100.0 * mult * velocityAt(o.StartTime) / tickRate;
         }
 
         /// <summary>The smoothed playback time (ms), interpolated between coarse audio-clock updates.</summary>
@@ -227,15 +363,70 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             updateHitsounds();
             updateBpm();
             toolPanel.SetActive(currentTool());
+
+            distanceSnapText.Alpha = distanceSnapEnabled ? 1 : 0;
+            if (distanceSnapEnabled && distanceSpacing != lastDistanceSpacing)
+            {
+                lastDistanceSpacing = distanceSpacing;
+                distanceSnapText.Text = $"Distance snap: {distanceSpacing:0.0}x";
+            }
+
+            updatePlacementComboPreview();
+
+            if (spinnerBuilding)
+                updateSpinnerPreview();
+        }
+
+        // Cache key for the live combo preview shown while a placement tool is armed (snapped time + state).
+        private (int time, bool newCombo, int count)? lastPreviewKey;
+
+        /// <summary>
+        /// While a placement tool is armed, renumbers the existing objects live as if the pending object were
+        /// already inserted at the current snapped time - mirroring osu!lazer, where the placement object is a
+        /// real (pending) member of the beatmap. Reverts to the committed numbering when the tool is disarmed.
+        /// </summary>
+        private void updatePlacementComboPreview()
+        {
+            bool armed = playfield.PlacementActive || playfield.SliderPlacementActive;
+
+            if (!armed)
+            {
+                if (lastPreviewKey != null)
+                {
+                    lastPreviewKey = null;
+                    rebuildHitObjects(); // restore committed combo numbers
+                }
+                return;
+            }
+
+            int t = (int)Math.Round(snapTime(CurrentTime));
+            var key = (t, playfield.NewComboArmed, parsed.HitObjects.Count);
+            if (lastPreviewKey == key)
+                return;
+
+            lastPreviewKey = key;
+
+            // Insert a phantom object at the pending time, recompute combos, then drop it - the remaining
+            // (real) objects carry the previewed numbering. The ghost circle shows its own number separately.
+            var temp = new List<HitObjectModel>(parsed.HitObjects);
+            int phantomType = playfield.NewComboArmed ? 0b101 : 0b001;
+            temp.Add(new HitObjectModel(0, 0, t, HitObjectKind.Circle, null,
+                RawLine: $"0,0,{t},{phantomType},0,0:0:0:0:", Id: int.MinValue));
+            temp.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            applyCombosTo(temp);
+            temp.RemoveAll(o => o.Id == int.MinValue);
+
+            playfield.SetHitObjects(temp, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
         }
 
         /// <summary>The composing tool the playfield currently has armed.</summary>
         private EditorTool currentTool() =>
             playfield.PlacementActive ? EditorTool.Circle
             : playfield.SliderPlacementActive ? EditorTool.Slider
+            : playfield.SpinnerPlacementActive ? EditorTool.Spinner
             : EditorTool.Selection;
 
-        /// <summary>Arms the chosen tool from the toolbox (Spinner is not placeable yet, so it is ignored).</summary>
+        /// <summary>Arms the chosen tool from the toolbox.</summary>
         private void applyTool(EditorTool tool)
         {
             switch (tool)
@@ -243,6 +434,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 case EditorTool.Selection:
                     playfield.SetPlacementActive(false);
                     playfield.SetSliderPlacementActive(false);
+                    playfield.SetSpinnerPlacementActive(false);
                     break;
 
                 case EditorTool.Circle:
@@ -254,9 +446,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     break;
 
                 case EditorTool.Spinner:
-                    break; // not implemented yet
+                    playfield.SetSpinnerPlacementActive(true);
+                    break;
             }
         }
+
+        // Last BPM/SV rendered, so the readout strings are only rebuilt when the value actually changes
+        // (this runs every frame during playback; re-formatting identical text allocated garbage each frame).
+        private double lastBpmBeatLength = double.NaN;
+        private double lastSv = double.NaN;
 
         /// <summary>Shows the BPM of the timing section under the current playback position.</summary>
         private void updateBpm()
@@ -275,18 +473,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (beatLength <= 0 && parsed.BeatPoints.Count > 0)
                 beatLength = parsed.BeatPoints[0].BeatLength;
 
-            bpmText.Text = beatLength > 0 ? $"{60000.0 / beatLength:0} BPM" : string.Empty;
-            svText.Text = $"{velocityAt(now):0.##}x SV";
+            if (beatLength != lastBpmBeatLength)
+            {
+                lastBpmBeatLength = beatLength;
+                bpmText.Text = beatLength > 0 ? $"{60000.0 / beatLength:0.##} BPM" : string.Empty;
+            }
+
+            double sv = velocityAt(now);
+            if (sv != lastSv)
+            {
+                lastSv = sv;
+                svText.Text = $"{sv:0.##}x SV";
+            }
         }
 
-        /// <summary>Plays each object's hitsounds as playback passes its start time (only while playing).</summary>
+        /// <summary>Plays each hitsound event as playback passes its time (only while playing).</summary>
         private void updateHitsounds()
         {
             if (hitsounds == null || track == null)
                 return;
 
             double now = CurrentTime;
-            var objects = parsed.HitObjects;
 
             // Paused: don't play, and resync the cursor on the next resume.
             if (!track.IsRunning)
@@ -300,15 +507,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (needHitsoundResync || now < lastHitsoundTime || now - lastHitsoundTime > 300)
             {
                 hitsoundIndex = 0;
-                while (hitsoundIndex < objects.Count && objects[hitsoundIndex].StartTime <= now)
+                while (hitsoundIndex < sampleEvents.Count && sampleEvents[hitsoundIndex].Time <= now)
                     hitsoundIndex++;
                 needHitsoundResync = false;
             }
             else
             {
-                while (hitsoundIndex < objects.Count && objects[hitsoundIndex].StartTime <= now)
+                while (hitsoundIndex < sampleEvents.Count && sampleEvents[hitsoundIndex].Time <= now)
                 {
-                    hitsounds.Play(objects[hitsoundIndex]);
+                    var e = sampleEvents[hitsoundIndex];
+                    hitsounds.Play(e.HitSound, e.Normal, e.Addition, e.Volume);
                     hitsoundIndex++;
                 }
             }
@@ -316,11 +524,58 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             lastHitsoundTime = now;
         }
 
+        /// <summary>
+        /// Rebuilds the time-sorted hitsound event list: a circle plays at its start, a spinner at its end,
+        /// and a slider once per node (head, each repeat, tail) using its per-node sample banks.
+        /// </summary>
+        private void rebuildSampleEvents()
+        {
+            sampleEvents.Clear();
+
+            foreach (var o in parsed.HitObjects)
+            {
+                switch (o.Kind)
+                {
+                    case HitObjectKind.Spinner:
+                        sampleEvents.Add(new SampleEvent(o.StartTime + o.Duration, o.HitSound, o.NormalBank, o.AdditionBank, o.SampleVolume));
+                        break;
+
+                    case HitObjectKind.Slider:
+                        int nodes = Math.Max(1, o.Slides) + 1;
+                        double perNode = o.Slides > 0 ? o.Duration / o.Slides : 0;
+                        for (int i = 0; i < nodes; i++)
+                        {
+                            var ns = o.NodeSamples != null && i < o.NodeSamples.Count
+                                ? o.NodeSamples[i]
+                                : new NodeSample(o.HitSound, o.NormalBank, o.AdditionBank);
+                            sampleEvents.Add(new SampleEvent(o.StartTime + perNode * i, ns.HitSound, ns.NormalBank, ns.AdditionBank, o.SampleVolume));
+                        }
+                        break;
+
+                    default:
+                        sampleEvents.Add(new SampleEvent(o.StartTime, o.HitSound, o.NormalBank, o.AdditionBank, o.SampleVolume));
+                        break;
+                }
+            }
+
+            sampleEvents.Sort((a, b) => a.Time.CompareTo(b.Time));
+            needHitsoundResync = true;
+        }
+
         private void rebuildHitObjects()
         {
-            float diameter = (54.4f - 4.48f * editable.Cs.Value) * 2;
-            playfield.SetHitObjects(parsed.HitObjects, diameter);
+            playfield.SetHitObjects(parsed.HitObjects, circleDiameter(), ParsedBeatmap.PreemptFor(editable.Ar.Value));
         }
+
+        /// <summary>
+        /// Hit-circle diameter in osu!pixels for the current CS (standard formula <c>(54.4 - 4.48·CS)·2</c>),
+        /// minus a manual visual override so our circles match osu!lazer's editor, which renders them a few
+        /// pixels smaller than the raw formula gives.
+        /// </summary>
+        private float circleDiameter() => (54.4f - 4.48f * editable.Cs.Value) * 2 - circle_diameter_override;
+
+        /// <summary>osu!pixels shaved off the hit-circle diameter to match lazer's editor (see <see cref="circleDiameter"/>).</summary>
+        private const float circle_diameter_override = 5f;
 
         // --- IEditorActions: editing operations invoked by the timeline/playfield ---
 
@@ -328,6 +583,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public void PlaceCircle(Vector2 osuPosition)
         {
             int time = (int)Math.Round(snapTime(CurrentTime));
+            osuPosition = SnapPlacement(osuPosition);
+
             int x = Math.Clamp((int)Math.Round(osuPosition.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH);
             int y = Math.Clamp((int)Math.Round(osuPosition.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT);
 
@@ -335,97 +592,236 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // Type bit 0 = circle; bit 2 = new combo (set while Q is armed).
             int type = playfield.NewComboArmed ? 0b101 : 0b001;
-            string raw = $"{x},{y},{time},{type},0,0:0:0:0:";
+            string raw = $"{x},{y},{time},{type},{pendingHitSound},{pendingSampleField()}";
 
             pushUndo();
             removeObjectsAt(time);
-            parsed.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Circle, null, RawLine: raw, Id: id));
+            parsed.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Circle, null, RawLine: raw, Id: id,
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
-            selection.SetSingle(id);
+            // Leave the new object unselected: keeping it selected made Q (new combo) act on the freshly
+            // placed circle instead of arming the next placement, which surprised the mapper.
+            selection.Clear();
         }
 
-        /// <summary>Inserts a new slider through the given control anchors (head first) on the current snapped time.</summary>
-        public void PlaceSlider(IReadOnlyList<SliderAnchor> points)
+        /// <summary>Inserts a new slider through the given control points (head first) on the current snapped time.</summary>
+        public void PlaceSlider(IReadOnlyList<SliderControlPoint> points)
         {
-            var anchors = clampAnchors(points);
-            if (anchors.Count < 2)
+            var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
+            if (cps.Count < 2)
                 return;
 
             int time = (int)Math.Round(snapTime(CurrentTime));
 
-            // Any sharp corner forces Bézier; otherwise infer from the anchor count (2=L, 3=P, 4+=B).
-            char curveType = anchors.Any(a => a.Red) ? 'B' : SliderPathCalculator.DefaultCurveType(anchors.Count);
-
             // The freshly-traced slider spans its full control polygon; snap that length so the tail lands on a tick.
-            double pixelLength = snapSliderLength(time, SliderGeometry.PathLength(SliderGeometry.ComputePath(anchors, curveType)));
-            var fullPath = SliderGeometry.ComputePath(anchors, curveType, pixelLength);
-            if (pixelLength < 1)
+            double pixelLength = snapSliderLength(time, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            var fullPath = SliderGeometry.ComputePath(cps, pixelLength);
+            if (pixelLength < 1 || fullPath.Count < 2)
                 return;
 
-            int hx = (int)Math.Round(anchors[0].X);
-            int hy = (int)Math.Round(anchors[0].Y);
+            int hx = (int)Math.Round(cps[0].X);
+            int hy = (int)Math.Round(cps[0].Y);
             int id = nextId();
 
             // Type bit 1 = slider; bit 2 = new combo (set while Q is armed).
             int type = playfield.NewComboArmed ? 0b110 : 0b010;
             string length = pixelLength.ToString("0.###", CultureInfo.InvariantCulture);
-            string curve = SliderGeometry.CurveField(curveType, anchors);
-            // x,y,time,type,hitSound,sliderType|anchors...,slides,length,edgeSounds,edgeSets,hitSample
-            string raw = $"{hx},{hy},{time},{type},0,{curve},1,{length},0|0,0:0|0:0,0:0:0:0:";
+            string curve = SliderGeometry.CurveField(cps);
+            // A freshly-placed slider has one span = two nodes (head, tail), both using the pending hitsounds.
+            string edgeSounds = $"{pendingHitSound}|{pendingHitSound}";
+            string edgeSets = $"{pendingSet()}|{pendingSet()}";
+            var nodeSamples = new[]
+            {
+                new NodeSample(pendingHitSound, pendingNormalBank, pendingAdditionBank),
+                new NodeSample(pendingHitSound, pendingNormalBank, pendingAdditionBank),
+            };
+            // x,y,time,type,hitSound,sliderType|points...,slides,length,edgeSounds,edgeSets,hitSample
+            string raw = $"{hx},{hy},{time},{type},{pendingHitSound},{curve},1,{length},{edgeSounds},{edgeSets},{pendingSampleField()}";
 
             double duration = sliderDuration(time, pixelLength, 1);
 
             pushUndo();
             removeObjectsAt(time);
             parsed.HitObjects.Add(new HitObjectModel(hx, hy, time, HitObjectKind.Slider, fullPath, duration, 1,
-                RawLine: raw, Id: id, Anchors: anchors, CurveType: curveType));
+                RawLine: raw, Id: id, ControlPoints: cps, NodeSamples: nodeSamples,
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
-            selection.SetSingle(id);
+            // Leave the new slider unselected (see PlaceCircle) so Q keeps arming the next placement.
+            selection.Clear();
+        }
+
+        // --- Spinner placement (osu!lazer model): click sets the start, the end follows the playhead. ---
+
+        private bool spinnerBuilding;
+        private int spinnerStartTime;
+
+        public void BeginSpinnerPlacement()
+        {
+            spinnerStartTime = (int)Math.Round(snapTime(CurrentTime));
+            spinnerBuilding = true;
+            updateSpinnerPreview();
+        }
+
+        public void FinishSpinnerPlacement()
+        {
+            if (!spinnerBuilding)
+                return;
+
+            spinnerBuilding = false;
+            topTimeline.ClearSliderPreview();
+
+            int end = spinnerEndTime();
+            createSpinner(spinnerStartTime, end);
+        }
+
+        public void CancelSpinnerPlacement()
+        {
+            spinnerBuilding = false;
+            topTimeline.ClearSliderPreview();
+        }
+
+        /// <summary>The spinner's end time as it's being placed: the snapped playhead, but at least one beat long.</summary>
+        private int spinnerEndTime()
+        {
+            double minEnd = spinnerStartTime + beatLengthAt(spinnerStartTime);
+            return (int)Math.Round(Math.Max(minEnd, snapTime(CurrentTime)));
+        }
+
+        /// <summary>While placing a spinner, shows its growing time extent on the top timeline (a beats readout).</summary>
+        private void updateSpinnerPreview()
+        {
+            int end = spinnerEndTime();
+            topTimeline.ShowSliderPreview(spinnerStartTime, end - spinnerStartTime, beatLengthAt(spinnerStartTime));
+        }
+
+        /// <summary>Inserts a centred spinner spanning the given start/end times (osu! stable format).</summary>
+        private void createSpinner(int start, int end)
+        {
+            int cx = (int)(ParsedBeatmap.PLAYFIELD_WIDTH / 2f);  // 256
+            int cy = (int)(ParsedBeatmap.PLAYFIELD_HEIGHT / 2f); // 192
+            int id = nextId();
+
+            // Type bit 3 = spinner; bit 2 = new combo (spinners always start a new combo in osu!).
+            const int type = 0b1100;
+            // x,y,time,type,hitSound,endTime,hitSample
+            string raw = $"{cx},{cy},{start},{type},{pendingHitSound},{end},{pendingSampleField()}";
+
+            pushUndo();
+            removeObjectsAt(start);
+            parsed.HitObjects.Add(new HitObjectModel(cx, cy, start, HitObjectKind.Spinner, null,
+                Duration: Math.Max(0, end - start), RawLine: raw, Id: id,
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
+            parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+
+            afterEdit();
+            // Leave it unselected so the tool stays armed for the next spinner (see PlaceCircle).
+            selection.Clear();
         }
 
         /// <summary>
-        /// Rebuilds a slider from edited control points (move / add / delete / corner toggle). Like lazer, the
-        /// slider length follows the new control polygon, snapped so its tail still lands on the beat grid.
+        /// Rebuilds a slider from edited control points (move / add / delete / type toggle). Like lazer, the
+        /// slider length follows the new control polygon, snapped so its tail still lands on the beat grid;
+        /// existing per-segment types are preserved.
         /// </summary>
-        public void UpdateSliderAnchors(int id, IReadOnlyList<SliderAnchor> points)
+        public void UpdateSliderAnchors(int id, IReadOnlyList<SliderControlPoint> points)
         {
             int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
             if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
                 return;
 
             var o = parsed.HitObjects[idx];
-            var anchors = clampAnchors(points);
-            if (anchors.Count < 2)
+            var cps = clampControlPoints(points);
+            if (cps.Count < 2)
                 return;
 
-            char curveType = SliderGeometry.AdjustType(o.CurveType, anchors);
+            // The first control point must always carry a definite type (lazer invariant).
+            if (cps[0].Type == null)
+                cps[0] = cps[0] with { Type = SliderPathType.Bezier };
 
-            // The slider now spans its full control polygon; snap that length to the beat grid.
-            double pixelLength = snapSliderLength(o.StartTime, SliderGeometry.PathLength(SliderGeometry.ComputePath(anchors, curveType)));
-            var path = SliderGeometry.ComputePath(anchors, curveType, pixelLength);
+            // The slider follows its anchors (its length is the full control-polygon curve length, so moving
+            // any node resizes it), then snaps so the tail always lands on a beat-snap tick.
+            double pixelLength = snapSliderLength(o.StartTime, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            var path = SliderGeometry.ComputePath(cps, pixelLength);
             if (path.Count < 2 || pixelLength < 1)
                 return;
 
-            string raw = HitObjectLineEditor.SetSliderCurve(o.RawLine, curveType, anchors, pixelLength);
+            string raw = HitObjectLineEditor.SetSliderCurve(o.RawLine, cps, pixelLength);
             double duration = sliderDuration(o.StartTime, pixelLength, o.Slides);
 
             pushUndo();
             parsed.HitObjects[idx] = o with
             {
-                X = (int)Math.Round(anchors[0].X),
-                Y = (int)Math.Round(anchors[0].Y),
+                X = (int)Math.Round(cps[0].X),
+                Y = (int)Math.Round(cps[0].Y),
                 Path = path,
-                Anchors = anchors,
-                CurveType = curveType,
+                ControlPoints = cps,
                 Duration = duration,
                 RawLine = raw,
             };
             afterEdit();
             selection.SetSingle(id);
+        }
+
+        /// <summary>The tick-snapped path for a slider's anchors (head time), so the live reshape preview matches the commit.</summary>
+        public IReadOnlyList<Vector2> SnappedSliderPath(int id, IReadOnlyList<SliderControlPoint> points)
+        {
+            var cps = clampControlPoints(points);
+            if (cps.Count < 2)
+                return System.Array.Empty<Vector2>();
+
+            if (cps[0].Type == null)
+                cps[0] = cps[0] with { Type = SliderPathType.Bezier };
+
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            double startTime = idx >= 0 ? parsed.HitObjects[idx].StartTime : snapTime(CurrentTime);
+
+            double pixelLength = snapSliderLength(startTime, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            return SliderGeometry.ComputePath(cps, pixelLength);
+        }
+
+
+        public void PreviewSliderPlacement(IReadOnlyList<SliderControlPoint> points)
+        {
+            int time = (int)Math.Round(snapTime(CurrentTime));
+            previewSliderTimeline(time, points, snap: true);
+        }
+
+        public void PreviewSliderResize(int id, IReadOnlyList<SliderControlPoint> points)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0)
+                return;
+
+            // Reshaping snaps the tail to a tick (matching the commit), so the preview matches the result.
+            previewSliderTimeline(parsed.HitObjects[idx].StartTime, points, snap: true);
+        }
+
+        public void ClearSliderPreview() => topTimeline.ClearSliderPreview();
+
+        /// <summary>Computes the length/duration a slider would have and shows its extent on the timeline.</summary>
+        private void previewSliderTimeline(double startTime, IReadOnlyList<SliderControlPoint> points, bool snap)
+        {
+            var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
+            if (cps.Count < 2)
+            {
+                topTimeline.ClearSliderPreview();
+                return;
+            }
+
+            double fullLength = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+            double pixelLength = snap ? snapSliderLength(startTime, fullLength) : fullLength;
+            if (pixelLength < 1)
+            {
+                topTimeline.ClearSliderPreview();
+                return;
+            }
+
+            double duration = sliderDuration(startTime, pixelLength, 1);
+            topTimeline.ShowSliderPreview(startTime, duration, beatLengthAt(startTime));
         }
 
         /// <summary>
@@ -443,20 +839,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             double velocity = mult * 100 * sv / beatLength;          // osu!px per ms
             double tickMs = beatLength / beatDivisor.Value.Value;     // one beat-snap division
             double duration = pixelLength / velocity;
-            double snapped = Math.Max(tickMs, Math.Round(duration / tickMs) * tickMs);
-            return velocity * snapped;
+            double snapped = Math.Round(duration / tickMs) * tickMs;
+
+            // Never snap PAST the drawn curve: extending the expected distance beyond the path length makes the
+            // tail shoot off in a straight line (lazer's calculateLength extends linearly). Step down a tick so
+            // the slider always ends on the curve, at a tick. (A sub-one-tick curve is the only unavoidable case.)
+            if (velocity * snapped > pixelLength)
+                snapped -= tickMs;
+
+            return velocity * Math.Max(tickMs, snapped);
         }
 
-        /// <summary>Clamps each control anchor to the playfield in integer osu!pixels (preserving red-corner flags).</summary>
-        private static List<SliderAnchor> clampAnchors(IReadOnlyList<SliderAnchor> points)
+        /// <summary>Clamps each control point to the playfield in integer osu!pixels (preserving its segment type).</summary>
+        private static List<SliderControlPoint> clampControlPoints(IReadOnlyList<SliderControlPoint> points)
         {
-            var result = new List<SliderAnchor>(points.Count);
-            foreach (var a in points)
+            var result = new List<SliderControlPoint>(points.Count);
+            foreach (var p in points)
             {
-                result.Add(new SliderAnchor(
-                    Math.Clamp((int)Math.Round(a.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH),
-                    Math.Clamp((int)Math.Round(a.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT),
-                    a.Red));
+                result.Add(p with
+                {
+                    X = Math.Clamp((int)Math.Round(p.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH),
+                    Y = Math.Clamp((int)Math.Round(p.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT),
+                });
             }
             return result;
         }
@@ -540,6 +944,194 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
         }
 
+        // --- Hitsound editing (left-panel palette): additions + sample banks on the selection, or pending defaults ---
+
+        /// <summary>A snapshot of the hitsounds shown by the palette: the selection's, or the pending placement defaults.</summary>
+        public readonly record struct HitsoundState(int HitSound, SampleBank Normal, SampleBank Addition, bool HasSelection);
+
+        /// <summary>The hitsounds the palette should display: the selected slider node's, else the first selected object's, else the pending defaults.</summary>
+        public HitsoundState CurrentHitsoundState()
+        {
+            if (nodeSelection.Selected is { } node && tryNodeSample(node, out NodeSample ns))
+                return new HitsoundState(ns.HitSound, ns.NormalBank, ns.AdditionBank, true);
+
+            foreach (var o in parsed.HitObjects)
+            {
+                if (selection.Contains(o.Id))
+                    return new HitsoundState(o.HitSound, o.NormalBank, o.AdditionBank, true);
+            }
+
+            return new HitsoundState(pendingHitSound, pendingNormalBank, pendingAdditionBank, false);
+        }
+
+        /// <summary>Reads the sample for a selected slider node, normalising the node list to <c>Slides + 1</c> entries.</summary>
+        private bool tryNodeSample((int ObjectId, int NodeIndex) node, out NodeSample sample)
+        {
+            sample = default;
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == node.ObjectId);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
+                return false;
+
+            var nodes = ensureNodeSamples(parsed.HitObjects[idx]);
+            if (node.NodeIndex < 0 || node.NodeIndex >= nodes.Count)
+                return false;
+
+            sample = nodes[node.NodeIndex];
+            return true;
+        }
+
+        /// <summary>A slider's per-node samples as an editable list of length <c>Slides + 1</c>, filling gaps from the object banks.</summary>
+        private static List<NodeSample> ensureNodeSamples(HitObjectModel o)
+        {
+            int count = Math.Max(1, o.Slides) + 1;
+            var list = new List<NodeSample>(count);
+            for (int i = 0; i < count; i++)
+            {
+                if (o.NodeSamples != null && i < o.NodeSamples.Count)
+                    list.Add(o.NodeSamples[i]);
+                else
+                    list.Add(new NodeSample(o.HitSound, o.NormalBank, o.AdditionBank));
+            }
+            return list;
+        }
+
+        /// <summary>Mutates the selected slider node's sample as one undo step, then plays it. Returns false if there is no node selection.</summary>
+        private bool applyNodeEdit(Func<NodeSample, NodeSample> mutate)
+        {
+            if (nodeSelection.Selected is not { } node)
+                return false;
+
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == node.ObjectId);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
+                return false;
+
+            var o = parsed.HitObjects[idx];
+            var nodes = ensureNodeSamples(o);
+            if (node.NodeIndex < 0 || node.NodeIndex >= nodes.Count)
+                return false;
+
+            pushUndo();
+            nodes[node.NodeIndex] = mutate(nodes[node.NodeIndex]);
+            parsed.HitObjects[idx] = o with
+            {
+                NodeSamples = nodes,
+                RawLine = HitObjectLineEditor.SetSliderNodeSamples(o.RawLine, nodes),
+            };
+            afterEdit();
+
+            var s = nodes[node.NodeIndex];
+            playFeedback(s.HitSound, s.NormalBank, s.AdditionBank);
+            return true;
+        }
+
+        /// <summary>The pending placement sample set as an "normalSet:additionSet" pair (for slider edgeSets).</summary>
+        private string pendingSet() => $"{HitObjectLineEditor.SampleSet(pendingNormalBank)}:{HitObjectLineEditor.SampleSet(pendingAdditionBank)}";
+
+        /// <summary>The pending placement hitSample field: "normalSet:additionSet:index:volume:filename".</summary>
+        private string pendingSampleField() => $"{pendingSet()}:0:0:";
+
+        /// <summary>
+        /// Toggles a whistle/finish/clap addition (bit) on the selection (object + every slider node), or on the
+        /// pending placement defaults if nothing is selected. Plays the result so the change is audible.
+        /// </summary>
+        public void ToggleAddition(int bit)
+        {
+            // A selected slider node takes precedence: toggle the addition on that edge only.
+            if (applyNodeEdit(n => n with { HitSound = (n.HitSound & bit) != 0 ? n.HitSound & ~bit : n.HitSound | bit }))
+                return;
+
+            if (selection.Selected.Count == 0)
+            {
+                pendingHitSound ^= bit;
+                playFeedback(pendingHitSound, pendingNormalBank, pendingAdditionBank);
+                return;
+            }
+
+            // Uniform toggle: if any selected object lacks the bit, set it on all; otherwise clear it on all.
+            bool turnOn = parsed.HitObjects.Any(o => selection.Contains(o.Id) && (o.HitSound & bit) == 0);
+
+            applyHitsoundEdit(o =>
+            {
+                int hs = turnOn ? o.HitSound | bit : o.HitSound & ~bit;
+                var nodes = o.NodeSamples?.Select(n => n with { HitSound = turnOn ? n.HitSound | bit : n.HitSound & ~bit }).ToList();
+                string raw = HitObjectLineEditor.SetHitSound(o.RawLine, hs);
+                if (o.Kind == HitObjectKind.Slider && nodes != null)
+                    raw = HitObjectLineEditor.SetSliderNodeSamples(raw, nodes);
+                return o with { HitSound = hs, NodeSamples = nodes ?? o.NodeSamples, RawLine = raw };
+            });
+        }
+
+        /// <summary>Sets the normal sample bank (drives the hitnormal) on the selection, or the pending default.</summary>
+        public void SetNormalBank(SampleBank bank)
+        {
+            if (applyNodeEdit(n => n with { NormalBank = bank }))
+                return;
+
+            if (selection.Selected.Count == 0)
+            {
+                pendingNormalBank = bank;
+                playFeedback(pendingHitSound, pendingNormalBank, pendingAdditionBank);
+                return;
+            }
+
+            applyHitsoundEdit(o =>
+            {
+                var nodes = o.NodeSamples?.Select(n => n with { NormalBank = bank }).ToList();
+                string raw = HitObjectLineEditor.SetSampleBanks(o.RawLine, bank, o.AdditionBank);
+                if (o.Kind == HitObjectKind.Slider && nodes != null)
+                    raw = HitObjectLineEditor.SetSliderNodeSamples(raw, nodes);
+                return o with { NormalBank = bank, NodeSamples = nodes ?? o.NodeSamples, RawLine = raw };
+            });
+        }
+
+        /// <summary>Sets the addition sample bank (drives whistle/finish/clap) on the selection, or the pending default.</summary>
+        public void SetAdditionBank(SampleBank bank)
+        {
+            if (applyNodeEdit(n => n with { AdditionBank = bank }))
+                return;
+
+            if (selection.Selected.Count == 0)
+            {
+                pendingAdditionBank = bank;
+                playFeedback(pendingHitSound, pendingNormalBank, pendingAdditionBank);
+                return;
+            }
+
+            applyHitsoundEdit(o =>
+            {
+                var nodes = o.NodeSamples?.Select(n => n with { AdditionBank = bank }).ToList();
+                string raw = HitObjectLineEditor.SetSampleBanks(o.RawLine, o.NormalBank, bank);
+                if (o.Kind == HitObjectKind.Slider && nodes != null)
+                    raw = HitObjectLineEditor.SetSliderNodeSamples(raw, nodes);
+                return o with { AdditionBank = bank, NodeSamples = nodes ?? o.NodeSamples, RawLine = raw };
+            });
+        }
+
+        /// <summary>Applies a per-object hitsound mutation to every selected object as one undo step, then plays a sample.</summary>
+        private void applyHitsoundEdit(Func<HitObjectModel, HitObjectModel> mutate)
+        {
+            pushUndo();
+
+            HitObjectModel? sample = null;
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            {
+                if (!selection.Contains(parsed.HitObjects[i].Id))
+                    continue;
+
+                parsed.HitObjects[i] = mutate(parsed.HitObjects[i]);
+                sample ??= parsed.HitObjects[i];
+            }
+
+            afterEdit();
+
+            if (sample is { } s)
+                playFeedback(s.HitSound, s.NormalBank, s.AdditionBank);
+        }
+
+        /// <summary>Plays a one-off hitsound so a palette change is immediately audible (osu!lazer feedback).</summary>
+        private void playFeedback(int hitSound, SampleBank normal, SampleBank addition) =>
+            hitsounds?.Play(hitSound, normal, addition, 1f);
+
         public void DeleteSelected()
         {
             if (selection.Selected.Count == 0)
@@ -614,15 +1206,171 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (moveSnapshot.Count == 0 || moveMin.X > moveMax.X)
                 return; // nothing movable (e.g. spinner-only selection)
 
+            // Move by the raw delta, like osu!lazer's OsuSelectionHandler.moveObjects: no magnetic snapping
+            // onto other objects' centres - the selection simply follows the cursor, and stacking (below)
+            // resolves any consecutive overlaps afterwards.
+            Vector2 delta = new Vector2((float)Math.Round(rawDelta.X), (float)Math.Round(rawDelta.Y));
+
             // Clamp so the whole selection stays inside the playfield.
-            float dx = Math.Clamp((float)Math.Round(rawDelta.X), -moveMin.X, ParsedBeatmap.PLAYFIELD_WIDTH - moveMax.X);
-            float dy = Math.Clamp((float)Math.Round(rawDelta.Y), -moveMin.Y, ParsedBeatmap.PLAYFIELD_HEIGHT - moveMax.Y);
+            float dx = Math.Clamp(delta.X, -moveMin.X, ParsedBeatmap.PLAYFIELD_WIDTH - moveMax.X);
+            float dy = Math.Clamp(delta.Y, -moveMin.Y, ParsedBeatmap.PLAYFIELD_HEIGHT - moveMax.Y);
 
             movePosDelta = new Vector2(dx, dy);
 
             // Recompute stacking against the dragged positions so the selection visibly stacks onto objects it
             // overlaps - the same algorithm lazer's editor runs live while you move objects.
             playfield.PreviewPositionOffset(movePosDelta, liveStackHeights(movePosDelta));
+        }
+
+        /// <summary>
+        /// Resolves where a placement at the cursor should actually land: distance snap (if enabled) spaces it
+        /// from the previous object by the time gap, then magnetic snapping locks onto a very close object.
+        /// Used both by the placement preview and by the actual placement so they always agree.
+        /// </summary>
+        public Vector2 SnapPlacement(Vector2 cursor)
+        {
+            int time = (int)Math.Round(snapTime(CurrentTime));
+
+            Vector2 pos = cursor;
+            if (distanceSnapEnabled)
+                pos = applyDistanceSnap(pos, time);
+
+            // Magnetic snap to nearby visible objects, exactly as osu!lazer's snapToVisibleBlueprints: the
+            // radius is OsuHitObject.OBJECT_RADIUS * 0.10 (a fixed 6.4 osu!px, independent of circle size),
+            // and only on-screen, unselected objects are considered.
+            const float magnetic_snap_radius = OsuObjectRadius * 0.10f;
+            if (tryNearestObjectPosition(pos, id => !playfield.IsObjectVisible(id) || selection.Contains(id), out Vector2 target, out float dist) && dist < magnetic_snap_radius)
+                pos = target;
+
+            return pos;
+        }
+
+        /// <summary>Constrains a placement position to a distance from the previous object equal to its time gap times the slider velocity.</summary>
+        private Vector2 applyDistanceSnap(Vector2 cursor, double time)
+        {
+            var prev = previousObject(time);
+            if (prev == null)
+                return cursor;
+
+            var p = prev.Value;
+            Vector2 prevEnd = p.Kind == HitObjectKind.Slider && p.Path is { Count: > 0 } path ? path[^1] : new Vector2(p.X, p.Y);
+            double prevEndTime = p.StartTime + (p.Kind == HitObjectKind.Slider ? p.Duration : 0);
+
+            double dt = time - prevEndTime;
+            if (dt <= 0)
+                return cursor;
+
+            double velocity = pixelVelocityAt(prevEndTime); // osu!px per ms
+            double distance = distanceSpacing * velocity * dt;
+
+            Vector2 dir = cursor - prevEnd;
+            if (dir.LengthSquared < 1e-3f)
+                dir = new Vector2(1, 0);
+            dir = Vector2.Normalize(dir);
+
+            return prevEnd + dir * (float)distance;
+        }
+
+        /// <summary>The slider-velocity in osu!pixels per millisecond at the given time.</summary>
+        private double pixelVelocityAt(double time)
+        {
+            double beatLength = beatLengthAt(time);
+            return beatLength > 0 ? parsed.SliderMultiplier * 100 * velocityAt(time) / beatLength : 0;
+        }
+
+        /// <summary>The last hit object that starts strictly before the given time, or null.</summary>
+        private HitObjectModel? previousObject(double time)
+        {
+            HitObjectModel? prev = null;
+            foreach (var o in parsed.HitObjects)
+            {
+                if (o.StartTime < time)
+                    prev = o;
+                else
+                    break;
+            }
+            return prev;
+        }
+
+        /// <summary>osu!lazer's <c>OsuHitObject.OBJECT_RADIUS</c> constant (the base gamefield radius).</summary>
+        private const float OsuObjectRadius = 64f;
+
+        /// <summary>
+        /// Finds the nearest non-excluded object snap point to a position, returning false if none exist. The
+        /// snap points per object mirror osu!lazer's selection blueprints: a circle's centre; a slider's head,
+        /// its geometric path end, and the control-point anchors that produce visible kinks; a spinner's centre.
+        /// </summary>
+        private bool tryNearestObjectPosition(Vector2 pos, Func<int, bool> isExcluded, out Vector2 nearest, out float distance)
+        {
+            nearest = pos;
+            distance = float.MaxValue;
+            bool found = false;
+
+            foreach (var o in parsed.HitObjects)
+            {
+                if (isExcluded(o.Id))
+                    continue;
+
+                foreach (var candidate in snapPointsFor(o))
+                    considerCandidate(candidate, pos, ref nearest, ref distance, ref found);
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// The osu!pixel snap points of an object, mirroring its osu!lazer selection blueprint's
+        /// <c>ScreenSpaceSnapPoints</c> (unstacked positions, as lazer snaps to the unstacked target).
+        /// </summary>
+        private static IEnumerable<Vector2> snapPointsFor(HitObjectModel o)
+        {
+            if (o.Kind == HitObjectKind.Spinner)
+            {
+                // SpinnerSelectionBlueprint uses the default selection point: the draw quad centre (playfield centre).
+                yield return new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f);
+                yield break;
+            }
+
+            // Head: a slider's first path point, else the object position.
+            yield return o.Path is { Count: > 0 } hp ? hp[0] : new Vector2(o.X, o.Y);
+
+            if (o.Kind != HitObjectKind.Slider || o.Path is not { Count: > 0 } path)
+                yield break;
+
+            // Geometric path end (lazer's PathEndOffset, used regardless of repeat count).
+            yield return path[^1];
+
+            // Control points that produce visible kinks (getScreenSpaceControlPointNodes): segment-start
+            // anchors, plus all points on a linear segment; the head (i==0) and final point are excluded.
+            if (o.ControlPoints is not { Count: > 1 } cps)
+                yield break;
+
+            SliderPathType? currentType = null;
+            for (int i = 0; i < cps.Count - 1; i++)
+            {
+                var cp = cps[i];
+                if (cp.Type != null)
+                    currentType = cp.Type;
+
+                if (i == 0)
+                    continue;
+
+                if (cp.Type == null && currentType?.Type != SliderSplineType.Linear)
+                    continue;
+
+                yield return cp.Position;
+            }
+        }
+
+        private static void considerCandidate(Vector2 candidate, Vector2 pos, ref Vector2 nearest, ref float distance, ref bool found)
+        {
+            float d = (candidate - pos).Length;
+            if (d < distance)
+            {
+                distance = d;
+                nearest = candidate;
+                found = true;
+            }
         }
 
         /// <summary>Stack heights the objects would take if the selection were dropped at the current move offset.</summary>
@@ -648,6 +1396,185 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var o in temp)
                 heights[o.Id] = o.StackHeight;
             return heights;
+        }
+
+        /// <summary>
+        /// Converts the single selected slider into a stream of circles, one per beat-snap division along its
+        /// duration, positioned at the matching point on the slider path (honouring repeats). The first circle
+        /// inherits the slider's new-combo flag. Mirrors osu!stable's "convert slider to stream".
+        /// </summary>
+        private void convertSelectedSliderToStream()
+        {
+            if (selection.Selected.Count != 1)
+                return;
+
+            int id = selection.Selected.First();
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
+                return;
+
+            var slider = parsed.HitObjects[idx];
+            if (slider.Path is not { Count: >= 2 } || slider.Duration <= 0)
+                return;
+
+            double step = beatLengthAt(slider.StartTime) / beatDivisor.Value.Value;
+            if (step <= 0)
+                return;
+
+            int count = Math.Clamp((int)Math.Round(slider.Duration / step), 1, 256);
+            bool firstNewCombo = HitObjectLineEditor.HasNewCombo(slider.RawLine);
+            double spanDuration = slider.Duration / Math.Max(1, slider.Slides);
+
+            pushUndo();
+            parsed.HitObjects.RemoveAt(idx);
+            selection.Clear();
+
+            int newId = nextId();
+            var added = new List<int>();
+
+            for (int i = 0; i <= count; i++)
+            {
+                double elapsed = i * step;
+                if (elapsed > slider.Duration + 1)
+                    break;
+
+                // Map elapsed time to a position on the path, bouncing back and forth across repeats.
+                int span = spanDuration > 0 ? (int)(elapsed / spanDuration) : 0;
+                double within = spanDuration > 0 ? (elapsed - span * spanDuration) / spanDuration : 0;
+                double frac = span % 2 == 0 ? within : 1 - within;
+                Vector2 pos = samplePath(slider.Path, Math.Clamp(frac, 0, 1));
+
+                int px = Math.Clamp((int)Math.Round(pos.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH);
+                int py = Math.Clamp((int)Math.Round(pos.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT);
+                int t = (int)Math.Round(slider.StartTime + elapsed);
+                int type = i == 0 && firstNewCombo ? 0b101 : 0b001;
+                string raw = $"{px},{py},{t},{type},0,0:0:0:0:";
+
+                parsed.HitObjects.Add(new HitObjectModel(px, py, t, HitObjectKind.Circle, null, RawLine: raw, Id: newId));
+                added.Add(newId);
+                newId++;
+            }
+
+            parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            afterEdit();
+            selection.SetRange(added);
+        }
+
+        /// <summary>Samples a polyline at a fraction (0..1) of its total length.</summary>
+        private static Vector2 samplePath(IReadOnlyList<Vector2> path, double fraction)
+        {
+            if (path.Count == 1)
+                return path[0];
+
+            double total = 0;
+            for (int i = 1; i < path.Count; i++)
+                total += (path[i] - path[i - 1]).Length;
+
+            if (total <= 0)
+                return path[0];
+
+            double target = fraction * total;
+            double acc = 0;
+            for (int i = 1; i < path.Count; i++)
+            {
+                double seg = (path[i] - path[i - 1]).Length;
+                if (acc + seg >= target)
+                {
+                    float f = seg > 0 ? (float)((target - acc) / seg) : 0;
+                    return path[i - 1] + (path[i] - path[i - 1]) * f;
+                }
+                acc += seg;
+            }
+
+            return path[^1];
+        }
+
+        // --- Timing points ---
+
+        public int AddTimingPoint(TimingPointModel point)
+        {
+            pushUndo();
+            int id = nextTimingPointId();
+            parsed.TimingPointModels.Add(point with { Id = id });
+            afterTimingEdit();
+            return id;
+        }
+
+        public void UpdateTimingPoint(TimingPointModel point)
+        {
+            int index = parsed.TimingPointModels.FindIndex(tp => tp.Id == point.Id);
+            if (index < 0)
+                return;
+
+            pushUndo();
+            parsed.TimingPointModels[index] = point;
+            afterTimingEdit();
+        }
+
+        public void DeleteTimingPoint(int id)
+        {
+            int index = parsed.TimingPointModels.FindIndex(tp => tp.Id == id);
+            if (index < 0)
+                return;
+
+            pushUndo();
+            parsed.TimingPointModels.RemoveAt(index);
+            afterTimingEdit();
+        }
+
+        public void UpdateTimingPoints(IReadOnlyList<TimingPointModel> points)
+        {
+            if (points.Count == 0)
+                return;
+
+            pushUndo();
+            bool any = false;
+            foreach (var point in points)
+            {
+                int index = parsed.TimingPointModels.FindIndex(tp => tp.Id == point.Id);
+                if (index < 0)
+                    continue;
+                parsed.TimingPointModels[index] = point;
+                any = true;
+            }
+
+            if (any)
+                afterTimingEdit();
+            else
+                undoStack.Pop(); // nothing matched; drop the snapshot we just pushed
+        }
+
+        public void DeleteTimingPoints(IReadOnlyCollection<int> ids)
+        {
+            if (ids.Count == 0)
+                return;
+
+            pushUndo();
+            int removed = parsed.TimingPointModels.RemoveAll(tp => ids.Contains(tp.Id));
+
+            if (removed > 0)
+                afterTimingEdit();
+            else
+                undoStack.Pop();
+        }
+
+        /// <summary>Seeks the playhead to a time (e.g. double-clicking a timing point jumps to it on the map).</summary>
+        public void SeekTo(double time) => seekTo(time);
+
+        private int nextTimingPointId() =>
+            parsed.TimingPointModels.Count == 0 ? 0 : parsed.TimingPointModels.Max(tp => tp.Id) + 1;
+
+        /// <summary>Re-derives timing state after a timing-point edit and refreshes the timeline + HUD.</summary>
+        private void afterTimingEdit()
+        {
+            parsed.RebuildTimingDerived();
+            // A BPM/SV change re-times existing sliders (their pixel length is unchanged).
+            recomputeSliderDurationsData();
+            rebuildHitObjects();
+            rebuildSampleEvents();
+            topTimeline.Rebuild();
+            bottomTimeline.Rebuild();
+            editable.IsDirty.Value = true;
         }
 
         public void EndMove()
@@ -676,6 +1603,520 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             afterEdit();
         }
 
+        public void BeginSliderRepeatDrag(int id)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
+                return;
+
+            repeatDragId = id;
+            repeatDragOriginal = parsed.HitObjects[idx];
+            repeatDragSnapshot = takeSnapshot();
+            repeatDragChanged = false;
+        }
+
+        public void DragSliderRepeatTo(double endTime)
+        {
+            if (repeatDragId < 0)
+                return;
+
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == repeatDragId);
+            if (idx < 0)
+                return;
+
+            var orig = repeatDragOriginal;
+
+            // The duration of a single span (one head-to-tail traversal), fixed by the slider's path + velocity.
+            double spanDuration = orig.Duration / Math.Max(1, orig.Slides);
+            if (spanDuration <= 0)
+                return;
+
+            // osu!lazer: RepeatCount = round(proposedDuration / spanDuration) - 1, so slides = max(1, round(...)).
+            double proposedDuration = snapTime(endTime) - orig.StartTime;
+            int newSlides = Math.Max(1, (int)Math.Round(proposedDuration / spanDuration));
+
+            var cur = parsed.HitObjects[idx];
+            if (cur.Slides == newSlides)
+                return;
+
+            parsed.HitObjects[idx] = cur with
+            {
+                Slides = newSlides,
+                Duration = spanDuration * newSlides,
+                RawLine = HitObjectLineEditor.SetSliderSlides(cur.RawLine, newSlides),
+            };
+
+            repeatDragChanged = true;
+
+            // Live refresh so the timeline bar + playfield reverse arrows track the drag.
+            rebuildHitObjects();
+            topTimeline.Rebuild();
+        }
+
+        public void EndSliderRepeatDrag()
+        {
+            if (repeatDragId < 0)
+                return;
+
+            if (repeatDragChanged && repeatDragSnapshot != null)
+            {
+                // Push the pre-drag snapshot as a single undo step (the live edits weren't recorded).
+                undoStack.Push(repeatDragSnapshot);
+                redoStack.Clear();
+                afterEdit();
+                selection.SetSingle(repeatDragId);
+            }
+
+            repeatDragId = -1;
+            repeatDragSnapshot = null;
+        }
+
+        public void BeginSpinnerDurationDrag(int id)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Spinner)
+                return;
+
+            spinnerDragId = id;
+            spinnerDragOriginal = parsed.HitObjects[idx];
+            spinnerDragSnapshot = takeSnapshot();
+            spinnerDragChanged = false;
+        }
+
+        public void DragSpinnerEndTo(double endTime)
+        {
+            if (spinnerDragId < 0)
+                return;
+
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == spinnerDragId);
+            if (idx < 0)
+                return;
+
+            var orig = spinnerDragOriginal;
+
+            // The end snaps to the beat grid but stays at least one beat after the start (like lazer's minimum).
+            double minEnd = orig.StartTime + beatLengthAt(orig.StartTime);
+            int newEnd = (int)Math.Round(Math.Max(minEnd, snapTime(endTime)));
+
+            var cur = parsed.HitObjects[idx];
+            if ((int)(cur.StartTime + cur.Duration) == newEnd)
+                return;
+
+            parsed.HitObjects[idx] = cur with
+            {
+                Duration = Math.Max(0, newEnd - cur.StartTime),
+                RawLine = HitObjectLineEditor.SetSpinnerEndTime(cur.RawLine, newEnd),
+            };
+
+            spinnerDragChanged = true;
+
+            // Live refresh so the timeline bar tracks the drag.
+            rebuildHitObjects();
+            topTimeline.Rebuild();
+        }
+
+        public void EndSpinnerDurationDrag()
+        {
+            if (spinnerDragId < 0)
+                return;
+
+            if (spinnerDragChanged && spinnerDragSnapshot != null)
+            {
+                undoStack.Push(spinnerDragSnapshot);
+                redoStack.Clear();
+                afterEdit();
+                selection.SetSingle(spinnerDragId);
+            }
+
+            spinnerDragId = -1;
+            spinnerDragSnapshot = null;
+        }
+
+        // --- Selection transforms (rotate / scale / flip), mirroring osu!lazer's GeometryUtils math ---
+
+        /// <summary>Movable (non-spinner) selected objects, in time order.</summary>
+        private IEnumerable<HitObjectModel> movableSelection() =>
+            parsed.HitObjects.Where(o => selection.Contains(o.Id) && o.Kind != HitObjectKind.Spinner);
+
+        /// <summary>The osu!pixel points that bound an object (a circle's centre; a slider's whole path).</summary>
+        private static IEnumerable<Vector2> extentPoints(HitObjectModel o)
+        {
+            if (o.Kind == HitObjectKind.Slider && o.Path is { Count: > 0 } path)
+            {
+                foreach (var p in path)
+                    yield return p;
+            }
+            else
+                yield return new Vector2(o.X, o.Y);
+        }
+
+        public RectangleF? SelectionBounds()
+        {
+            float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+            bool any = false;
+
+            foreach (var o in movableSelection())
+            foreach (var p in extentPoints(o))
+            {
+                any = true;
+                minX = Math.Min(minX, p.X);
+                minY = Math.Min(minY, p.Y);
+                maxX = Math.Max(maxX, p.X);
+                maxY = Math.Max(maxY, p.Y);
+            }
+
+            if (!any)
+                return null;
+
+            // Follow a live (uncommitted) position drag so the box tracks the objects as they move.
+            if (moveSnapshot.Count > 0 && movePosDelta != Vector2.Zero)
+                return new RectangleF(minX + movePosDelta.X, minY + movePosDelta.Y, maxX - minX, maxY - minY);
+
+            return new RectangleF(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        public void BeginSelectionTransform()
+        {
+            if (!prepareTransform())
+                return;
+
+            transformUndo = takeSnapshot();
+            transformChanged = false;
+        }
+
+        public void RotateSelection(float degrees)
+        {
+            if (transformSnapshot == null)
+                return;
+
+            Vector2 centre = transformQuad.Centre;
+            applySelectionMap(p => rotateAround(p, centre, degrees));
+        }
+
+        public void ScaleSelection(Vector2 scaleDelta, Anchor reference)
+        {
+            if (transformSnapshot == null)
+                return;
+
+            applySelectionMap(p => scaledPosition(reference, scaleDelta, transformQuad, p));
+        }
+
+        public void EndSelectionTransform()
+        {
+            if (transformSnapshot == null)
+                return;
+
+            if (transformChanged && transformUndo != null)
+            {
+                undoStack.Push(transformUndo);
+                redoStack.Clear();
+                afterEdit();
+            }
+
+            transformSnapshot = null;
+            transformUndo = null;
+        }
+
+        /// <summary>
+        /// Rotates the selection by a fixed angle as a single committed edit (used by the Ctrl+Shift+R dialog).
+        /// The pivot is the playfield centre (256,192) or the selection's bounding-box centre.
+        /// </summary>
+        public void RotateSelectionBy(float degrees, bool aroundPlayfieldCentre)
+        {
+            if (!prepareTransform())
+                return;
+
+            Vector2 centre = aroundPlayfieldCentre
+                ? new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f)
+                : transformQuad.Centre;
+
+            transformUndo = takeSnapshot();
+            transformChanged = false;
+
+            applySelectionMap(p => rotateAround(p, centre, degrees));
+
+            if (transformChanged && transformUndo != null)
+            {
+                undoStack.Push(transformUndo);
+                redoStack.Clear();
+                afterEdit();
+            }
+
+            transformSnapshot = null;
+            transformUndo = null;
+        }
+
+        public void FlipSelection(bool horizontal)
+        {
+            if (!prepareTransform())
+                return;
+
+            Vector2 centre = transformQuad.Centre;
+            transformUndo = takeSnapshot();
+            transformChanged = false;
+
+            applySelectionMap(p => horizontal
+                ? new Vector2(2 * centre.X - p.X, p.Y)
+                : new Vector2(p.X, 2 * centre.Y - p.Y));
+
+            if (transformChanged)
+            {
+                undoStack.Push(transformUndo!);
+                redoStack.Clear();
+                afterEdit();
+            }
+
+            transformSnapshot = null;
+            transformUndo = null;
+        }
+
+        /// <summary>
+        /// Reverses the selected pattern (Ctrl+G), like osu!lazer's HandleReverse: mirrors the objects' start
+        /// times within the selection's span, reverses each slider's path, and keeps the new-combo flags at
+        /// the same ordinal positions.
+        /// </summary>
+        public void ReverseSelection()
+        {
+            var sel = parsed.HitObjects.Where(o => selection.Contains(o.Id)).OrderBy(o => o.StartTime).ToList();
+            if (sel.Count == 0)
+                return;
+
+            bool many = sel.Count > 1;
+            int startTime = sel.Min(o => o.StartTime);
+            int endTime = sel.Max(o => o.StartTime + (int)Math.Round(o.Duration));
+            var newComboOrder = sel.Select(o => (rawType(o.RawLine) & 0b100) != 0).ToList();
+
+            pushUndo();
+
+            var updated = new Dictionary<int, HitObjectModel>();
+            foreach (var o in sel)
+            {
+                var n = o;
+
+                if (many)
+                {
+                    int objEnd = o.StartTime + (int)Math.Round(o.Duration);
+                    int newStart = endTime - (objEnd - startTime);
+                    n = n with { StartTime = newStart, RawLine = HitObjectLineEditor.ShiftTime(n.RawLine, newStart - o.StartTime) };
+                }
+
+                if (o.Kind == HitObjectKind.Slider && o.ControlPoints is { Count: >= 2 } cps)
+                    n = reverseSlider(n, cps);
+
+                updated[o.Id] = n;
+            }
+
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+                if (updated.TryGetValue(parsed.HitObjects[i].Id, out var n))
+                    parsed.HitObjects[i] = n;
+
+            parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+
+            // Restore the new-combo flags to the same ordinal positions within the re-sorted selection.
+            var resorted = parsed.HitObjects.Where(o => selection.Contains(o.Id)).OrderBy(o => o.StartTime).ToList();
+            for (int i = 0; i < resorted.Count && i < newComboOrder.Count; i++)
+            {
+                bool cur = (rawType(resorted[i].RawLine) & 0b100) != 0;
+                if (cur != newComboOrder[i])
+                {
+                    int idx = parsed.HitObjects.FindIndex(o => o.Id == resorted[i].Id);
+                    parsed.HitObjects[idx] = parsed.HitObjects[idx] with { RawLine = HitObjectLineEditor.ToggleNewCombo(parsed.HitObjects[idx].RawLine) };
+                }
+            }
+
+            afterEdit();
+        }
+
+        /// <summary>Reverses a slider's control-point order (re-inferring segment types) so it runs the other way.</summary>
+        private HitObjectModel reverseSlider(HitObjectModel o, IReadOnlyList<SliderControlPoint> cps)
+        {
+            // Port of osu!lazer's slider reverse (SliderPathExtensions.reverseControlPoints): reverse the control
+            // points while propagating each segment's type forward, keep the expected distance unchanged, and move
+            // the head to the old slider end. The previous implementation discarded the control-point types and
+            // re-derived the length from the raw hull, which reshaped/resized the slider.
+            int n = cps.Count;
+            double pixelLength = originalPixelLength(o);
+
+            // The reversed slider starts where the old one ended (its path end at the expected distance).
+            Vector2 newStart = o.Path is { Count: > 0 } p ? p[^1] : cps[^1].Position;
+
+            var rev = new SliderControlPoint[n];
+            SliderPathType? lastType = null;
+
+            for (int i = 0; i < n; i++)
+            {
+                var pt = cps[i];
+                SliderPathType? type;
+
+                if (i == n - 1)
+                    type = lastType;               // old head becomes the new tail; its type carries forward
+                else if (pt.Type != null)
+                {
+                    type = lastType;               // this boundary inherits the previous segment's type...
+                    lastType = pt.Type;            // ...and hands its own type to the next boundary upstream
+                }
+                else
+                    type = null;
+
+                rev[n - 1 - i] = new SliderControlPoint(pt.Position, type);
+            }
+
+            // The new head must start a segment and sit at the old slider end.
+            rev[0] = new SliderControlPoint(newStart, rev[0].Type ?? SliderPathType.Bezier);
+
+            var typed = new List<SliderControlPoint>(rev);
+            var path = SliderGeometry.ComputePath(typed, pixelLength);
+            if (path.Count < 2 || pixelLength < 1)
+                return o;
+
+            return o with
+            {
+                X = (int)Math.Round(newStart.X),
+                Y = (int)Math.Round(newStart.Y),
+                Path = path,
+                ControlPoints = typed,
+                Duration = sliderDuration(o.StartTime, pixelLength, o.Slides),
+                RawLine = HitObjectLineEditor.SetSliderCurve(o.RawLine, typed, pixelLength),
+            };
+        }
+
+        /// <summary>Re-times every slider's travel duration for the current slider velocity (pixel length unchanged).</summary>
+        private void recomputeSliderDurations()
+        {
+            recomputeSliderDurationsData();
+            rebuildHitObjects();
+            rebuildSampleEvents();
+            topTimeline.Rebuild(); // slider widths on the timeline depend on duration
+        }
+
+        /// <summary>
+        /// Re-times every slider's travel duration for the current SV (global multiplier + active green line),
+        /// keeping its pixel length fixed - so a slider's playfield size is unchanged but its timeline span /
+        /// speed reflects the new velocity. Data only; the caller refreshes the views.
+        /// </summary>
+        private void recomputeSliderDurationsData()
+        {
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            {
+                var o = parsed.HitObjects[i];
+                if (o.Kind != HitObjectKind.Slider)
+                    continue;
+
+                double pixelLength = originalPixelLength(o);
+                parsed.HitObjects[i] = o with { Duration = sliderDuration(o.StartTime, pixelLength, o.Slides) };
+            }
+        }
+
+        /// <summary>The slider's stored expected distance (raw <c>length</c> field), falling back to its path length.</summary>
+        private static double originalPixelLength(HitObjectModel o)
+        {
+            string[] parts = o.RawLine.Split(',');
+            if (parts.Length >= 8
+                && double.TryParse(parts[7], NumberStyles.Float, CultureInfo.InvariantCulture, out double len) && len > 0)
+                return len;
+
+            return o.Path is { Count: > 1 } p ? SliderGeometry.PathLength(p) : 0;
+        }
+
+        /// <summary>Captures the current selection + its surrounding quad for a transform; false if nothing movable.</summary>
+        private bool prepareTransform()
+        {
+            var bounds = SelectionBounds();
+            if (bounds == null)
+                return false;
+
+            transformQuad = bounds.Value;
+            transformSnapshot = movableSelection().ToDictionary(o => o.Id, o => o);
+            return transformSnapshot.Count > 0;
+        }
+
+        /// <summary>Applies an osu!pixel position map to every snapshot object, live (rebuilds the playfield).</summary>
+        private void applySelectionMap(Func<Vector2, Vector2> map)
+        {
+            if (transformSnapshot == null)
+                return;
+
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            {
+                if (transformSnapshot.TryGetValue(parsed.HitObjects[i].Id, out var orig))
+                    parsed.HitObjects[i] = transformObject(orig, map);
+            }
+
+            transformChanged = true;
+            rebuildHitObjects();
+        }
+
+        /// <summary>Maps a single object's geometry (circle position, or a slider's whole control-point set).</summary>
+        private HitObjectModel transformObject(HitObjectModel orig, Func<Vector2, Vector2> map)
+        {
+            if (orig.Kind == HitObjectKind.Slider && orig.ControlPoints is { Count: >= 2 } cps0)
+            {
+                var mapped = new List<SliderControlPoint>(cps0.Count);
+                foreach (var cp in cps0)
+                {
+                    Vector2 np = map(cp.Position);
+                    mapped.Add(cp with { X = np.X, Y = np.Y });
+                }
+
+                var cps = clampControlPoints(mapped);
+                if (cps[0].Type == null)
+                    cps[0] = cps[0] with { Type = SliderPathType.Bezier };
+
+                double pixelLength = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+                var path = SliderGeometry.ComputePath(cps, pixelLength);
+                if (path.Count < 2 || pixelLength < 1)
+                    return orig; // degenerate transform - leave the slider as-is
+
+                return orig with
+                {
+                    X = (int)Math.Round(cps[0].X),
+                    Y = (int)Math.Round(cps[0].Y),
+                    Path = path,
+                    ControlPoints = cps,
+                    Duration = sliderDuration(orig.StartTime, pixelLength, orig.Slides),
+                    RawLine = HitObjectLineEditor.SetSliderCurve(orig.RawLine, cps, pixelLength),
+                };
+            }
+
+            if (orig.Kind == HitObjectKind.Circle)
+            {
+                Vector2 np = map(new Vector2(orig.X, orig.Y));
+                int nx = Math.Clamp((int)Math.Round(np.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH);
+                int ny = Math.Clamp((int)Math.Round(np.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT);
+                int dx = nx - (int)Math.Round(orig.X);
+                int dy = ny - (int)Math.Round(orig.Y);
+
+                return orig with { X = nx, Y = ny, RawLine = HitObjectLineEditor.ShiftPosition(orig.RawLine, dx, dy) };
+            }
+
+            return orig;
+        }
+
+        /// <summary>Rotates a point around an origin by degrees (osu!lazer's RotatePointAroundOrigin).</summary>
+        private static Vector2 rotateAround(Vector2 point, Vector2 origin, float degrees)
+        {
+            float a = -MathHelper.DegreesToRadians(degrees);
+            Vector2 d = point - origin;
+            return new Vector2(
+                d.X * MathF.Cos(a) + d.Y * MathF.Sin(a),
+                d.X * -MathF.Sin(a) + d.Y * MathF.Cos(a)) + origin;
+        }
+
+        /// <summary>osu!lazer's GeometryUtils.GetScaledPosition: a width/height delta anchored at a reference corner.</summary>
+        private static Vector2 scaledPosition(Anchor reference, Vector2 scale, RectangleF quad, Vector2 position)
+        {
+            float xOffset = (reference & Anchor.x0) > 0 ? -scale.X : 0;
+            float yOffset = (reference & Anchor.y0) > 0 ? -scale.Y : 0;
+
+            if (scale.X != 0 && quad.Width > 0)
+                position.X = quad.Left + xOffset + (position.X - quad.Left) / quad.Width * (quad.Width + scale.X);
+
+            if (scale.Y != 0 && quad.Height > 0)
+                position.Y = quad.Top + yOffset + (position.Y - quad.Top) / quad.Height * (quad.Height + scale.Y);
+
+            return position;
+        }
+
         private void commitTimeMove(int delta)
         {
             for (int i = 0; i < parsed.HitObjects.Count; i++)
@@ -701,20 +2142,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     X = original.X + dx,
                     Y = original.Y + dy,
                     Path = offsetPath(original.Path, dx, dy),
-                    Anchors = offsetAnchors(original.Anchors, dx, dy),
+                    ControlPoints = offsetControlPoints(original.ControlPoints, dx, dy),
                     RawLine = HitObjectLineEditor.ShiftPosition(original.RawLine, dx, dy),
                 };
             }
         }
 
-        private static IReadOnlyList<SliderAnchor>? offsetAnchors(IReadOnlyList<SliderAnchor>? anchors, int dx, int dy)
+        private static IReadOnlyList<SliderControlPoint>? offsetControlPoints(IReadOnlyList<SliderControlPoint>? controlPoints, int dx, int dy)
         {
-            if (anchors == null)
+            if (controlPoints == null)
                 return null;
 
-            var result = new List<SliderAnchor>(anchors.Count);
-            foreach (var a in anchors)
-                result.Add(a with { X = a.X + dx, Y = a.Y + dy });
+            var result = new List<SliderControlPoint>(controlPoints.Count);
+            foreach (var p in controlPoints)
+                result.Add(p with { X = p.X + dx, Y = p.Y + dy });
             return result;
         }
 
@@ -778,26 +2219,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return pointTime + Math.Round((timeMs - pointTime) / step) * step;
         }
 
-        /// <summary>Returns the beat-snapped time <paramref name="ticks"/> 1/4-beat steps from the given time.</summary>
-        private double stepBeats(double timeMs, int ticks)
-        {
-            if (!tryActiveBeat(timeMs, out double pointTime, out double step))
-                return timeMs + ticks * 100; // fallback if the map has no timing points
-
-            const double eps = 1e-3;
-            double rel = (timeMs - pointTime) / step;
-            double k = ticks > 0 ? Math.Floor(rel + eps) + ticks : Math.Ceiling(rel - eps) + ticks;
-            return pointTime + k * step;
-        }
-
         /// <summary>Common post-edit refresh: renumber combos, restack, rebuild views, resync hitsounds, flag dirty.</summary>
         private void afterEdit()
         {
             recomputeCombos();
             applyStacking();
             rebuildHitObjects();
+            rebuildSampleEvents();
             topTimeline.Rebuild();
-            needHitsoundResync = true;
             editable.IsDirty.Value = true;
         }
 
@@ -807,20 +2236,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // --- Copy / cut / paste: clipboard of hit objects, time-shifted on paste (lazer-style) ---
 
-        /// <summary>Copies the selected objects (in time order) to the editor clipboard.</summary>
+        /// <summary>
+        /// Copies the selected objects (in time order) to the process-wide clipboard (so they can be pasted
+        /// into another map/difficulty), and writes an osu! modding timestamp to the OS clipboard - exactly
+        /// like osu!lazer, so Ctrl+C gives you a "00:12:345 (1,2,3) - " string ready to paste into forums/chat.
+        /// </summary>
         private void copySelection()
         {
-            if (selection.Selected.Count == 0)
-                return;
-
             var ids = new HashSet<int>(selection.Selected);
-            clipboard.Clear();
-            // parsed.HitObjects is kept time-sorted, so the clipboard preserves relative timing.
-            foreach (var o in parsed.HitObjects)
-            {
-                if (ids.Contains(o.Id))
-                    clipboard.Add(o);
-            }
+            var copied = parsed.HitObjects.Where(o => ids.Contains(o.Id)).OrderBy(o => o.StartTime).ToList();
+
+            // The modding timestamp is written even with no selection (just the current time), matching lazer.
+            writeModdingTimestamp(copied);
+
+            if (copied.Count > 0)
+                HitObjectClipboard.Set(copied);
+        }
+
+        /// <summary>Writes lazer's modding timestamp "mm:ss:fff (combo,combo,...) - " to the OS clipboard.</summary>
+        private void writeModdingTimestamp(IReadOnlyList<HitObjectModel> objects)
+        {
+            double time = objects.Count > 0 ? objects.Min(o => o.StartTime) : CurrentTime;
+            string stamp = objects.Count > 0
+                ? $"{formatTimestamp(time)} ({string.Join(",", objects.Select(o => o.ComboNumber))}) - "
+                : $"{formatTimestamp(time)} - ";
+
+            hostClipboard?.SetText(stamp);
+        }
+
+        /// <summary>Formats a time (ms) as the osu! editor/modding timestamp "mm:ss:fff".</summary>
+        private static string formatTimestamp(double ms)
+        {
+            var t = TimeSpan.FromMilliseconds(Math.Max(0, ms));
+            return $"{(int)t.TotalMinutes:00}:{t.Seconds:00}:{t.Milliseconds:000}";
         }
 
         private void cutSelection()
@@ -832,21 +2280,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             DeleteSelected();
         }
 
-        /// <summary>Pastes the clipboard so its earliest object lands on the current snapped time, then selects it.</summary>
+        /// <summary>
+        /// Pastes the clipboard so its earliest object lands on the current snapped time, then selects it.
+        /// Reads the process-wide clipboard, so this works across maps/difficulties; pasted slider durations
+        /// are re-derived for this map's timing.
+        /// </summary>
         private void paste()
         {
-            if (clipboard.Count == 0)
+            if (!HitObjectClipboard.HasContent)
                 return;
 
+            var clip = HitObjectClipboard.Objects;
             int target = (int)Math.Round(snapTime(CurrentTime));
-            int baseTime = clipboard.Min(o => o.StartTime);
+            int baseTime = clip.Min(o => o.StartTime);
             int offset = target - baseTime;
 
             pushUndo();
 
             int id = nextId();
-            var newIds = new List<int>(clipboard.Count);
-            foreach (var o in clipboard)
+            var newIds = new List<int>(clip.Count);
+            foreach (var o in clip)
             {
                 newIds.Add(id);
                 parsed.HitObjects.Add(o with
@@ -859,15 +2312,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            // Pasted sliders carry their source map's duration; re-time them for this map's SV/BPM.
+            recomputeSliderDurationsData();
             afterEdit();
             selection.SetRange(newIds);
         }
 
         // --- Undo / redo: snapshots of the hit-object list ---
 
+        private Snapshot takeSnapshot() =>
+            new Snapshot(new List<HitObjectModel>(parsed.HitObjects), new List<TimingPointModel>(parsed.TimingPointModels));
+
         private void pushUndo()
         {
-            undoStack.Push(new List<HitObjectModel>(parsed.HitObjects));
+            undoStack.Push(takeSnapshot());
             redoStack.Clear();
         }
 
@@ -876,7 +2334,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (undoStack.Count == 0)
                 return;
 
-            redoStack.Push(new List<HitObjectModel>(parsed.HitObjects));
+            redoStack.Push(takeSnapshot());
             restore(undoStack.Pop());
         }
 
@@ -885,20 +2343,71 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (redoStack.Count == 0)
                 return;
 
-            undoStack.Push(new List<HitObjectModel>(parsed.HitObjects));
+            undoStack.Push(takeSnapshot());
             restore(redoStack.Pop());
         }
 
-        private void restore(List<HitObjectModel> snapshot)
+        /// <summary>Adds a bookmark at the current time (deduped, kept sorted), then refreshes the timelines.</summary>
+        private void addBookmark()
+        {
+            int time = (int)Math.Round(CurrentTime);
+
+            // Ignore a near-duplicate (a bookmark already within the snap window of this time).
+            if (parsed.Bookmarks.Any(b => Math.Abs(b - time) <= 2))
+                return;
+
+            parsed.Bookmarks.Add(time);
+            parsed.Bookmarks.Sort();
+            bookmarksChanged();
+        }
+
+        /// <summary>Removes the bookmark nearest the current time, within a small time window.</summary>
+        private void removeNearestBookmark()
+        {
+            const double window_ms = 100;
+            int time = (int)Math.Round(CurrentTime);
+
+            int nearest = -1;
+            double best = window_ms;
+            foreach (int b in parsed.Bookmarks)
+            {
+                double d = Math.Abs(b - time);
+                if (d <= best)
+                {
+                    best = d;
+                    nearest = b;
+                }
+            }
+
+            if (nearest < 0)
+                return;
+
+            parsed.Bookmarks.Remove(nearest);
+            bookmarksChanged();
+        }
+
+        private void bookmarksChanged()
+        {
+            topTimeline.Rebuild();
+            bottomTimeline.Rebuild();
+            editable.IsDirty.Value = true;
+        }
+
+        private void restore(Snapshot snapshot)
         {
             parsed.HitObjects.Clear();
-            parsed.HitObjects.AddRange(snapshot);
+            parsed.HitObjects.AddRange(snapshot.Objects);
+
+            parsed.TimingPointModels.Clear();
+            parsed.TimingPointModels.AddRange(snapshot.TimingPoints);
+            parsed.RebuildTimingDerived();
 
             selection.Clear();
             applyStacking();
             rebuildHitObjects();
+            rebuildSampleEvents();
             topTimeline.Rebuild();
-            needHitsoundResync = true;
+            bottomTimeline.Rebuild();
             editable.IsDirty.Value = true;
         }
 
@@ -906,15 +2415,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// Recomputes combo numbers/colours across the (time-ordered) object list from each object's
         /// new-combo flag - the same derivation the decoder uses, so numbering stays correct after edits.
         /// </summary>
-        private void recomputeCombos()
+        private void recomputeCombos() => applyCombosTo(parsed.HitObjects);
+
+        /// <summary>Derives each object's combo number/colour index from the new-combo flags, in time order.</summary>
+        private static void applyCombosTo(List<HitObjectModel> list)
         {
             int comboNumber = 0;
             int comboIndex = 0;
             bool first = true;
 
-            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            for (int i = 0; i < list.Count; i++)
             {
-                var o = parsed.HitObjects[i];
+                var o = list[i];
                 int type = rawType(o.RawLine);
                 bool newCombo = (type & 0b100) != 0;
 
@@ -923,7 +2435,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     comboIndex += 1 + ((type >> 4) & 0b111);
                 first = false;
 
-                parsed.HitObjects[i] = o with { ComboNumber = comboNumber, ComboIndex = comboIndex };
+                list[i] = o with { ComboNumber = comboNumber, ComboIndex = comboIndex };
             }
         }
 
@@ -1037,8 +2549,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             base.LoadComplete();
 
-            playfield.SetHitObjects(parsed.HitObjects, parsed.CircleRadius * 2);
-            playfield.Preempt = parsed.Preempt;
+            rebuildHitObjects();
 
             if (track != null && parsed.HitObjects.Count > 0)
                 track.Seek(Math.Max(0, parsed.HitObjects[0].StartTime - 200));
@@ -1046,25 +2557,49 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnKeyDown(KeyDownEvent e)
         {
+            // Overlay toggles are handled first so the same key both opens AND closes its menu - and pressing
+            // another menu's key while one is open switches straight to it.
+            if (settings.TimingPointsKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                toggleEditorOverlay(timingPointsOverlay);
+                return true;
+            }
+
+            if (settings.SongSetupKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                toggleEditorOverlay(songSettingsOverlay);
+                return true;
+            }
+
+            if (settings.SettingsKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                toggleEditorOverlay(settingsOverlay);
+                return true;
+            }
+
             // Let open dialogs handle their own keys.
             if (anyOverlayOpen())
                 return base.OnKeyDown(e);
 
-            if (e.Key == settings.PlayPauseKey.Value && !e.Repeat)
+            if (settings.PlayPauseKey.Value.Matches(e) && !e.Repeat)
             {
                 togglePlay();
                 return true;
             }
 
-            if (e.Key == settings.ExitKey.Value)
+            if (settings.ExitKey.Value.Matches(e))
             {
-                // Escape backs out: cancel an in-progress slider trace, then placement tools, selection, exit.
+                // Escape backs out: cancel an in-progress slider/spinner placement, then placement tools,
+                // selection, exit.
                 if (playfield.BuildingSlider)
                     playfield.CancelSliderBuild();
-                else if (playfield.PlacementActive || playfield.SliderPlacementActive)
+                else if (spinnerBuilding)
+                    playfield.CancelSpinnerBuild();
+                else if (playfield.PlacementActive || playfield.SliderPlacementActive || playfield.SpinnerPlacementActive)
                 {
                     playfield.SetPlacementActive(false);
                     playfield.SetSliderPlacementActive(false);
+                    playfield.SetSpinnerPlacementActive(false);
                 }
                 else if (selection.Selected.Count > 0)
                     selection.Clear();
@@ -1083,6 +2618,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (e.ControlPressed && e.Key == Key.S && !e.Repeat)
             {
                 save();
+                return true;
+            }
+
+            // Ctrl+A selects every object in the map, like lazer.
+            if (e.ControlPressed && !e.Repeat && e.Key == Key.A)
+            {
+                selection.SetRange(parsed.HitObjects.Select(o => o.Id));
                 return true;
             }
 
@@ -1105,6 +2647,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Bookmarks: Ctrl+B adds one at the current time, Ctrl+Shift+B removes the nearest.
+            if (e.ControlPressed && !e.Repeat && e.Key == Key.B)
+            {
+                if (e.ShiftPressed)
+                    removeNearestBookmark();
+                else
+                    addBookmark();
+                return true;
+            }
+
             // Undo / redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y), like lazer.
             if (e.ControlPressed && !e.Repeat && (e.Key == Key.Z || e.Key == Key.Y))
             {
@@ -1115,23 +2667,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
-            // Tools: (1) select, (2) place hit circle, (3) place slider - matching osu!lazer's toolbox shortcuts.
+            // Tools: (1) select, (2) circle, (3) slider, (4) spinner - matching osu!lazer's toolbox shortcuts.
+            // Routed through applyTool so each one fully disarms the others (e.g. 1 also clears the spinner).
             if (e.Key == Key.Number1 && !e.Repeat)
             {
-                playfield.SetPlacementActive(false);
-                playfield.SetSliderPlacementActive(false);
+                applyTool(EditorTool.Selection);
                 return true;
             }
 
             if (e.Key == Key.Number2 && !e.Repeat)
             {
-                playfield.SetPlacementActive(true);
+                applyTool(EditorTool.Circle);
                 return true;
             }
 
             if (e.Key == Key.Number3 && !e.Repeat)
             {
-                playfield.SetSliderPlacementActive(true);
+                applyTool(EditorTool.Slider);
+                return true;
+            }
+
+            if (e.Key == Key.Number4 && !e.Repeat)
+            {
+                applyTool(EditorTool.Spinner);
                 return true;
             }
 
@@ -1142,9 +2700,56 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
-            if (e.Key == Key.G && !e.Repeat)
+            // Ctrl+G reverses the selected pattern (order + slider direction), like osu!lazer.
+            if (e.ControlPressed && e.Key == Key.G && !e.Repeat)
+            {
+                ReverseSelection();
+                return true;
+            }
+
+            // Flip the selection: Ctrl+H horizontally, Ctrl+J vertically (lazer defaults).
+            if (e.ControlPressed && !e.Repeat && (e.Key == Key.H || e.Key == Key.J))
+            {
+                FlipSelection(e.Key == Key.H);
+                return true;
+            }
+
+            // Ctrl+Shift+R opens the rotate-by-angle dialog (acts on the current selection).
+            if (e.ControlPressed && e.ShiftPressed && e.Key == Key.R && !e.Repeat)
+            {
+                if (selection.Selected.Count > 0)
+                    rotationPopover.Show();
+                return true;
+            }
+
+            // Playback speed: Ctrl+Shift+< slower, Ctrl+Shift+> faster (osu!lazer has no default binding for this).
+            if (e.ControlPressed && e.ShiftPressed && (e.Key == Key.Comma || e.Key == Key.Period))
+            {
+                if (e.Key == Key.Period)
+                    playbackControl.IncreaseRate();
+                else
+                    playbackControl.DecreaseRate();
+                return true;
+            }
+
+            // G (no modifier) cycles the grid size, like lazer's EditorCycleGridSpacing.
+            if (e.Key == Key.G && !e.Repeat && !e.ControlPressed)
             {
                 playfield.CycleGridSize();
+                return true;
+            }
+
+            // Toggle distance snapping (lazer default Y).
+            if (settings.DistanceSnapKey.Value.Matches(e) && !e.Repeat)
+            {
+                distanceSnapEnabled = !distanceSnapEnabled;
+                return true;
+            }
+
+            // Convert the selected slider into a stream (default Ctrl+Shift+F).
+            if (settings.ConvertStreamKey.Value.Matches(e) && !e.Repeat)
+            {
+                convertSelectedSliderToStream();
                 return true;
             }
 
@@ -1154,7 +2759,36 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private bool anyOverlayOpen() =>
             settingsOverlay.State.Value == Visibility.Visible
             || songSettingsOverlay.State.Value == Visibility.Visible
-            || confirmExit.State.Value == Visibility.Visible;
+            || timingPointsOverlay.State.Value == Visibility.Visible
+            || confirmExit.State.Value == Visibility.Visible
+            || rotationPopover.State.Value == Visibility.Visible
+            || timingPillPopover.State.Value == Visibility.Visible;
+
+        /// <summary>Opens the inline timing-point editor beneath a clicked timeline pill.</summary>
+        private void onTimingPillClicked(int id, Vector2 screenPosition)
+        {
+            int idx = parsed.TimingPointModels.FindIndex(tp => tp.Id == id);
+            if (idx < 0)
+                return;
+
+            timingPillPopover.OpenFor(parsed.TimingPointModels[idx], timingPillPopover.ToLocalSpace(screenPosition));
+        }
+
+        /// <summary>
+        /// Toggles an editor overlay: closes it if it's open, otherwise closes any other open editor overlay
+        /// and shows it - so pressing F5 while the F6 menu is open switches straight to song setup.
+        /// </summary>
+        private void toggleEditorOverlay(VisibilityContainer overlay)
+        {
+            bool wasOpen = overlay.State.Value == Visibility.Visible;
+
+            settingsOverlay.Hide();
+            songSettingsOverlay.Hide();
+            timingPointsOverlay.Hide();
+
+            if (!wasOpen)
+                overlay.Show();
+        }
 
         private void togglePlay()
         {
@@ -1196,13 +2830,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Ar = editable.Ar.Value,
                 Od = editable.Od.Value,
                 StackLeniency = editable.StackLeniency.Value,
+                SliderMultiplier = editable.SliderMultiplier.Value,
+                SliderTickRate = editable.SliderTickRate.Value,
+                ComboColours = editable.MapColours.Select(c => c.Value).ToList(),
             };
 
-            bool ok = BeatmapSaver.Save(set, difficulty, parsed, edits);
+            // Existing maps are written in place directly in lazer's realm (exactly how lazer's own editor
+            // saves) - going through the .osz importer would make lazer file the edit as a duplicate set.
+            // Brand-new maps (no stored .osu yet) still round-trip through the importer.
+            bool ok;
+            if (!string.IsNullOrEmpty(difficulty.OsuFileHash))
+            {
+                string? error = BeatmapRealmWriter.Save(set, difficulty, parsed, edits);
+                ok = error == null;
+                if (!ok)
+                    toasts?.Push($"Save failed: {error}", EditorTheme.Colours.Error);
+            }
+            else
+            {
+                ok = BeatmapSaver.Save(set, difficulty, parsed, edits);
+                if (!ok)
+                    toasts?.Push("Save failed", EditorTheme.Colours.Error);
+            }
+
             if (ok)
             {
                 editable.IsDirty.Value = false;
                 DidSave = true;
+                toasts?.Push("Beatmap saved", EditorTheme.Colours.Success);
             }
             return ok;
         }
@@ -1216,17 +2871,110 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Alt+scroll adjusts the distance-snap spacing multiplier, like lazer.
+            if (e.AltPressed)
+            {
+                distanceSpacing = Math.Clamp(distanceSpacing + (e.ScrollDelta.Y > 0 ? 0.1 : -0.1), 0.1, 4.0);
+                return true;
+            }
+
             if (e.ShiftPressed || track == null)
                 return false;
 
-            // Step the playhead to the adjacent beat-snap tick. osu!lazer convention: up = earlier, down = later.
+            // osu!lazer convention: scroll up = earlier, down = later. One notch = one beat-snap division.
             int notches = Math.Max(1, (int)Math.Round(Math.Abs(e.ScrollDelta.Y)));
             int direction = e.ScrollDelta.Y > 0 ? -1 : 1;
 
-            // Use the track's exact position (not the interpolated clock) so repeated notches step cleanly.
-            double target = stepBeats(track.CurrentTime, direction * notches);
-            track.Seek(Math.Clamp(target, 0, track.Length));
+            seekBeatSnapped(direction, notches);
             return true;
+        }
+
+        /// <summary>
+        /// Beat-snapped seek, ported directly from osu!lazer's <c>EditorClock.seek</c>: project one beat-snap
+        /// division in the seek direction, snap that to the beat grid of the active timing section, clamp a
+        /// forward seek to the next timing point, and - if rounding landed us back on the current beat - step
+        /// one more division so a seek always moves. Reference time is the track's accurate position.
+        /// </summary>
+        private void seekBeatSnapped(int direction, double amount)
+        {
+            if (track == null || amount <= 0)
+                return;
+
+            double current = track.CurrentTime;
+
+            var tp = beatPointAt(current);
+
+            // Going backwards while sitting exactly on a timing point: snap within the *previous* section.
+            if (direction < 0 && Math.Abs(tp.Time - current) < 0.5 && tp.Time > 0)
+                tp = beatPointAt(current - 1);
+
+            double seekAmount = tp.BeatLength / beatDivisor.Value.Value * amount;
+            if (seekAmount <= 0)
+                return;
+
+            double seekTime = current + seekAmount * direction;
+
+            // Snap the projected time to the nearest beat of this section, biased in the seek direction.
+            double rel = seekTime - tp.Time;
+            int closestBeat = direction > 0 ? (int)Math.Floor(rel / seekAmount) : (int)Math.Ceiling(rel / seekAmount);
+            seekTime = tp.Time + closestBeat * seekAmount;
+
+            // A forward seek can't cross into the next timing section; clamp to its start.
+            double? nextTime = nextBeatPointTime(tp.Time);
+            if (direction > 0 && nextTime.HasValue && seekTime > nextTime.Value)
+                seekTime = nextTime.Value;
+
+            // Rounding can land us back on the current beat (a no-op); push one more division so we always move.
+            if (Math.Abs(current - seekTime) < 0.5)
+                seekTime = tp.Time + (closestBeat + direction) * seekAmount;
+
+            // Never fall before this section's start (unless it's the very first one).
+            if (seekTime < tp.Time && tp.Time > (parsed.BeatPoints.Count > 0 ? parsed.BeatPoints[0].Time : 0))
+                seekTime = tp.Time;
+
+            seekTo(seekTime);
+        }
+
+        /// <summary>The uninherited beat point active at the given time (the last one at/before it, or the first).</summary>
+        private BeatPoint beatPointAt(double time)
+        {
+            if (parsed.BeatPoints.Count == 0)
+                return new BeatPoint(0, 500, 4); // 120 BPM fallback
+
+            var point = parsed.BeatPoints[0];
+            foreach (var p in parsed.BeatPoints)
+            {
+                if (p.Time <= time)
+                    point = p;
+                else
+                    break;
+            }
+            return point;
+        }
+
+        /// <summary>The time of the first uninherited beat point after <paramref name="afterTime"/>, if any.</summary>
+        private double? nextBeatPointTime(double afterTime)
+        {
+            foreach (var p in parsed.BeatPoints)
+            {
+                if (p.Time > afterTime)
+                    return p.Time;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Seeks the track to <paramref name="time"/> (clamped to the track) and immediately resyncs the
+        /// interpolating clock, so a seek mid-playback lands cleanly instead of stuttering as the
+        /// interpolation catches up - the behaviour osu!lazer's decoupled editor clock gives for free.
+        /// </summary>
+        private void seekTo(double time)
+        {
+            if (track == null)
+                return;
+
+            track.Seek(Math.Clamp(time, 0, track.Length));
+            audioClock?.ProcessFrame();
         }
 
         public override void OnEntering(ScreenTransitionEvent e)

@@ -1,3 +1,4 @@
+using osu.Framework.Allocation;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Sprites;
@@ -7,40 +8,51 @@ using OsuBeatmapEditor.Game.Graphics;
 namespace OsuBeatmapEditor.Game.UI
 {
     /// <summary>
-    /// A basic context menu container whose items carry a little extra padding around their text.
+    /// Context-menu container styled to the editor design system: a rounded, elevated "overlay" surface
+    /// with comfortably padded items that highlight on hover.
     /// </summary>
     public partial class PaddedContextMenuContainer : BasicContextMenuContainer
     {
-        protected override Menu CreateMenu() => new PaddedMenu();
+        protected override Menu CreateMenu() => new ThemedMenu();
 
-        private partial class PaddedMenu : BasicMenu
+        private partial class ThemedMenu : BasicMenu
         {
-            public PaddedMenu()
+            public ThemedMenu()
                 : base(Direction.Vertical)
             {
+                BackgroundColour = EditorTheme.Colours.Overlay;
             }
 
-            protected override Menu CreateSubMenu() => new PaddedMenu();
-
-            protected override DrawableMenuItem CreateDrawableMenuItem(MenuItem item) => new PaddedDrawableMenuItem(item);
-
-            private partial class PaddedDrawableMenuItem : BasicDrawableMenuItem
+            [BackgroundDependencyLoader]
+            private void load()
             {
-                public PaddedDrawableMenuItem(MenuItem item)
+                MaskingContainer.Masking = true;
+                MaskingContainer.CornerRadius = EditorTheme.Radius.Md;
+                MaskingContainer.BorderThickness = EditorTheme.Sizing.BorderThickness;
+                MaskingContainer.BorderColour = EditorTheme.Colours.Border;
+            }
+
+            protected override Menu CreateSubMenu() => new ThemedMenu();
+
+            protected override DrawableMenuItem CreateDrawableMenuItem(MenuItem item) => new ThemedDrawableMenuItem(item);
+
+            private partial class ThemedDrawableMenuItem : BasicDrawableMenuItem
+            {
+                public ThemedDrawableMenuItem(MenuItem item)
                     : base(item)
                 {
+                    BackgroundColour = EditorTheme.Colours.Overlay;
+                    BackgroundColourHover = EditorTheme.Colours.ControlHover;
                 }
 
-                // The base content uses a relatively-sized, truncating label, which collapses to a thin
-                // clipped rectangle inside an auto-sizing menu. Provide a self-sized label instead so the
-                // item measures its full width and height.
+                // A self-sized, themed label (the base uses a relatively-sized, truncating one that collapses
+                // inside an auto-sizing menu).
                 protected override Drawable CreateContent() => new SpriteText
                 {
-                    Text = Item.Text.Value,
                     Truncate = false,
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 17),
-                    Margin = new MarginPadding { Horizontal = 14, Vertical = 7 },
+                    Colour = EditorTheme.Colours.Text,
+                    Font = EditorTheme.Type.Body(),
+                    Margin = new MarginPadding { Horizontal = EditorTheme.Spacing.Lg, Vertical = EditorTheme.Spacing.Md },
                 };
             }
         }

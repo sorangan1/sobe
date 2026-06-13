@@ -1,8 +1,5 @@
-using System;
-using System.Collections.Generic;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
-using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using OsuBeatmapEditor.Game.Graphics;
@@ -45,10 +42,13 @@ namespace OsuBeatmapEditor.Game.UI
                         Padding = new MarginPadding { Horizontal = 8 },
                         Children = new Drawable[]
                         {
-                            new StarIcon(12, content)
+                            new SpriteIcon
                             {
                                 Anchor = Anchor.CentreLeft,
                                 Origin = Anchor.CentreLeft,
+                                Icon = FontAwesome.Solid.Star,
+                                Size = new Vector2(12),
+                                Colour = content,
                             },
                             new SpriteText
                             {
@@ -62,37 +62,6 @@ namespace OsuBeatmapEditor.Game.UI
                     },
                 },
             };
-        }
-
-        /// <summary>A small five-pointed star rendered as a vector outline (no font glyph).</summary>
-        private partial class StarIcon : CompositeDrawable
-        {
-            public StarIcon(float size, Color4 colour)
-            {
-                Size = new Vector2(size);
-
-                float outer = size / 2f;
-                float inner = outer * 0.45f;
-
-                var vertices = new List<Vector2>();
-                for (int i = 0; i <= 10; i++)
-                {
-                    float angle = MathF.PI / 180f * (-90 + i * 36);
-                    float r = i % 2 == 0 ? outer : inner;
-                    vertices.Add(new Vector2(outer + r * MathF.Cos(angle), outer + r * MathF.Sin(angle)));
-                }
-
-                // A thick path whose tube reaches the centre, giving a solid (filled) star.
-                var path = new SmoothPath
-                {
-                    PathRadius = size * 0.2f,
-                    Colour = colour,
-                };
-                path.Vertices = vertices;
-                path.Position = -path.PositionInBoundingBox(Vector2.Zero);
-
-                InternalChild = path;
-            }
         }
     }
 }

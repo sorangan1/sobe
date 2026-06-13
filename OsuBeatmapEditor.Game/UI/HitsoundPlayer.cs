@@ -20,14 +20,21 @@ namespace OsuBeatmapEditor.Game.UI
             this.samples = samples;
         }
 
-        /// <summary>Plays the hitsounds for a single object (normal + whistle/finish/clap additions).</summary>
-        public void Play(HitObjectModel o)
-        {
-            play($"{bankName(o.NormalBank)}-hitnormal", o.SampleVolume);
+        /// <summary>Plays the hitsounds for a single object's head (normal + whistle/finish/clap additions).</summary>
+        public void Play(HitObjectModel o) =>
+            Play(o.HitSound, o.NormalBank, o.AdditionBank, o.SampleVolume);
 
-            if ((o.HitSound & 0b0010) != 0) play($"{bankName(o.AdditionBank)}-hitwhistle", o.SampleVolume);
-            if ((o.HitSound & 0b0100) != 0) play($"{bankName(o.AdditionBank)}-hitfinish", o.SampleVolume);
-            if ((o.HitSound & 0b1000) != 0) play($"{bankName(o.AdditionBank)}-hitclap", o.SampleVolume);
+        /// <summary>
+        /// Plays one hitsound event: the normal sample always, plus whistle/finish/clap as flagged in
+        /// <paramref name="hitSound"/>. Used for object heads and for each slider node (head/repeat/tail).
+        /// </summary>
+        public void Play(int hitSound, SampleBank normalBank, SampleBank additionBank, float volume)
+        {
+            play($"{bankName(normalBank)}-hitnormal", volume);
+
+            if ((hitSound & 0b0010) != 0) play($"{bankName(additionBank)}-hitwhistle", volume);
+            if ((hitSound & 0b0100) != 0) play($"{bankName(additionBank)}-hitfinish", volume);
+            if ((hitSound & 0b1000) != 0) play($"{bankName(additionBank)}-hitclap", volume);
         }
 
         private void play(string name, float volume)
