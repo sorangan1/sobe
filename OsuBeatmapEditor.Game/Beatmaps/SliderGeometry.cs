@@ -344,6 +344,34 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return len;
         }
 
+        /// <summary>The point a fraction (0..1) of the way along a polyline, measured by arc length.</summary>
+        public static Vector2 PointAtFraction(IReadOnlyList<Vector2> path, double fraction)
+        {
+            if (path.Count == 0)
+                return Vector2.Zero;
+            if (path.Count == 1)
+                return path[0];
+
+            double total = PathLength(path);
+            if (total <= 0)
+                return path[0];
+
+            double target = Math.Clamp(fraction, 0, 1) * total;
+            double acc = 0;
+            for (int i = 1; i < path.Count; i++)
+            {
+                double seg = (path[i] - path[i - 1]).Length;
+                if (acc + seg >= target)
+                {
+                    float f = seg > 0 ? (float)((target - acc) / seg) : 0;
+                    return path[i - 1] + (path[i] - path[i - 1]) * f;
+                }
+                acc += seg;
+            }
+
+            return path[^1];
+        }
+
         // --- Encoding (typed control points -> .osu curve field) ---
 
         /// <summary>Port of lazer's <c>addPathData</c>: emits the curve field with inline per-segment type letters.</summary>

@@ -40,7 +40,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // Mod-preview flags. hidden = Hidden (objects fade out before the hit, no approach circle); flipText =
         // HardRock flips the whole play area, so text drawn here must be counter-flipped to read upright.
-        private readonly bool hidden;
+        private bool hidden;
         private readonly bool flipText;
 
         private Container? approachCircle;
@@ -544,6 +544,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
+        /// Toggles the Hidden mod preview in place: only the fade (and approach circle) change, so we just clear
+        /// and re-schedule this object's transforms instead of recreating the drawable - the Hidden chip stays
+        /// snappy even on dense maps. No-op when the value is unchanged.
+        /// </summary>
+        public void SetHidden(bool value)
+        {
+            if (hidden == value)
+                return;
+
+            hidden = value;
+
+            // Not loaded yet: LoadComplete's applyAnimation will run with the new value, so nothing to redo.
+            if (!IsLoaded)
+                return;
+
+            ClearTransforms(true); // includes children (approach circle, slider ball, hit ring, flash)
+            applyAnimation();
+        }
+
+        /// <summary>
         /// Schedules this object's appearance as transforms against the (audio) clock - the declarative model
         /// osu!lazer uses, so the framework animates it and re-evaluates correctly while the editor seeks.
         /// Visuals are unchanged from the previous per-frame version.
@@ -578,21 +598,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     this.FadeOut(fadeOut);
             }
 
-            // Hidden suppresses the approach circle entirely.
-            if (approachCircle != null && !hidden)
+            // Hidden suppresses the approach circle entirely. Reset it unconditionally so an in-place toggle
+            // back to Hidden leaves it hidden (no stale transforms keeping it visible).
+            if (approachCircle != null)
             {
                 approachCircle.Alpha = 0;
                 approachCircle.Scale = new Vector2(approach_start_scale);
 
-                double approachFadeIn = Math.Min(fadeIn * 2, preempt);
-                using (BeginAbsoluteSequence(start - preempt))
+                if (!hidden)
                 {
-                    approachCircle.FadeTo(1f, approachFadeIn);
-                    approachCircle.ScaleTo(1f, preempt); // linear shrink 4x -> 1x across the preempt window
-                }
+                    double approachFadeIn = Math.Min(fadeIn * 2, preempt);
+                    using (BeginAbsoluteSequence(start - preempt))
+                    {
+                        approachCircle.FadeTo(1f, approachFadeIn);
+                        approachCircle.ScaleTo(1f, preempt); // linear shrink 4x -> 1x across the preempt window
+                    }
 
-                using (BeginAbsoluteSequence(start))
-                    approachCircle.FadeOut();
+                    using (BeginAbsoluteSequence(start))
+                        approachCircle.FadeOut();
+                }
             }
 
             if (spinnerRotor != null && hitObject.Duration > 0)

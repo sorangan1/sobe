@@ -115,6 +115,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Hidden (objects fade out, no approach circles). Purely visual - they never touch the saved map.
         private readonly BindableBool hardRockMod = new BindableBool();
         private readonly BindableBool hiddenMod = new BindableBool();
+        // Auto-mod preview: a cursor that plays the map. Colour + trail length tweakable in a popover under the chip.
+        private readonly BindableBool autoMod = new BindableBool();
+        private readonly Bindable<Color4> autoColour = new Bindable<Color4>(new Color4(1f, 0.86f, 0.2f, 1f));
+        private readonly BindableInt autoTrail = new BindableInt(10) { MinValue = 0, MaxValue = 120 };
+        private readonly BindableFloat autoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f };
+        private AutoPreviewMenu autoMenu = null!;
         // Smoothly-interpolated current top-bar height, lerped toward its collapsed/expanded target each frame.
         private float topHeightCurrent = top_bar_height;
         private SpriteText bpmText = null!;
@@ -312,7 +318,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     {
                         new ModToggleButton(hiddenMod, "HD", EditorTheme.Colours.Selection, "Hidden - objects fade out, no approach circles"),
                         new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS"),
+                        new ModToggleButton(autoMod, "AU", EditorTheme.Colours.Info, "Auto - a cursor plays the map (colour/trail below)"),
                     },
+                },
+                // The Auto-preview popover (cursor colour + trail length), shown under the chips while Auto is on.
+                autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth)
+                {
+                    Anchor = Anchor.TopRight,
+                    Origin = Anchor.TopRight,
+                    Alpha = 0,
                 },
                 leftPanels = new FillFlowContainer
                 {
@@ -422,6 +436,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // the field vertically; Hidden changes the per-object fade. Both are pure visualisation.
             hardRockMod.BindValueChanged(_ => onModsChanged());
             hiddenMod.BindValueChanged(_ => onModsChanged(), true);
+
+            // Auto preview: the toggle shows the playing cursor + reveals the colour/trail popover; the colour
+            // and trail bindables feed straight through to the cursor. All purely visual.
+            autoMod.BindValueChanged(v =>
+            {
+                playfield.SetAutoPlay(v.NewValue);
+                autoMenu.FadeTo(v.NewValue ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            }, true);
+            autoColour.BindValueChanged(c => playfield.SetAutoColour(c.NewValue), true);
+            autoTrail.BindValueChanged(t => playfield.SetAutoTrailLength(t.NewValue), true);
+            autoTrailWidth.BindValueChanged(w => playfield.SetAutoTrailWidth(w.NewValue), true);
         }
 
         /// <summary>Re-applies the active mod-preview state to the playfield (diameter/preempt + flip + fade).</summary>
@@ -508,6 +533,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             bpmText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 46 };
             svText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 70 };
             modButtons.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 96 };
+            autoMenu.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 132 };
             distanceSnapText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 132 };
 
             // The Song Setup / Settings buttons slide down with the timeline so they stay just below it.
@@ -1797,32 +1823,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Samples a polyline at a fraction (0..1) of its total length.</summary>
         private static Vector2 samplePath(IReadOnlyList<Vector2> path, double fraction)
-        {
-            if (path.Count == 1)
-                return path[0];
-
-            double total = 0;
-            for (int i = 1; i < path.Count; i++)
-                total += (path[i] - path[i - 1]).Length;
-
-            if (total <= 0)
-                return path[0];
-
-            double target = fraction * total;
-            double acc = 0;
-            for (int i = 1; i < path.Count; i++)
-            {
-                double seg = (path[i] - path[i - 1]).Length;
-                if (acc + seg >= target)
-                {
-                    float f = seg > 0 ? (float)((target - acc) / seg) : 0;
-                    return path[i - 1] + (path[i] - path[i - 1]) * f;
-                }
-                acc += seg;
-            }
-
-            return path[^1];
-        }
+            => SliderGeometry.PointAtFraction(path, fraction);
 
         // --- Timing points ---
 
@@ -3220,7 +3221,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             int notches = Math.Max(1, (int)Math.Round(Math.Abs(e.ScrollDelta.Y)));
             int direction = e.ScrollDelta.Y > 0 ? -1 : 1;
 
-            seekBeatSnapped(direction, notches);
+            // While playing, the playhead keeps advancing during the seek, so a plain one-division step lands
+            // almost where we started (or even nets forward when seeking back). Lazer's EditorClock adds 1.5
+            // divisions to the amount whenever the clock is running, so a mid-playback seek actually moves.
+            double amount = notches + (track.IsRunning ? 1.5 : 0);
+
+            seekBeatSnapped(direction, amount);
             return true;
         }
 
@@ -3243,16 +3249,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (direction < 0 && Math.Abs(tp.Time - current) < 0.5 && tp.Time > 0)
                 tp = beatPointAt(current - 1);
 
-            double seekAmount = tp.BeatLength / beatDivisor.Value.Value * amount;
-            if (seekAmount <= 0)
+            // The snap grid is exactly one beat division; `amount` only scales the projection distance (it can
+            // be fractional - e.g. 2.5 while playing - so it must NOT widen the grid, or we'd snap off-beat).
+            double beatLength = tp.BeatLength / beatDivisor.Value.Value;
+            if (beatLength <= 0)
                 return;
 
-            double seekTime = current + seekAmount * direction;
+            double seekTime = current + beatLength * amount * direction;
 
             // Snap the projected time to the nearest beat of this section, biased in the seek direction.
             double rel = seekTime - tp.Time;
-            int closestBeat = direction > 0 ? (int)Math.Floor(rel / seekAmount) : (int)Math.Ceiling(rel / seekAmount);
-            seekTime = tp.Time + closestBeat * seekAmount;
+            int closestBeat = direction > 0 ? (int)Math.Floor(rel / beatLength) : (int)Math.Ceiling(rel / beatLength);
+            seekTime = tp.Time + closestBeat * beatLength;
 
             // A forward seek can't cross into the next timing section; clamp to its start.
             double? nextTime = nextBeatPointTime(tp.Time);
@@ -3261,7 +3269,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // Rounding can land us back on the current beat (a no-op); push one more division so we always move.
             if (Math.Abs(current - seekTime) < 0.5)
-                seekTime = tp.Time + (closestBeat + direction) * seekAmount;
+                seekTime = tp.Time + (closestBeat + direction) * beatLength;
 
             // Never fall before this section's start (unless it's the very first one).
             if (seekTime < tp.Time && tp.Time > (parsed.BeatPoints.Count > 0 ? parsed.BeatPoints[0].Time : 0))

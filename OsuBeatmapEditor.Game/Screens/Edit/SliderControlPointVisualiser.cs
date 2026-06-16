@@ -18,7 +18,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
     /// <c>PathControlPointVisualiser</c>: a control polygon with a handle per control point (white = segment
     /// continuation, red = segment start / sharp corner, i.e. a non-null <see cref="SliderControlPoint.Type"/>).
     /// Dragging a handle reshapes (and resizes) the slider live; double-clicking a handle toggles its corner;
-    /// right-clicking un-corners or deletes it; double-clicking the body inserts a control point. Edits commit
+    /// right-clicking un-corners or deletes it; Ctrl+left-clicking the body inserts a control point. Edits commit
     /// through <see cref="IEditorActions"/>.
     /// </summary>
     public partial class SliderControlPointVisualiser : CompositeDrawable
@@ -41,7 +41,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container lineLayer = null!;
         private Container pieceLayer = null!;
         private SmoothPath preview = null!;
-        private double lastBodyClickTime = double.MinValue;
 
         public SliderControlPointVisualiser(HitObjectModel slider, float diameter, IEditorActions actions)
         {
@@ -198,13 +197,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
-        /// Click handling on the body (clicks on a handle go to the piece itself): a click on the head/tail
-        /// circle selects that edge node; a single click on the body selects the body part; a double-click on
-        /// the body inserts a control point on the nearest polygon segment.
+        /// Click handling on the body (clicks on a handle go to the piece itself): Ctrl+left-click anywhere on
+        /// the body inserts a control point on the nearest polygon segment (it takes priority, so it still works
+        /// right on top of the head/tail circle); a plain click on the head/tail circle selects that edge node;
+        /// a plain click on the body selects the body part.
         /// </summary>
         protected override bool OnClick(ClickEvent e)
         {
             Vector2 pos = clamp(ToLocalSpace(e.ScreenSpaceMousePosition));
+
+            // Ctrl+left-click inserts a new anchor, checked first so it works even when hovering the head/tail
+            // circle (where edge-node selection would otherwise consume the click).
+            if (e.ControlPressed && nearPath(pos, Math.Max(8f, diameter / 2f)))
+            {
+                int insertAt = nearestSegmentIndex(pos);
+                controlPoints.Insert(insertAt, new SliderControlPoint(pos));
+                actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
+                return true;
+            }
 
             // The head/tail circle is larger than its handle, so cover the circle area for edge-node selection.
             // The tail sits at the rendered path end (not the last control point, which a length trim can move).
@@ -224,21 +234,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!nearPath(pos, Math.Max(8f, diameter / 2f)))
                 return false; // clicks away from the body fall through to the playfield
 
-            double now = Time.Current;
-            bool doubleClick = now - lastBodyClickTime < 250;
-            lastBodyClickTime = now;
-
-            if (doubleClick)
-            {
-                int insertAt = nearestSegmentIndex(pos);
-                controlPoints.Insert(insertAt, new SliderControlPoint(pos));
-                actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
-            }
-            else
-            {
-                BodyClicked?.Invoke(); // selecting the body part keeps this slider selected
-            }
-
+            BodyClicked?.Invoke(); // selecting the body part keeps this slider selected
             return true;
         }
 

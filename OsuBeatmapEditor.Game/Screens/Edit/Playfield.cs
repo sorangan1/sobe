@@ -94,6 +94,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // makes objects fade out before they're hit. Set by the editor; purely visual, never saved.
         private bool modHardRock;
         private bool modHidden;
+        // Set by SetMods (HardRock) so the next SetHitObjects rebuilds every drawable exactly once.
+        private bool pendingFullRebuild;
+
+        // Auto-mod preview: a cursor that plays the map. Purely visual, like the HR/HD previews.
+        private AutoCursor autoCursor = null!;
+        private bool modAuto;
 
         // Each live follow-point connection plus the endpoints/ids it was built from, so a position drag can
         // recreate just the connections touching the selection instead of rebuilding the whole map (which lags).
@@ -182,6 +188,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
                     // Placement preview + rubber-band box.
                     overlayLayer = new Container { RelativeSizeAxes = Axes.Both, Child = buildPlacementPreview() },
+                    // Auto-mod preview cursor, on top of everything (osu!pixel space = the play area itself).
+                    autoCursor = new AutoCursor { PositionSource = autoCursorPosition },
                 },
             };
 
@@ -211,18 +219,151 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public void RebuildObjects() => rebuildAppearance();
 
         /// <summary>
-        /// Sets the active mod-preview state and re-renders. HardRock flips the play area vertically (handled in
-        /// <see cref="Update"/>); Hidden changes the per-object fade. Both feed into every drawable, so force a
-        /// full rebuild even when the circle size / preempt are unchanged.
+        /// Sets the active mod-preview state. HardRock changes circle size (diameter) + AR (preempt) and flips
+        /// the field, so it needs every drawable rebuilt - it just flags the rebuild and lets the caller's
+        /// following <c>SetHitObjects</c> do it once (avoids a double rebuild). Hidden only changes the fade, so
+        /// it's applied in place on the existing drawables (no recreation) to keep the toggle snappy.
         /// </summary>
         public void SetMods(bool hardRock, bool hidden)
         {
-            if (modHardRock == hardRock && modHidden == hidden)
+            bool hrChanged = modHardRock != hardRock;
+            bool hdChanged = modHidden != hidden;
+            if (!hrChanged && !hdChanged)
                 return;
 
             modHardRock = hardRock;
             modHidden = hidden;
-            rebuildAppearance();
+
+            // HardRock alters diameter/preempt → the next SetHitObjects must rebuild everything.
+            if (hrChanged)
+                pendingFullRebuild = true;
+
+            // Hidden is a pure fade change: retarget the existing drawables instead of recreating them.
+            if (hdChanged && !hrChanged)
+            {
+                foreach (var d in objects)
+                    d.SetHidden(hidden);
+            }
+        }
+
+        /// <summary>Toggles the Auto-mod preview cursor (visual only).</summary>
+        public void SetAutoPlay(bool enabled) => modAuto = enabled;
+
+        /// <summary>Sets the Auto cursor colour.</summary>
+        public void SetAutoColour(Color4 colour) => autoCursor.SetColour(colour);
+
+        /// <summary>Sets the Auto cursor trail length (number of trailing segments).</summary>
+        public void SetAutoTrailLength(int length) => autoCursor.SetTrailLength(length);
+
+        /// <summary>Sets the Auto cursor trail thickness multiplier.</summary>
+        public void SetAutoTrailWidth(float width) => autoCursor.SetTrailWidth(width);
+
+        /// <summary>
+        /// The osu!pixel position of the Auto cursor at the current playback time, or null when the preview is
+        /// off / there are no objects. Ported from the behaviour of osu!lazer's Auto generator: rest on circles,
+        /// trace sliders along the path (bouncing across repeats), spin on spinners, glide between objects.
+        /// </summary>
+        private Vector2? autoCursorPosition()
+        {
+            if (!modAuto || currentHitObjects.Count == 0)
+                return null;
+
+            double time = TimeSource?.Invoke() ?? 0;
+            var objs = currentHitObjects;
+
+            // Last object whose start is at/before the current time (binary search; list is time-sorted).
+            int lo = 0, hi = objs.Count - 1, prev = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (objs[mid].StartTime <= time)
+                {
+                    prev = mid;
+                    lo = mid + 1;
+                }
+                else
+                    hi = mid - 1;
+            }
+
+            // Before the first object: wait on its start position.
+            if (prev < 0)
+                return autoStartPos(objs[0]);
+
+            var cur = objs[prev];
+
+            // Inside the current object (a long slider / spinner): follow it.
+            if (time <= autoEndTime(cur))
+                return autoFollowPos(cur, time);
+
+            // After the last object: rest where it ended.
+            if (prev + 1 >= objs.Count)
+                return autoEndPos(cur);
+
+            // In the gap between two objects: glide from one to the next, easing in/out like Auto does.
+            var next = objs[prev + 1];
+            double from = autoEndTime(cur);
+            double to = next.StartTime;
+            if (to <= from)
+                return autoStartPos(next);
+
+            double f = Math.Clamp((time - from) / (to - from), 0, 1);
+            f = f * f * (3 - 2 * f); // smoothstep
+            return Vector2.Lerp(autoEndPos(cur), autoStartPos(next), (float)f);
+        }
+
+        /// <summary>Spin speed (rad/ms) and radius (osu!px) the Auto cursor uses on spinners.</summary>
+        private const double auto_spin_speed = 0.025;
+        private const float auto_spin_radius = 55f;
+
+        private Vector2 autoStartPos(HitObjectModel o)
+            => new Vector2(o.X, o.Y) + DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
+
+        private Vector2 autoEndPos(HitObjectModel o)
+        {
+            Vector2 stack = DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
+            switch (o.Kind)
+            {
+                case HitObjectKind.Slider when o.Path is { Count: > 0 } path:
+                    // Even slide count ends back at the head; odd ends at the tail.
+                    return (o.Slides % 2 == 0 ? path[0] : path[^1]) + stack;
+
+                case HitObjectKind.Spinner:
+                    return new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2, ParsedBeatmap.PLAYFIELD_HEIGHT / 2);
+
+                default:
+                    return new Vector2(o.X, o.Y) + stack;
+            }
+        }
+
+        private double autoEndTime(HitObjectModel o) => o.StartTime + Math.Max(0, o.Duration);
+
+        private Vector2 autoFollowPos(HitObjectModel o, double time)
+        {
+            Vector2 stack = DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
+
+            switch (o.Kind)
+            {
+                case HitObjectKind.Slider when o.Path is { Count: > 0 } path:
+                {
+                    double dur = Math.Max(1, o.Duration);
+                    double spanDur = dur / Math.Max(1, o.Slides);
+                    double elapsed = Math.Clamp(time - o.StartTime, 0, dur);
+                    int span = spanDur > 0 ? Math.Min(o.Slides - 1, (int)(elapsed / spanDur)) : 0;
+                    double within = spanDur > 0 ? (elapsed - span * spanDur) / spanDur : 0;
+                    double frac = span % 2 == 0 ? within : 1 - within; // bounce back on each repeat
+                    return SliderGeometry.PointAtFraction(path, Math.Clamp(frac, 0, 1)) + stack;
+                }
+
+                case HitObjectKind.Spinner:
+                {
+                    var centre = new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2, ParsedBeatmap.PLAYFIELD_HEIGHT / 2);
+                    double ang = (time - o.StartTime) * auto_spin_speed;
+                    return centre + new Vector2((float)Math.Cos(ang), (float)Math.Sin(ang)) * auto_spin_radius;
+                }
+
+                default:
+                    return new Vector2(o.X, o.Y) + stack;
+            }
         }
 
         /// <summary>Rebuilds every hit-object drawable so appearance-setting changes take effect immediately.</summary>
@@ -751,7 +892,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             currentHitObjects = hitObjects;
             currentDiameter = circleDiameter;
 
-            bool fullRebuild = circleDiameter != lastDiameter || preempt != lastPreempt;
+            bool fullRebuild = pendingFullRebuild || circleDiameter != lastDiameter || preempt != lastPreempt;
+            pendingFullRebuild = false;
             lastDiameter = circleDiameter;
             lastPreempt = preempt;
 
