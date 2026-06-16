@@ -29,6 +29,16 @@ namespace OsuBeatmapEditor.Game.Online
             AlwaysPresent = true;
         }
 
+        protected override void LoadComplete()
+        {
+            base.LoadComplete();
+
+            // On (re)login, clear the cached state so the next frame beats "online" immediately instead of
+            // waiting out the interval (logout sends its own "offline" directly via AuthManager).
+            if (auth != null)
+                auth.User.BindValueChanged(u => { if (u.NewValue != null) lastState = null; });
+        }
+
         protected override void Update()
         {
             base.Update();
@@ -51,5 +61,16 @@ namespace OsuBeatmapEditor.Game.Online
             lastMap = map;
             auth.ReportPresence(state, map);
         }
+
+        protected override void Dispose(bool isDisposing)
+        {
+            // Best-effort "going offline" on shutdown. May not flush before the process exits, in which case
+            // the server's staleness window takes over — so this is an optimisation, not the only signal.
+            if (auth?.IsLoggedIn == true)
+                auth.ReportPresence("offline", null);
+
+            base.Dispose(isDisposing);
+        }
     }
 }
+

@@ -69,6 +69,10 @@ namespace OsuBeatmapEditor.Game.Online
         /// <summary>Clears the session locally (does not revoke server-side).</summary>
         public void Logout()
         {
+            // Tell the server we're going offline before dropping the token (best-effort; we're still alive,
+            // so this reliably lands and the web flips to "offline" immediately).
+            ReportPresence("offline", null);
+
             Token = null;
             User.Value = null;
             State.Value = AuthState.LoggedOut;
