@@ -95,6 +95,26 @@ namespace OsuBeatmapEditor.Game.Online
             });
         }
 
+        /// <summary>Best-effort presence heartbeat (ignored when logged out).</summary>
+        public void ReportPresence(string state, string? map)
+        {
+            string? token = Token;
+            if (token == null)
+                return;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await SobeApi.PushPresenceAsync(token, state, map).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Presence is best-effort; never surface a failure.
+                }
+            });
+        }
+
         private async Task loginAsync()
         {
             HttpListener? listener = null;

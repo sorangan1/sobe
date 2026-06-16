@@ -49,5 +49,17 @@ namespace OsuBeatmapEditor.Game.Online
             using var resp = await http.SendAsync(req).ConfigureAwait(false);
             resp.EnsureSuccessStatusCode();
         }
+
+        /// <summary>Reports the user's current presence ("online" or "editing" + the map being edited).</summary>
+        public static async Task PushPresenceAsync(string token, string state, string? map)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}/api/presence");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Content = new StringContent(
+                JsonSerializer.Serialize(new { state, map }), Encoding.UTF8, "application/json");
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+        }
     }
 }

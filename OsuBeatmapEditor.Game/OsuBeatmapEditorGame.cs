@@ -75,6 +75,8 @@ namespace OsuBeatmapEditor.Game
                 auth,
                 // Pushes mapping-time stats to the backend while logged in; no visual footprint.
                 new StatsSync(),
+                // Heartbeats online/editing presence to the backend while logged in; no visual footprint.
+                new PresenceReporter(),
                 // Behind the screens: catches scroll over empty space to drive global volume.
                 new ScrollCatcher { Scrolled = volume.AdjustMaster },
                 screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both },

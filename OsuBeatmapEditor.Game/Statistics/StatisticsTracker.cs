@@ -42,7 +42,15 @@ namespace OsuBeatmapEditor.Game.Statistics
         private bool seededInput;
 
         private string? currentMapKey;
+        private bool lastActive;
         private double currentSessionActiveMs;
+
+        /// <summary>Human-readable name of the map currently open in the editor (e.g. "Artist - Title [Diff]"),
+        /// or null when not in the editor. Used for presence reporting.</summary>
+        public string? CurrentMapDisplay { get; private set; }
+
+        /// <summary>True while a map is open and the user is not idle.</summary>
+        public bool IsActivelyEditing => currentMapKey != null && lastActive;
         private string? lastExitedKey;
         private double lastExitTime = double.NegativeInfinity;
 
@@ -74,10 +82,20 @@ namespace OsuBeatmapEditor.Game.Statistics
         public static string MapKey(string artist, string title, string author, string difficulty)
             => $"{artist}|{title}|{author}|{difficulty}";
 
+        /// <summary>Turns a <see cref="MapKey"/> back into a display name "Artist - Title [Diff]".</summary>
+        private static string displayFromKey(string key)
+        {
+            string[] p = key.Split('|');
+            if (p.Length >= 4)
+                return $"{p[0]} - {p[1]} [{p[3]}]";
+            return key;
+        }
+
         /// <summary>Begins (or resumes) an editing session for the given map.</summary>
         public void EnterMap(string key)
         {
             currentMapKey = key;
+            CurrentMapDisplay = displayFromKey(key);
 
             // If the user just stepped out of this same map, keep the running session counter; otherwise
             // start a fresh session.
@@ -94,6 +112,7 @@ namespace OsuBeatmapEditor.Game.Statistics
             lastExitedKey = currentMapKey;
             lastExitTime = sessionTime;
             currentMapKey = null;
+            CurrentMapDisplay = null;
             save();
         }
 
@@ -112,6 +131,7 @@ namespace OsuBeatmapEditor.Game.Statistics
                 lastInputTime = sessionTime;
 
             bool active = (sessionTime - lastInputTime) <= idle_threshold_ms;
+            lastActive = active;
             if (active && currentMapKey != null)
             {
                 perMapActiveMs[currentMapKey] = ActiveMsForMap(currentMapKey) + elapsed;
