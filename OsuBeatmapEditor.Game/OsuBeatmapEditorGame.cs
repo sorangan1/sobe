@@ -4,6 +4,7 @@ using osu.Framework.Allocation;
 using osu.Framework.Graphics;
 using osu.Framework.Platform;
 using osu.Framework.Screens;
+using OsuBeatmapEditor.Game.Online;
 using OsuBeatmapEditor.Game.Screens.SongSelect;
 using OsuBeatmapEditor.Game.Statistics;
 using OsuBeatmapEditor.Game.UI;
@@ -30,6 +31,10 @@ namespace OsuBeatmapEditor.Game
         // its scheduler can marshal background download/check work back onto the update thread.
         private UpdateManager updates = null!;
 
+        // App-wide osu! login session (optional). Cached so any screen can read the current user; added to
+        // the tree so its scheduler can marshal the browser-login callback back onto the update thread.
+        private AuthManager auth = null!;
+
         public override void SetHost(GameHost host)
         {
             base.SetHost(host);
@@ -49,6 +54,9 @@ namespace OsuBeatmapEditor.Game
             deps.CacheAs(statistics);
             updates = new UpdateManager();
             deps.CacheAs(updates);
+            var host = parent.Get<GameHost>();
+            auth = new AuthManager(host.Storage, host);
+            deps.CacheAs(auth);
             return deps;
         }
 
@@ -63,6 +71,8 @@ namespace OsuBeatmapEditor.Game
                 statistics,
                 // Drives self-update checks/downloads; no visual footprint.
                 updates,
+                // Holds the (optional) osu! login session; no visual footprint.
+                auth,
                 // Behind the screens: catches scroll over empty space to drive global volume.
                 new ScrollCatcher { Scrolled = volume.AdjustMaster },
                 screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both },

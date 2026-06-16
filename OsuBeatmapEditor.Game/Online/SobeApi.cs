@@ -1,0 +1,53 @@
+using System;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace OsuBeatmapEditor.Game.Online
+{
+    /// <summary>
+    /// Thin HTTP client for the sobe backend. The desktop app only ever talks to our own server (never to
+    /// osu! directly); the server holds the osu! secret and hands back a session token used here as a bearer.
+    /// </summary>
+    public static class SobeApi
+    {
+        /// <summary>Base URL of the deployed backend (Railway).</summary>
+        public const string BaseUrl = "https://sobe-server-production.up.railway.app";
+
+        private static readonly HttpClient http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+
+        private static readonly JsonSerializerOptions json = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+        };
+
+        /// <summary>Fetches the profile for the given session token, or null if the token is invalid.</summary>
+        public static async Task<SobeUser?> GetMeAsync(string token)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{BaseUrl}/api/me");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+
+            string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return JsonSerializer.Deserialize<SobeUser>(body, json);
+        }
+
+        /// <summary>Pushes the user's total active mapping time (seconds). The server keeps the max, so this
+        /// can be called freely; a stale value never lowers the recorded total.</summary>
+        public static async Task PushMappingSecondsAsync(string token, long totalMappingSeconds)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}/api/stats");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Content = new StringContent(
+                JsonSerializer.Serialize(new { totalMappingSeconds }), Encoding.UTF8, "application/json");
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            resp.EnsureSuccessStatusCode();
+        }
+    }
+}

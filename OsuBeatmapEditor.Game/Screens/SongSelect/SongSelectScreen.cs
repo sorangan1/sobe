@@ -160,22 +160,16 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     carousel = new BeatmapCarousel
                     {
                         RelativeSizeAxes = Axes.Both,
-                        Padding = new MarginPadding { Top = 76, Bottom = 24 },
+                        // Leaves room for the top bar and the search/sort toolbar below it.
+                        Padding = new MarginPadding { Top = 120, Bottom = 24 },
                         SelectionChanged = onSelectionChanged,
                     },
-                    // Selected-map readout, top-left over the dimmed background.
+                    // Selected-map readout, top-left under the top bar.
                     infoPanel = new BeatmapInfoPanel
                     {
                         Anchor = Anchor.TopLeft,
                         Origin = Anchor.TopLeft,
-                        Margin = new MarginPadding { Left = 40, Top = 40 },
-                    },
-                    // Usage statistics, sitting just above the New Beatmap button.
-                    new StatisticsDisplay
-                    {
-                        Anchor = Anchor.BottomLeft,
-                        Origin = Anchor.BottomLeft,
-                        Margin = new MarginPadding { Left = 32, Bottom = 30 + 56 + 14 },
+                        Margin = new MarginPadding { Left = 40, Top = TopBar.HeightPx + 16 },
                     },
                     newBeatmapButton = new OsuButton("New Beatmap", OsuColour.Pink)
                     {
@@ -201,7 +195,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Origin = Anchor.TopRight,
                         Width = carousel_width - 24,
                         Height = 40,
-                        Margin = new MarginPadding { Top = 24, Right = 24 },
+                        Margin = new MarginPadding { Top = TopBar.HeightPx + 12, Right = 24 },
                         Child = new GridContainer
                         {
                             RelativeSizeAxes = Axes.X,
@@ -242,6 +236,13 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             },
                         },
                     },
+                    // Top chrome bar: usage stats (left) + osu! account control (right). Drawn above the
+                    // carousel/background but below the modal overlays.
+                    new TopBar
+                    {
+                        Anchor = Anchor.TopLeft,
+                        Origin = Anchor.TopLeft,
+                    },
                     newBeatmapOverlay = new NewBeatmapOverlay
                     {
                         Created = onBeatmapCreated,
@@ -252,12 +253,12 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     },
                     confirmOverlay = new ConfirmOverlay(),
                     settingsOverlay = new EditorSettingsOverlay(),
-                    // Update notice, bottom-left above the New Beatmap button (sits above the stats readout).
+                    // Update notice, bottom-left just above the New Beatmap button.
                     updateBanner = new UpdateBanner
                     {
                         Anchor = Anchor.BottomLeft,
                         Origin = Anchor.BottomLeft,
-                        Margin = new MarginPadding { Left = 30, Bottom = 30 + 56 + 14 + 40 },
+                        Margin = new MarginPadding { Left = 30, Bottom = 30 + 56 + 14 },
                     },
                     // One-time "automatic updates?" prompt, on top of everything.
                     updatePrompt = new UpdatePromptOverlay(),
