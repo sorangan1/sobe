@@ -90,7 +90,11 @@ namespace OsuBeatmapEditor.Game.Updates
                 var release = await fetchLatestReleaseAsync().ConfigureAwait(false);
                 Schedule(() =>
                 {
-                    if (release == null || !isNewer(release.Version, AppInfo.Version))
+                    // GitHub's /releases/latest already returns the newest published release, so we treat it as
+                    // authoritative: an update is available whenever it differs from what's installed. (We avoid a
+                    // strict numeric "greater than" so a new release supersedes an older one even if its version
+                    // sorts lower numerically - e.g. 0.9.6 replacing a mistakenly-numbered 0.9.41.)
+                    if (release == null || !differsFromCurrent(release.Version, AppInfo.Version))
                     {
                         State.Value = UpdateState.UpToDate;
                         return;
@@ -383,10 +387,10 @@ namespace OsuBeatmapEditor.Game.Updates
             return v;
         }
 
-        /// <summary>True if <paramref name="candidate"/> is a strictly newer version than <paramref name="current"/>.</summary>
-        private static bool isNewer(string candidate, string current)
+        /// <summary>True if the latest released version differs from the one currently running.</summary>
+        private static bool differsFromCurrent(string candidate, string current)
         {
-            return parse(candidate) > parse(current);
+            return parse(candidate) != parse(current);
 
             static Version parse(string s)
             {
