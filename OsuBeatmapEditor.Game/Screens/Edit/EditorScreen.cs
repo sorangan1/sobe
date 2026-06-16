@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using osu.Framework.Allocation;
 using osu.Framework.Audio;
 using osu.Framework.Bindables;
@@ -121,12 +122,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly BindableInt autoTrail = new BindableInt(10) { MinValue = 0, MaxValue = 120 };
         private readonly BindableFloat autoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f };
         private AutoPreviewMenu autoMenu = null!;
+        private MenuDotsButton autoMenuButton = null!;
+        private bool autoMenuOpen;
+        // Modding Mode: review the beatmap's osu! discussion ("mod") entries. Discussion bubbles appear on the
+        // top timeline; filters sit on the left, messages on the right; HD/HR are forced off (Auto-only).
+        private readonly BindableBool moddingMode = new BindableBool();
+        private ModToggleButton hiddenButton = null!;
+        private ModToggleButton hardRockButton = null!;
+        private Container moddingRegion = null!;
+        private ModdingPanel moddingPanel = null!;
+        // Width reserved on the right for the modding panel; the playfield eases left to make room.
+        private const float modding_panel_width = 320f;
+        private const float modding_panel_gap = 12f;
+        private float moddingInsetCurrent;
+        private List<Online.ModdingDiscussion>? loadedDiscussions;
+        private bool discussionsRequested;
         // Smoothly-interpolated current top-bar height, lerped toward its collapsed/expanded target each frame.
         private float topHeightCurrent = top_bar_height;
         private SpriteText bpmText = null!;
         private SpriteText svText = null!;
         private SpriteText distanceSnapText = null!;
         private BeatDivisorControl beatDivisorControl = null!;
+        private FillFlowContainer hudRow = null!;
         private FillFlowContainer modButtons = null!;
         private FillFlowContainer leftPanels = null!;
         private HitsoundBankBar hitsoundBankBar = null!;
@@ -273,33 +290,44 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Margin = new MarginPadding { Right = 12, Bottom = bottom_bar_height + 12 + 26 },
                 },
                 // Beat divisor sits on top, with the BPM and SV readouts stacked below it.
-                beatDivisorControl = new BeatDivisorControl
+                // BPM / SV readouts and the beat-snap divisor, laid out in a single horizontal row to stay compact
+                // and sit just above the mod chips.
+                hudRow = new FillFlowContainer
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
                     Margin = new MarginPadding { Right = 16, Top = top_bar_height + 8 },
-                },
-                bpmText = new SpriteText
-                {
-                    Anchor = Anchor.TopRight,
-                    Origin = Anchor.TopRight,
-                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 46 },
-                    Colour = EditorTheme.Colours.Text,
-                    Font = EditorTheme.Type.Title(numeric: true),
-                },
-                svText = new SpriteText
-                {
-                    Anchor = Anchor.TopRight,
-                    Origin = Anchor.TopRight,
-                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 70 },
-                    Colour = EditorTheme.Colours.Velocity,
-                    Font = EditorTheme.Type.Title(numeric: true),
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new Vector2(12, 0),
+                    Children = new Drawable[]
+                    {
+                        bpmText = new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Colour = EditorTheme.Colours.Text,
+                            Font = EditorTheme.Type.Heading(numeric: true),
+                        },
+                        svText = new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Colour = EditorTheme.Colours.Velocity,
+                            Font = EditorTheme.Type.Heading(numeric: true),
+                        },
+                        beatDivisorControl = new BeatDivisorControl
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                        },
+                    },
                 },
                 distanceSnapText = new SpriteText
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
-                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 132 },
+                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 96 },
                     Colour = EditorTheme.Colours.Selection,
                     Font = EditorTheme.Type.Label(),
                     Alpha = 0,
@@ -316,17 +344,35 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Spacing = new Vector2(6, 0),
                     Children = new Drawable[]
                     {
-                        new ModToggleButton(hiddenMod, "HD", EditorTheme.Colours.Selection, "Hidden - objects fade out, no approach circles"),
-                        new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS"),
-                        new ModToggleButton(autoMod, "AU", EditorTheme.Colours.Info, "Auto - a cursor plays the map (colour/trail below)"),
+                        new ModToggleButton(moddingMode, "MOD", EditorTheme.Colours.Accent, "Modding mode (Ctrl+Shift+M) - review the map's osu! discussions"),
+                        hiddenButton = new ModToggleButton(hiddenMod, "HD", EditorTheme.Colours.Selection, "Hidden - objects fade out, no approach circles"),
+                        hardRockButton = new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS"),
+                        new ModToggleButton(autoMod, "AU", EditorTheme.Colours.Info, "Auto - a cursor plays the map (right-click for colour/trail)"),
+                        autoMenuButton = new MenuDotsButton(toggleAutoMenu) { Alpha = 0 },
                     },
                 },
-                // The Auto-preview popover (cursor colour + trail length), shown under the chips while Auto is on.
+                // The Auto-preview popover (cursor colour + trail length), opened on demand from the "..." button.
                 autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth)
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
                     Alpha = 0,
+                },
+                // Modding Mode: a panel docked to the right of the compose area (filters + messages). The
+                // playfield eases left to make room (driven in updateHitsoundLayout). Slides in/out from the right.
+                moddingRegion = new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Padding = new MarginPadding { Top = top_bar_height, Bottom = bottom_bar_height },
+                    Child = moddingPanel = new ModdingPanel(settings.ModdingMutedTypes)
+                    {
+                        Anchor = Anchor.TopRight,
+                        Origin = Anchor.TopRight,
+                        RelativeSizeAxes = Axes.Y,
+                        Width = modding_panel_width,
+                        Margin = new MarginPadding { Vertical = EditorTheme.Spacing.Md },
+                        X = modding_panel_width, // start fully off the right edge
+                    },
                 },
                 leftPanels = new FillFlowContainer
                 {
@@ -384,12 +430,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             playfield.SliderTickDistance = sliderTickDistance;
 
             // Hide the left tool/hitsound column while the lanes editor is open (it owns hitsound editing now),
-            // and show the lazer-style bank bar instead.
-            hitsoundMode.BindValueChanged(e =>
-            {
-                leftPanels.FadeTo(e.NewValue ? 0 : 1, 150, Easing.OutQuad);
-                hitsoundBankBar.FadeTo(e.NewValue ? 1 : 0, 150, Easing.OutQuad);
-            }, true);
+            // and show the lazer-style bank bar instead. Modding Mode also hides this left chrome, so the
+            // visibility is computed from both flags (see updateLeftChrome) rather than written directly here -
+            // otherwise toggling hitsounds inside Modding Mode would bring the tools back.
+            hitsoundMode.BindValueChanged(_ => updateLeftChrome(), true);
 
             // A node selection only makes sense while its slider is selected; drop it otherwise.
             selection.Changed += () =>
@@ -437,16 +481,122 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             hardRockMod.BindValueChanged(_ => onModsChanged());
             hiddenMod.BindValueChanged(_ => onModsChanged(), true);
 
-            // Auto preview: the toggle shows the playing cursor + reveals the colour/trail popover; the colour
-            // and trail bindables feed straight through to the cursor. All purely visual.
+            // Auto preview: the toggle shows the playing cursor and reveals the small "..." button to open the
+            // colour/trail popover (no longer auto-opened). The colour/trail bindables feed the cursor and are
+            // persisted (see below). All purely visual.
             autoMod.BindValueChanged(v =>
             {
                 playfield.SetAutoPlay(v.NewValue);
-                autoMenu.FadeTo(v.NewValue ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                autoMenuButton.FadeTo(v.NewValue ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                if (!v.NewValue)
+                    setAutoMenuOpen(false);
             }, true);
             autoColour.BindValueChanged(c => playfield.SetAutoColour(c.NewValue), true);
             autoTrail.BindValueChanged(t => playfield.SetAutoTrailLength(t.NewValue), true);
             autoTrailWidth.BindValueChanged(w => playfield.SetAutoTrailWidth(w.NewValue), true);
+
+            // Persist the Auto-cursor settings: seed from the stored values, then mirror edits back so they
+            // survive across sessions (the colour stored as Colour4, our cursor uses osuTK Color4).
+            autoColour.Value = toColor4(settings.AutoCursorColour.Value);
+            autoTrail.Value = (int)settings.AutoTrailLength.Value;
+            autoTrailWidth.Value = settings.AutoTrailWidth.Value;
+            autoColour.BindValueChanged(c => settings.AutoCursorColour.Value = toColour4(c.NewValue));
+            autoTrail.BindValueChanged(t => settings.AutoTrailLength.Value = t.NewValue);
+            autoTrailWidth.BindValueChanged(w => settings.AutoTrailWidth.Value = w.NewValue);
+
+            // Modding Mode: load the discussions the first time it's entered; toggle the side panels + bubbles;
+            // force HD/HR off (Auto-only) while active.
+            // No immediate invocation: the initial "off" state already matches the defaults (panels hidden,
+            // HD/HR enabled), and the side panels/timeline may not be fully loaded yet at this point.
+            moddingMode.BindValueChanged(v => onModdingModeChanged(v.NewValue));
+            moddingPanel.OnFiltersChanged = refreshModdingViews;
+            moddingPanel.OnSeek = SeekTo;
+            topTimeline.ModBubbleClicked = SeekTo;
+        }
+
+        private static Color4 toColor4(Colour4 c) => new Color4(c.R, c.G, c.B, c.A);
+        private static Colour4 toColour4(Color4 c) => new Colour4(c.R, c.G, c.B, c.A);
+
+        /// <summary>Shows/hides the Auto-cursor popover and keeps it positioned under the mod chips.</summary>
+        private void toggleAutoMenu() => setAutoMenuOpen(!autoMenuOpen);
+
+        private void setAutoMenuOpen(bool open)
+        {
+            autoMenuOpen = open;
+            autoMenu.FadeTo(open ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+        }
+
+        /// <summary>
+        /// Updates the left chrome's visibility from both flags: the tool/hitsound column shows only outside Modding
+        /// Mode and when the hitsound-lanes editor is closed; the lazer-style bank bar shows when lanes are open
+        /// (but never while modding). Centralised so the two toggles don't fight over <see cref="leftPanels"/>.
+        /// </summary>
+        private void updateLeftChrome()
+        {
+            bool lanes = hitsoundMode.Value;
+            bool modding = moddingMode.Value;
+            leftPanels.FadeTo(modding || lanes ? 0 : 1, 150, Easing.OutQuad);
+            hitsoundBankBar.FadeTo(!modding && lanes ? 1 : 0, 150, Easing.OutQuad);
+        }
+
+        /// <summary>Entering/leaving Modding Mode: force Auto-only, reserve the right panel, fetch discussions once.</summary>
+        private void onModdingModeChanged(bool on)
+        {
+            // Auto-only: HD/HR are turned off and their chips disabled while modding.
+            if (on)
+            {
+                hardRockMod.Value = false;
+                hiddenMod.Value = false;
+            }
+            hardRockButton.SetEnabled(!on);
+            hiddenButton.SetEnabled(!on);
+
+            // The left composing tools (tool/hitsound column + bank bar + Song Setup/Settings buttons) aren't
+            // useful while reviewing mods - hide them so the editor reads as a dedicated modding view.
+            updateLeftChrome();
+            toolButtons.FadeTo(on ? 0 : 1, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+
+            // The panel slide + playfield inset are eased per-frame in updateHitsoundLayout; nothing to fade here.
+            if (on)
+            {
+                if (!discussionsRequested)
+                    loadDiscussions();
+                else
+                    refreshModdingViews();
+            }
+            else
+            {
+                topTimeline.SetDiscussions(System.Array.Empty<Online.ModdingDiscussion>());
+            }
+        }
+
+        /// <summary>Fetches the beatmapset's discussions (once) from the backend and populates the modding views.</summary>
+        private void loadDiscussions()
+        {
+            discussionsRequested = true;
+            int setId = set.OnlineID;
+
+            Task.Run(async () =>
+            {
+                var discussions = await Online.SobeApi.GetDiscussionsAsync(setId).ConfigureAwait(false);
+                Schedule(() =>
+                {
+                    loadedDiscussions = discussions;
+                    moddingPanel.SetDiscussions(discussions);
+                    refreshModdingViews();
+                });
+            });
+        }
+
+        /// <summary>Re-applies the left-panel filters to the messages list and the timeline bubbles.</summary>
+        private void refreshModdingViews()
+        {
+            if (loadedDiscussions == null)
+                return;
+
+            var visible = loadedDiscussions.Where(moddingPanel.IsVisible).ToList();
+            moddingPanel.SetMessages(visible);
+            topTimeline.SetDiscussions(visible);
         }
 
         /// <summary>Re-applies the active mod-preview state to the playfield (diameter/preempt + flip + fade).</summary>
@@ -525,16 +675,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             else
                 topHeightCurrent = (float)Interpolation.Lerp(target, topHeightCurrent, Math.Exp(-0.018 * Time.Elapsed));
 
-            topTimeline.Height = topHeightCurrent;
-            composeContainer.Padding = new MarginPadding { Top = topHeightCurrent, Bottom = bottom_bar_height };
+            // Modding Mode reserves room on the right; ease the playfield (and the right-anchored HUD) inward.
+            float moddingTarget = moddingMode.Value ? modding_panel_width + modding_panel_gap : 0f;
+            if (Math.Abs(moddingInsetCurrent - moddingTarget) < 0.5f)
+                moddingInsetCurrent = moddingTarget;
+            else
+                moddingInsetCurrent = (float)Interpolation.Lerp(moddingTarget, moddingInsetCurrent, Math.Exp(-0.018 * Time.Elapsed));
 
-            // Keep the top-right HUD (beat divisor on top, then BPM / SV / distance-snap) just below the timeline as it grows.
-            beatDivisorControl.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 8 };
-            bpmText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 46 };
-            svText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 70 };
-            modButtons.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 96 };
-            autoMenu.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 132 };
-            distanceSnapText.Margin = new MarginPadding { Right = 16, Top = topHeightCurrent + 132 };
+            // The panel docks to the right edge (inset by the gap) once fully in; off-screen right when fully out.
+            moddingPanel.X = modding_panel_width - moddingInsetCurrent;
+            float hudRight = 16 + moddingInsetCurrent;
+
+            topTimeline.Height = topHeightCurrent;
+            composeContainer.Padding = new MarginPadding { Top = topHeightCurrent, Bottom = bottom_bar_height, Right = moddingInsetCurrent };
+
+            // Keep the top-right HUD (a single horizontal BPM / SV / divisor row, the mod chips below it, then the
+            // Auto popover / distance-snap readout) just below the timeline as it grows, and slid left of the
+            // modding panel while it's open.
+            hudRow.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 8 };
+            modButtons.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 44 };
+            autoMenu.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 80 };
+            distanceSnapText.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 80 };
 
             // The Song Setup / Settings buttons slide down with the timeline so they stay just below it.
             toolButtons.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 6 };
@@ -2906,6 +3067,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Ctrl+Shift+M toggles Modding Mode (a mode, not a modal overlay).
+            if (settings.ModdingModeKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                moddingMode.Value = !moddingMode.Value;
+                return true;
+            }
+
             // Let open dialogs handle their own keys.
             if (anyOverlayOpen())
                 return base.OnKeyDown(e);
@@ -3349,6 +3517,54 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             trackStore?.Dispose();
             textures?.Dispose();
             base.Dispose(isDisposing);
+        }
+
+        /// <summary>A small "..." chip next to the AU mod button that opens the Auto-cursor settings popover on demand.</summary>
+        private partial class MenuDotsButton : osu.Framework.Graphics.Containers.Container
+        {
+            private readonly Action onClick;
+            private Box background = null!;
+
+            public MenuDotsButton(Action onClick)
+            {
+                this.onClick = onClick;
+
+                Size = new Vector2(24, 30);
+                Masking = true;
+                CornerRadius = 7;
+            }
+
+            [BackgroundDependencyLoader]
+            private void load()
+            {
+                Children = new Drawable[]
+                {
+                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
+                    new osu.Framework.Graphics.Sprites.SpriteText
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Y = -3,
+                        Text = "...",
+                        Colour = EditorTheme.Colours.TextMuted,
+                        Font = FontUsage.Default.With(size: 16, weight: "Bold"),
+                    },
+                };
+            }
+
+            protected override bool OnHover(HoverEvent e)
+            {
+                background.FadeColour(OsuColour.BackgroundRaised, 120);
+                return true;
+            }
+
+            protected override void OnHoverLost(HoverLostEvent e) => background.FadeColour(OsuColour.Surface, 120);
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                onClick();
+                return true;
+            }
         }
     }
 }

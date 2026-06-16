@@ -164,7 +164,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             shortcutRow("Timing points", settings.TimingPointsKey),
             shortcutRow("Hitsound lanes", settings.HitsoundsKey),
             shortcutRow("Distance snap toggle", settings.DistanceSnapKey),
-            shortcutRow("Convert slider to stream", settings.ConvertStreamKey));
+            shortcutRow("Convert slider to stream", settings.ConvertStreamKey),
+            shortcutRow("Modding mode", settings.ModdingModeKey));
 
         private Drawable shortcutRow(string label, Bindable<Shortcut> shortcut) =>
             SettingsLayout.LabeledRow(label, controlWithReset(new KeyRebindButton(shortcut), shortcut));

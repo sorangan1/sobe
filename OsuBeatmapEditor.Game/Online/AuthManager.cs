@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -95,6 +97,28 @@ namespace OsuBeatmapEditor.Game.Online
                 catch
                 {
                     // Stats sync is best-effort; never surface a failure.
+                }
+            });
+        }
+
+        /// <summary>Best-effort push of per-map active editing time to the server (ignored when logged out).</summary>
+        public void SyncMapTimes(IEnumerable<(string Key, long Seconds)> maps)
+        {
+            string? token = Token;
+            if (token == null)
+                return;
+
+            var snapshot = maps.ToArray();
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await SobeApi.PushMapTimesAsync(token, snapshot).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Map-time sync is best-effort; never surface a failure.
                 }
             });
         }

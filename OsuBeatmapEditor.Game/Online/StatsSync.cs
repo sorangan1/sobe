@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using osu.Framework.Allocation;
 using osu.Framework.Graphics;
 using OsuBeatmapEditor.Game.Statistics;
@@ -5,9 +7,10 @@ using OsuBeatmapEditor.Game.Statistics;
 namespace OsuBeatmapEditor.Game.Online
 {
     /// <summary>
-    /// Pushes the user's total active mapping time to the sobe backend while logged in: on login, on
-    /// shutdown, and once an hour in between. The server keeps the maximum, so over-sending is harmless.
-    /// No-op when logged out — login stays optional. Has no visual footprint.
+    /// Pushes the user's mapping-time stats to the sobe backend while logged in: the running total plus
+    /// per-map editing time (for the profile's uploaded-beatmaps view). Fired on login, on shutdown, and
+    /// once an hour in between. The server keeps the maximum, so over-sending is harmless. No-op when
+    /// logged out — login stays optional. Has no visual footprint.
     /// </summary>
     public partial class StatsSync : Drawable
     {
@@ -63,6 +66,14 @@ namespace OsuBeatmapEditor.Game.Online
 
             lastPushedSeconds = seconds;
             auth.SyncMappingSeconds(seconds);
+
+            // Per-map breakdown for the profile's uploaded-beatmaps view.
+            var maps = statistics.PerMapActiveMsSnapshot()
+                .Select(kv => (Key: kv.Key, Seconds: (long)(kv.Value / 1000)))
+                .Where(m => m.Seconds > 0)
+                .ToList();
+            if (maps.Count > 0)
+                auth.SyncMapTimes(maps);
         }
 
         protected override void Dispose(bool isDisposing)

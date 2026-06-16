@@ -29,6 +29,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Box fill = null!;
         private SpriteText label = null!;
 
+        private bool enabled = true;
+
+        /// <summary>Greys the chip out and ignores clicks (e.g. HD/HR while Modding Mode forces Auto-only).</summary>
+        public void SetEnabled(bool value)
+        {
+            if (enabled == value)
+                return;
+
+            enabled = value;
+            this.FadeTo(value ? 1f : 0.35f, 120);
+        }
+
         public ModToggleButton(BindableBool active, string acronym, Color4 accent, string tooltip)
         {
             this.active = active;
@@ -80,6 +92,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnClick(ClickEvent e)
         {
+            if (!enabled)
+                return true;
+
             active.Value = !active.Value;
             return true;
         }

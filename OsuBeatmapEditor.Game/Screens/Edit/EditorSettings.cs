@@ -113,6 +113,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Converts the selected slider into a stream of circles at the current beat-snap divisor.</summary>
         public readonly Bindable<Shortcut> ConvertStreamKey = new Bindable<Shortcut>(new Shortcut(Key.F, Ctrl: true, Shift: true));
 
+        /// <summary>Toggles the editor's Modding Mode (discussion bubbles + filters/messages panels).</summary>
+        public readonly Bindable<Shortcut> ModdingModeKey = new Bindable<Shortcut>(new Shortcut(Key.M, Ctrl: true, Shift: true));
+
+        // Auto-preview cursor settings (persisted; the AU chip's mini-menu edits these).
+        public readonly Bindable<Colour4> AutoCursorColour = new Bindable<Colour4>(Colour4.FromHex("ffdb33"));
+        public readonly BindableFloat AutoTrailLength = new BindableFloat(10f) { MinValue = 0f, MaxValue = 120f, Precision = 1f };
+        public readonly BindableFloat AutoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f, Precision = 0.1f };
+
+        /// <summary>Modding Mode: discussion types the user has hidden (comma-separated), persisted across maps.</summary>
+        public readonly Bindable<string> ModdingMutedTypes = new Bindable<string>(string.Empty);
+
         /// <summary>Default beatmap creator name, auto-filled into new/edited beatmaps.</summary>
         public readonly Bindable<string> DefaultCreator = new Bindable<string>(string.Empty);
 
@@ -147,6 +158,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["combo2"] = ComboColour2,
                 ["combo3"] = ComboColour3,
                 ["combo4"] = ComboColour4,
+                ["autocursor"] = AutoCursorColour,
             };
 
             keys = new Dictionary<string, Bindable<Shortcut>>
@@ -159,6 +171,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["hitsounds"] = HitsoundsKey,
                 ["distancesnap"] = DistanceSnapKey,
                 ["convertstream"] = ConvertStreamKey,
+                ["moddingmode"] = ModdingModeKey,
             };
 
             floats = new Dictionary<string, BindableFloat>
@@ -170,6 +183,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["objectborder"] = ObjectBorderThickness,
                 ["slidertick"] = SliderTickSize,
                 ["objectfadeout"] = ObjectFadeOut,
+                ["autotraillength"] = AutoTrailLength,
+                ["autotrailwidth"] = AutoTrailWidth,
             };
 
             load();
@@ -181,6 +196,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var f in floats.Values)
                 f.ValueChanged += _ => save();
             DefaultCreator.ValueChanged += _ => save();
+            ModdingMutedTypes.ValueChanged += _ => save();
             ShowBetaPopup.ValueChanged += _ => save();
             UseMapColours.ValueChanged += _ => save();
             BackgroundDim.ValueChanged += _ => save();
@@ -221,6 +237,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("defaultCreator", out string? creator))
                     DefaultCreator.Value = creator;
+
+                if (data.TryGetValue("moddingMutedTypes", out string? muted))
+                    ModdingMutedTypes.Value = muted;
 
                 if (data.TryGetValue("showBetaPopup", out string? showBeta) && bool.TryParse(showBeta, out bool showBetaValue))
                     ShowBetaPopup.Value = showBetaValue;
@@ -285,6 +304,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 foreach (var (key, bindable) in floats)
                     data["f_" + key] = bindable.Value.ToString();
                 data["defaultCreator"] = DefaultCreator.Value;
+                data["moddingMutedTypes"] = ModdingMutedTypes.Value;
                 data["showBetaPopup"] = ShowBetaPopup.Value.ToString();
                 data["useMapColours"] = UseMapColours.Value.ToString();
                 data["backgroundDim"] = BackgroundDim.Value.ToString();

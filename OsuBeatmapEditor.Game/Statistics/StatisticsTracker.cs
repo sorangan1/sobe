@@ -75,6 +75,9 @@ namespace OsuBeatmapEditor.Game.Statistics
 
         public double ActiveMsForMap(string key) => perMapActiveMs.TryGetValue(key, out double v) ? v : 0;
 
+        /// <summary>A snapshot of accumulated active editing time per map key (ms). Safe to enumerate; it's a copy.</summary>
+        public IReadOnlyDictionary<string, double> PerMapActiveMsSnapshot() => new Dictionary<string, double>(perMapActiveMs);
+
         /// <summary>Total active editing time recorded for the map currently being edited (all sessions).</summary>
         public double ActiveMsForCurrentMap => currentMapKey != null ? ActiveMsForMap(currentMapKey) : 0;
 

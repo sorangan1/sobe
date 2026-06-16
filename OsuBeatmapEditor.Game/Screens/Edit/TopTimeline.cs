@@ -96,9 +96,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container timingLayer = null!;
         private Container gridLayer = null!;
         private Container objectLayer = null!;
+        private Container modLayer = null!;
         private Container selectionLayer = null!;
         private Container previewLayer = null!;
         private readonly List<Box> gridPool = new List<Box>();
+
+        // Modding-mode bubbles: the currently-shown (already-filtered) discussions with an in-song timestamp.
+        private IReadOnlyList<Online.ModdingDiscussion> modDiscussions = System.Array.Empty<Online.ModdingDiscussion>();
+        /// <summary>Invoked when a discussion bubble is clicked (passes its timestamp in ms).</summary>
+        public Action<double>? ModBubbleClicked;
 
         // --- Hitsound lanes (the expanded Clap/Whistle/Finish editor) ---
         private const int hs_whistle = 0b0010, hs_finish = 0b0100, hs_clap = 0b1000;
@@ -196,6 +202,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         timingLayer = new Container { RelativeSizeAxes = Axes.Both },
                         // Objects sit behind the ticks so the beat grid stays readable over them.
                         objectLayer = new Container { RelativeSizeAxes = Axes.Both },
+                        // Modding-mode discussion bubbles (above objects, below the grid ticks).
+                        modLayer = new Container { RelativeSizeAxes = Axes.Both },
                         gridLayer = new Container { RelativeSizeAxes = Axes.Both },
                         selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
                         // Live slider-length preview (during placement / reshape), drawn on top.
@@ -368,6 +376,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             buildTimingPoints();
             buildBreaks();
+            buildMods();
 
             // Build the lightweight bounds for ALL objects (hit-testing needs the full set); the heavy drawables
             // are realised lazily for the visible window only.
@@ -1015,6 +1024,38 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                             Font = EditorTheme.Type.Caption(),
                         },
                     },
+                });
+            }
+        }
+
+        /// <summary>
+        /// Sets the (already-filtered) discussions to draw as Modding-Mode bubbles on the timeline and rebuilds
+        /// the bubble layer. Pass an empty list to clear them (e.g. when leaving Modding Mode).
+        /// </summary>
+        public void SetDiscussions(IReadOnlyList<Online.ModdingDiscussion> discussions)
+        {
+            modDiscussions = discussions ?? System.Array.Empty<Online.ModdingDiscussion>();
+            buildMods();
+        }
+
+        /// <summary>Draws a small coloured bubble above the baseline at each timed discussion (Modding Mode).</summary>
+        private void buildMods()
+        {
+            modLayer.Clear();
+
+            foreach (var d in modDiscussions)
+            {
+                if (d.TimestampMs is not { } ms)
+                    continue;
+
+                float x = (float)(ms * pixelsPerMs);
+                var colour = Online.ModdingDiscussion.TypeColour(d.MessageType);
+
+                modLayer.Add(new ModBubble(d, colour)
+                {
+                    X = x,
+                    Y = baseline_y - object_size - 6,
+                    Clicked = () => ModBubbleClicked?.Invoke(ms),
                 });
             }
         }
@@ -1872,6 +1913,69 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 this.ScaleTo(1f, 80, Easing.OutQuint);
                 Clicked?.Invoke(ScreenSpaceDrawQuad.BottomLeft);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// A Modding-Mode discussion marker on the timeline: a small coloured circle (type colour) carrying the
+        /// modder's initial, with a thin stalk down to the baseline and the mod text as a tooltip. Click seeks.
+        /// </summary>
+        private partial class ModBubble : CircularContainer, osu.Framework.Graphics.Cursor.IHasTooltip
+        {
+            public Action? Clicked;
+
+            public osu.Framework.Localisation.LocalisableString TooltipText { get; }
+
+            private readonly Color4 colour;
+            private readonly string initial;
+
+            public ModBubble(Online.ModdingDiscussion d, Color4 colour)
+            {
+                this.colour = colour;
+                initial = string.IsNullOrEmpty(d.Username) ? "?" : d.Username.Substring(0, 1).ToUpperInvariant();
+
+                string label = $"{d.Username} - {Online.ModdingDiscussion.TypeLabel(d.MessageType)}";
+                if (d.Resolved)
+                    label += " [resolved]";
+                TooltipText = $"{label}\n{d.Message}";
+
+                Anchor = Anchor.TopLeft;
+                Origin = Anchor.Centre;
+                Size = new Vector2(16);
+                Masking = true;
+                BorderThickness = 2;
+                BorderColour = colour;
+            }
+
+            [BackgroundDependencyLoader]
+            private void load()
+            {
+                AddRangeInternal(new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark },
+                    new SpriteText
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Text = initial,
+                        Colour = colour,
+                        Font = FontUsage.Default.With(size: 10, weight: "Bold"),
+                    },
+                });
+            }
+
+            protected override bool OnHover(HoverEvent e)
+            {
+                this.ScaleTo(1.25f, 120, Easing.OutQuint);
+                return true;
+            }
+
+            protected override void OnHoverLost(HoverLostEvent e) => this.ScaleTo(1f, 120, Easing.OutQuint);
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                Clicked?.Invoke();
                 return true;
             }
         }

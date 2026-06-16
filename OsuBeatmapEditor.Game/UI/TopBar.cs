@@ -3,6 +3,7 @@ using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
+using OsuBeatmapEditor.Game;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.Statistics;
 using osuTK;
@@ -62,6 +63,15 @@ namespace OsuBeatmapEditor.Game.UI
                         createStat("Editor open", out openValue),
                         createStat("Mapping", out activeValue),
                     },
+                },
+                // App version, centred in the bar.
+                new SpriteText
+                {
+                    Anchor = Anchor.Centre,
+                    Origin = Anchor.Centre,
+                    Text = $"{AppInfo.Name} v{AppInfo.Version}",
+                    Colour = EditorTheme.Colours.TextMuted,
+                    Font = EditorTheme.Type.Label(numeric: true),
                 },
                 new AccountWidget
                 {
