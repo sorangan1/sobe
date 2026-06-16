@@ -73,6 +73,8 @@ namespace OsuBeatmapEditor.Game
                 updates,
                 // Holds the (optional) osu! login session; no visual footprint.
                 auth,
+                // Pushes mapping-time stats to the backend while logged in; no visual footprint.
+                new StatsSync(),
                 // Behind the screens: catches scroll over empty space to drive global volume.
                 new ScrollCatcher { Scrolled = volume.AdjustMaster },
                 screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both },
