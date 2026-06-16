@@ -5,14 +5,14 @@ using OsuBeatmapEditor.Game.Statistics;
 namespace OsuBeatmapEditor.Game.Online
 {
     /// <summary>
-    /// Pushes the user's total active mapping time to the sobe backend while logged in: once right after
-    /// login and then periodically. The server keeps the maximum, so over-sending is harmless. No-op when
-    /// logged out — login stays optional. Has no visual footprint.
+    /// Pushes the user's total active mapping time to the sobe backend while logged in: on login, on
+    /// shutdown, and once an hour in between. The server keeps the maximum, so over-sending is harmless.
+    /// No-op when logged out — login stays optional. Has no visual footprint.
     /// </summary>
     public partial class StatsSync : Drawable
     {
-        /// <summary>How often (ms) to push the running total while logged in.</summary>
-        private const double interval_ms = 60_000;
+        /// <summary>How often (ms) to push the running total while logged in (login + shutdown push too).</summary>
+        private const double interval_ms = 60 * 60 * 1000;
 
         [Resolved(CanBeNull = true)]
         private AuthManager? auth { get; set; }
