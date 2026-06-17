@@ -2,6 +2,7 @@ using System.Drawing;
 using System.IO;
 using osu.Framework.Allocation;
 using osu.Framework.Graphics;
+using osu.Framework.Graphics.Cursor;
 using osu.Framework.Platform;
 using osu.Framework.Screens;
 using OsuBeatmapEditor.Game.Online;
@@ -79,7 +80,9 @@ namespace OsuBeatmapEditor.Game
                 new PresenceReporter(),
                 // Behind the screens: catches scroll over empty space to drive global volume.
                 new ScrollCatcher { Scrolled = volume.AdjustMaster },
-                screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both },
+                // Wraps the screens so any IHasTooltip drawable (control-point handles, toolbar chips, ...) can
+                // show a hover tooltip; the container tracks the mouse pointer on its own.
+                new TooltipContainer { RelativeSizeAxes = Axes.Both, Child = screenStack = new ScreenStack { RelativeSizeAxes = Axes.Both } },
                 // In front of everything so the popup is always visible.
                 volume,
                 // Above even the volume popup so action confirmations are never hidden.

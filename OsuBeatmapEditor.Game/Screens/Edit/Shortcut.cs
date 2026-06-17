@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using osu.Framework;
 using osu.Framework.Input.Events;
 using osuTK.Input;
 
@@ -12,6 +13,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
     /// </summary>
     public readonly record struct Shortcut(Key Key, bool Ctrl = false, bool Shift = false, bool Alt = false)
     {
+        /// <summary>
+        /// Whether the platform's "command" modifier is the Cmd (Super) key rather than Ctrl. On macOS the
+        /// convention (and osu!lazer's behaviour) is Cmd for copy/paste/undo/save/etc.; everywhere else it's Ctrl.
+        /// The <see cref="Ctrl"/> flag is interpreted as "the command modifier" and resolves to whichever key this is.
+        /// </summary>
+        public static readonly bool UsesCommandKey = RuntimeInfo.OS == RuntimeInfo.Platform.macOS;
+
+        /// <summary>Display name of the command modifier on this platform: "Cmd" on macOS, "Ctrl" elsewhere.</summary>
+        public static string CommandName => UsesCommandKey ? "Cmd" : "Ctrl";
+
+        /// <summary>True when the platform's command modifier (Cmd on macOS, Ctrl otherwise) is held for this event.</summary>
+        public static bool CommandPressed(UIEvent e) => UsesCommandKey ? e.SuperPressed : e.ControlPressed;
+
         /// <summary>Keys that are modifiers themselves and so can never be the shortcut's main key.</summary>
         public static bool IsModifierKey(Key key) => key is
             Key.ControlLeft or Key.ControlRight
@@ -21,12 +35,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>True when this key event is exactly this shortcut (same main key AND the same modifier state).</summary>
         public bool Matches(KeyDownEvent e) =>
-            e.Key == Key && e.ControlPressed == Ctrl && e.ShiftPressed == Shift && e.AltPressed == Alt;
+            e.Key == Key && CommandPressed(e) == Ctrl && e.ShiftPressed == Shift && e.AltPressed == Alt;
 
         public override string ToString()
         {
             var parts = new List<string>();
-            if (Ctrl) parts.Add("Ctrl");
+            if (Ctrl) parts.Add(CommandName);
             if (Shift) parts.Add("Shift");
             if (Alt) parts.Add("Alt");
             parts.Add(KeyName(Key));
@@ -46,7 +60,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 switch (raw.ToLowerInvariant())
                 {
-                    case "ctrl": ctrl = true; break;
+                    case "ctrl":
+                    case "cmd":
+                    case "command": ctrl = true; break;
                     case "shift": shift = true; break;
                     case "alt": alt = true; break;
                     default:

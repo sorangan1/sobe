@@ -279,7 +279,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
 
             if (e.Key != Key.Escape)
-                shortcut.Value = new Shortcut(e.Key, e.ControlPressed, e.ShiftPressed, e.AltPressed);
+                shortcut.Value = new Shortcut(e.Key, Shortcut.CommandPressed(e), e.ShiftPressed, e.AltPressed);
 
             stopListening();
             return true;

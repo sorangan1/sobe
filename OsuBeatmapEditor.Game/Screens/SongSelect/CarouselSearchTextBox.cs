@@ -6,6 +6,7 @@ using osu.Framework.Input;
 using osu.Framework.Input.Bindings;
 using osu.Framework.Input.Events;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.Screens.Edit;
 using osuTK.Input;
 
 namespace OsuBeatmapEditor.Game.Screens.SongSelect
@@ -67,8 +68,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 case Key.F5:
                     return false;
 
-                // Ctrl+Space toggles the preview - don't type a space.
-                case Key.Space when e.ControlPressed:
+                // Ctrl/Cmd+Space toggles the preview - don't type a space.
+                case Key.Space when Shortcut.CommandPressed(e):
                     return false;
             }
 

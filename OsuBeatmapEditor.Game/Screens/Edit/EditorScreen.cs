@@ -41,6 +41,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float top_bar_height = TopTimeline.HEIGHT;
         private const float bottom_bar_height = EditorTimeline.HEIGHT;
 
+        // Width reserved on the right of the top timeline for the adjacent settings panel (beat divisor / BPM / SV).
+        private const float timeline_side_width = 168f;
+
         // Height of each hitsound lane row when the editor is expanded; the three lanes (plus the object band)
         // give the timeline its extra height. Kept compact so the playfield stays large.
         private const float hitsound_lane_height = 44f;
@@ -116,6 +119,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Hidden (objects fade out, no approach circles). Purely visual - they never touch the saved map.
         private readonly BindableBool hardRockMod = new BindableBool();
         private readonly BindableBool hiddenMod = new BindableBool();
+        // Easy (bigger circles + slower approach: CS/AR halved). HardRock and Easy are mutually exclusive (osu!'s
+        // rule); Hidden and the rate mods mix with anything.
+        private readonly BindableBool easyMod = new BindableBool();
+        // Rate mod, cycled by the DT/NC chip: off → DoubleTime (1.5x, pitch preserved) → Nightcore (1.5x, pitch
+        // raised) → off. Both speed up the actual playback (audio + playhead + approach + hitsounds all follow the
+        // clock); DT via a Tempo adjustment, NC via Frequency (which also shifts the pitch).
+        private readonly Bindable<RateMod> rateMod = new Bindable<RateMod>(RateMod.Off);
+        private const double rate_mod_speed = 1.5;
+        private readonly BindableNumber<double> dtTempoRate = new BindableDouble(1);
+        private readonly BindableNumber<double> ncFrequencyRate = new BindableDouble(1);
         // Auto-mod preview: a cursor that plays the map. Colour + trail length tweakable in a popover under the chip.
         private readonly BindableBool autoMod = new BindableBool();
         private readonly Bindable<Color4> autoColour = new Bindable<Color4>(new Color4(1f, 0.86f, 0.2f, 1f));
@@ -129,6 +142,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly BindableBool moddingMode = new BindableBool();
         private ModToggleButton hiddenButton = null!;
         private ModToggleButton hardRockButton = null!;
+        private ModToggleButton easyButton = null!;
+        private RateModButton rateModButton = null!;
         private Container moddingRegion = null!;
         private ModdingPanel moddingPanel = null!;
         // Width reserved on the right for the modding panel; the playfield eases left to make room.
@@ -143,7 +158,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private SpriteText svText = null!;
         private SpriteText distanceSnapText = null!;
         private BeatDivisorControl beatDivisorControl = null!;
-        private FillFlowContainer hudRow = null!;
+        private Container timelineSidePanel = null!;
+        private Container timelineLeftPanel = null!;
         private FillFlowContainer modButtons = null!;
         private FillFlowContainer leftPanels = null!;
         private HitsoundBankBar hitsoundBankBar = null!;
@@ -234,6 +250,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 audioClock = new InterpolatingFramedClock();
                 audioClock.ChangeSource(track);
+
+                // Rate-mod preview: speeding up the track also speeds up the interpolating clock, and so the
+                // playhead + object approach + hitsounds. DoubleTime uses Tempo (pitch preserved); Nightcore uses
+                // Frequency (pitch rises). Both driven by the DT/NC chip via these adjustments.
+                track.AddAdjustment(AdjustableProperty.Tempo, dtTempoRate);
+                track.AddAdjustment(AdjustableProperty.Frequency, ncFrequencyRate);
             }
 
             // Hitsound feedback: bundled default-skin samples, played as playback crosses each object.
@@ -251,13 +273,61 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Padding = new MarginPadding { Top = top_bar_height, Bottom = bottom_bar_height },
                     Child = playfield = new Playfield(),
                 },
-                topTimeline = new TopTimeline(parsed, () => CurrentTime, track?.Length ?? 0, hitsoundMode)
+                // The top bar is a fixed block: a left panel (tool buttons), the timeline, and the settings panel
+                // (divisor/BPM/SV) on the right. The timeline is inset by the SAME width on both sides so its centre
+                // playhead (the pink line) stays at the true screen centre, and so it sits flush against both panels.
+                new Container
+                {
+                    RelativeSizeAxes = Axes.X,
+                    Anchor = Anchor.TopLeft,
+                    Origin = Anchor.TopLeft,
+                    Padding = new MarginPadding { Left = timeline_side_width, Right = timeline_side_width },
+                    Child = topTimeline = new TopTimeline(parsed, () => CurrentTime, track?.Length ?? 0, hitsoundMode)
+                    {
+                        Anchor = Anchor.TopLeft,
+                        Origin = Anchor.TopLeft,
+                        TimingPillClicked = onTimingPillClicked,
+                    },
+                },
+                // Left block of the top bar: tool buttons (Song Setup / Settings) plus the Modding / Hitsounds
+                // toggles. Mirrors the settings panel's width so the timeline stays centred. (Room here for more.)
+                timelineLeftPanel = new Container
                 {
                     Anchor = Anchor.TopLeft,
                     Origin = Anchor.TopLeft,
-                    TimingPillClicked = onTimingPillClicked,
+                    Width = timeline_side_width,
+                    Height = top_bar_height,
+                    Masking = true,
+                    Children = new Drawable[]
+                    {
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.82f },
+                        new FillFlowContainer
+                        {
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            AutoSizeAxes = Axes.Both,
+                            Direction = FillDirection.Vertical,
+                            Spacing = new Vector2(0, 6),
+                            Children = new Drawable[]
+                            {
+                                toolButtons = buildToolButtons(),
+                                new FillFlowContainer
+                                {
+                                    Anchor = Anchor.TopCentre,
+                                    Origin = Anchor.TopCentre,
+                                    AutoSizeAxes = Axes.Both,
+                                    Direction = FillDirection.Horizontal,
+                                    Spacing = new Vector2(6, 0),
+                                    Children = new Drawable[]
+                                    {
+                                        new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
+                                        new HitsoundModeButton(hitsoundMode),
+                                    },
+                                },
+                            },
+                        },
+                    },
                 },
-                toolButtons = buildToolButtons(),
                 bottomTimeline = new EditorTimeline(track, parsed, () => CurrentTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
                 playbackControl = new PlaybackControl(track, () => track?.IsRunning ?? false, togglePlay)
                 {
@@ -269,12 +339,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Anchor = Anchor.BottomLeft,
                     Origin = Anchor.BottomLeft,
                     Margin = new MarginPadding { Left = 12, Bottom = bottom_bar_height + 12 },
-                },
-                new HitsoundModeButton(hitsoundMode)
-                {
-                    Anchor = Anchor.BottomLeft,
-                    Origin = Anchor.BottomLeft,
-                    Margin = new MarginPadding { Left = 12, Bottom = bottom_bar_height + 12 + 30 + 8 },
                 },
                 new FpsCounter
                 {
@@ -289,37 +353,47 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Origin = Anchor.BottomRight,
                     Margin = new MarginPadding { Right = 12, Bottom = bottom_bar_height + 12 + 26 },
                 },
-                // Beat divisor sits on top, with the BPM and SV readouts stacked below it.
-                // BPM / SV readouts and the beat-snap divisor, laid out in a single horizontal row to stay compact
-                // and sit just above the mod chips.
-                hudRow = new FillFlowContainer
+                // The settings panel adjacent to (the right of) the top timeline: beat divisor on top, then the
+                // BPM and SV readouts stacked below it. Sits in the column the timeline padding reserves.
+                timelineSidePanel = new Container
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
-                    Margin = new MarginPadding { Right = 16, Top = top_bar_height + 8 },
-                    AutoSizeAxes = Axes.Both,
-                    Direction = FillDirection.Horizontal,
-                    Spacing = new Vector2(12, 0),
+                    Width = timeline_side_width,
+                    Height = top_bar_height,
+                    Masking = true,
                     Children = new Drawable[]
                     {
-                        bpmText = new SpriteText
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.82f },
+                        new FillFlowContainer
                         {
-                            Anchor = Anchor.CentreLeft,
-                            Origin = Anchor.CentreLeft,
-                            Colour = EditorTheme.Colours.Text,
-                            Font = EditorTheme.Type.Heading(numeric: true),
-                        },
-                        svText = new SpriteText
-                        {
-                            Anchor = Anchor.CentreLeft,
-                            Origin = Anchor.CentreLeft,
-                            Colour = EditorTheme.Colours.Velocity,
-                            Font = EditorTheme.Type.Heading(numeric: true),
-                        },
-                        beatDivisorControl = new BeatDivisorControl
-                        {
-                            Anchor = Anchor.CentreLeft,
-                            Origin = Anchor.CentreLeft,
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            AutoSizeAxes = Axes.Both,
+                            Direction = FillDirection.Vertical,
+                            Spacing = new Vector2(0, 3),
+                            Children = new Drawable[]
+                            {
+                                beatDivisorControl = new BeatDivisorControl
+                                {
+                                    Anchor = Anchor.TopCentre,
+                                    Origin = Anchor.TopCentre,
+                                },
+                                bpmText = new SpriteText
+                                {
+                                    Anchor = Anchor.TopCentre,
+                                    Origin = Anchor.TopCentre,
+                                    Colour = EditorTheme.Colours.Text,
+                                    Font = EditorTheme.Type.Label(numeric: true),
+                                },
+                                svText = new SpriteText
+                                {
+                                    Anchor = Anchor.TopCentre,
+                                    Origin = Anchor.TopCentre,
+                                    Colour = EditorTheme.Colours.Velocity,
+                                    Font = EditorTheme.Type.Label(numeric: true),
+                                },
+                            },
                         },
                     },
                 },
@@ -332,21 +406,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Font = EditorTheme.Type.Label(),
                     Alpha = 0,
                 },
-                // Mod-preview chips (HardRock / Hidden), just below the SV readout - toggle to view the map
-                // as it would play under those mods. osu!-style acronym chips in each mod's signature colour.
+                // Mod-preview chips, just below the settings panel. A wrapping grid (constrained to the panel's
+                // width) so the row of chips doesn't span far across the screen - they stack into 2 rows instead.
                 modButtons = new FillFlowContainer
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
                     Margin = new MarginPadding { Right = 16, Top = top_bar_height + 96 },
-                    AutoSizeAxes = Axes.Both,
-                    Direction = FillDirection.Horizontal,
-                    Spacing = new Vector2(6, 0),
+                    // Exactly three chips wide (3·38 + 2·6) so the grid wraps to 2 rows and stays flush-right.
+                    Width = 3 * 38 + 2 * 6,
+                    AutoSizeAxes = Axes.Y,
+                    Direction = FillDirection.Full,
+                    Spacing = new Vector2(6, 6),
                     Children = new Drawable[]
                     {
-                        new ModToggleButton(moddingMode, "MOD", EditorTheme.Colours.Accent, "Modding mode (Ctrl+Shift+M) - review the map's osu! discussions"),
+                        easyButton = new ModToggleButton(easyMod, "EZ", EditorTheme.Colours.Velocity, "Easy - bigger circles, slower approach (CS/AR halved). Can't mix with HardRock"),
                         hiddenButton = new ModToggleButton(hiddenMod, "HD", EditorTheme.Colours.Selection, "Hidden - objects fade out, no approach circles"),
-                        hardRockButton = new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS"),
+                        hardRockButton = new ModToggleButton(hardRockMod, "HR", EditorTheme.Colours.Error, "HardRock - flipped vertically, harder AR/CS. Can't mix with Easy"),
+                        rateModButton = new RateModButton(rateMod, OsuColour.Purple, EditorTheme.Colours.Accent, "Speed up 1.5x - click for DoubleTime (same pitch), again for Nightcore (higher pitch), again to turn off"),
                         new ModToggleButton(autoMod, "AU", EditorTheme.Colours.Info, "Auto - a cursor plays the map (right-click for colour/trail)"),
                         autoMenuButton = new MenuDotsButton(toggleAutoMenu) { Alpha = 0 },
                     },
@@ -476,9 +553,30 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 playfield.RebuildObjects();
             });
 
-            // Toggling a mod re-renders the playfield: HardRock changes CS (diameter) + AR (preempt) and flips
-            // the field vertically; Hidden changes the per-object fade. Both are pure visualisation.
-            hardRockMod.BindValueChanged(_ => onModsChanged());
+            // Toggling a mod re-renders the playfield: HardRock/Easy change CS (diameter) + AR (preempt) (and HR
+            // flips the field vertically); DoubleTime shortens the approach; Hidden changes the per-object fade.
+            // All are pure visualisation. HardRock and Easy are mutually exclusive (osu!'s rule) - turning one on
+            // forces the other off; setting a mod off never cascades, so there's no feedback loop.
+            hardRockMod.BindValueChanged(v =>
+            {
+                if (v.NewValue)
+                    easyMod.Value = false;
+                onModsChanged();
+            });
+            easyMod.BindValueChanged(v =>
+            {
+                if (v.NewValue)
+                    hardRockMod.Value = false;
+                onModsChanged();
+            });
+            // DT/NC just change the playback rate - the faster clock speeds up the approach on its own, so no
+            // rebuild and no preempt tweak (that would double-apply the speed-up). DT keeps pitch (Tempo), NC
+            // raises it (Frequency); only one of the two adjustments is non-1 at a time.
+            rateMod.BindValueChanged(v =>
+            {
+                dtTempoRate.Value = v.NewValue == RateMod.DoubleTime ? rate_mod_speed : 1.0;
+                ncFrequencyRate.Value = v.NewValue == RateMod.Nightcore ? rate_mod_speed : 1.0;
+            });
             hiddenMod.BindValueChanged(_ => onModsChanged(), true);
 
             // Auto preview: the toggle shows the playing cursor and reveals the small "..." button to open the
@@ -542,14 +640,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Entering/leaving Modding Mode: force Auto-only, reserve the right panel, fetch discussions once.</summary>
         private void onModdingModeChanged(bool on)
         {
-            // Auto-only: HD/HR are turned off and their chips disabled while modding.
+            // Auto-only: the mod-preview toggles are turned off and their chips disabled while modding.
             if (on)
             {
                 hardRockMod.Value = false;
                 hiddenMod.Value = false;
+                easyMod.Value = false;
+                rateMod.Value = RateMod.Off;
             }
             hardRockButton.SetEnabled(!on);
             hiddenButton.SetEnabled(!on);
+            easyButton.SetEnabled(!on);
+            rateModButton.SetEnabled(!on);
 
             // The left composing tools (tool/hitsound column + bank bar + Song Setup/Settings buttons) aren't
             // useful while reviewing mods - hide them so the editor reads as a dedicated modding view.
@@ -606,13 +708,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             rebuildHitObjects();
         }
 
-        /// <summary>Circle size after the active mods (HardRock multiplies CS by 1.3, capped at 10).</summary>
-        private float effectiveCs() => hardRockMod.Value ? Math.Min(10f, editable.Cs.Value * 1.3f) : editable.Cs.Value;
+        /// <summary>Circle size after the active mods: HardRock ×1.3 (capped at 10), Easy ×0.5 (mutually exclusive).</summary>
+        private float effectiveCs()
+        {
+            if (hardRockMod.Value) return Math.Min(10f, editable.Cs.Value * 1.3f);
+            if (easyMod.Value) return editable.Cs.Value * 0.5f;
+            return editable.Cs.Value;
+        }
 
-        /// <summary>Approach rate after the active mods (HardRock multiplies AR by 1.4, capped at 10).</summary>
-        private float effectiveAr() => hardRockMod.Value ? Math.Min(10f, editable.Ar.Value * 1.4f) : editable.Ar.Value;
+        /// <summary>Approach rate after the active mods: HardRock ×1.4 (capped at 10), Easy ×0.5 (mutually exclusive).</summary>
+        private float effectiveAr()
+        {
+            if (hardRockMod.Value) return Math.Min(10f, editable.Ar.Value * 1.4f);
+            if (easyMod.Value) return editable.Ar.Value * 0.5f;
+            return editable.Ar.Value;
+        }
 
-        /// <summary>Approach-circle preempt window (ms) for the mod-adjusted AR.</summary>
+        /// <summary>
+        /// Approach-circle preempt window (ms) for the mod-adjusted AR. DoubleTime is NOT applied here - it speeds
+        /// up the playback clock instead, which makes the (unchanged) preempt window elapse 1.5x faster on its own.
+        /// </summary>
         private double effectivePreempt() => ParsedBeatmap.PreemptFor(effectiveAr());
 
         /// <summary>
@@ -689,19 +804,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             topTimeline.Height = topHeightCurrent;
             composeContainer.Padding = new MarginPadding { Top = topHeightCurrent, Bottom = bottom_bar_height, Right = moddingInsetCurrent };
 
-            // Keep the top-right HUD (a single horizontal BPM / SV / divisor row, the mod chips below it, then the
-            // Auto popover / distance-snap readout) just below the timeline as it grows, and slid left of the
-            // modding panel while it's open.
-            hudRow.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 8 };
-            modButtons.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 44 };
-            autoMenu.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 80 };
-            distanceSnapText.Margin = new MarginPadding { Right = hudRight, Top = topHeightCurrent + 80 };
+            // The top bar (left panel + timeline + settings panel) is a fixed block - the modding panel never
+            // moves it (it slides in over the compose area below). So nothing up here tracks moddingInset.
 
-            // The Song Setup / Settings buttons slide down with the timeline so they stay just below it.
-            toolButtons.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 6 };
+            // The mod chips sit just below the timeline, aligned under the settings panel's column (flush right);
+            // the Auto popover / distance-snap readout sit below the (wrapping) chip grid. These DO slide left of
+            // the modding panel since they live in the compose area.
+            float chipsTop = topHeightCurrent + 8;
+            modButtons.Margin = new MarginPadding { Right = moddingInsetCurrent, Top = chipsTop };
+            float belowChips = chipsTop + modButtons.DrawHeight + 6;
+            autoMenu.Margin = new MarginPadding { Right = hudRight, Top = belowChips };
+            distanceSnapText.Margin = new MarginPadding { Right = hudRight, Top = belowChips };
 
-            // The lazer-style bank bar sits below the tool buttons (which are ~24px tall) on the left.
-            hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 40 };
+            // The lazer-style bank bar sits on the left, just below the timeline, when the hitsound lanes are open.
+            hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 12 };
         }
 
         // Cache key for the live combo preview shown while a placement tool is armed (snapped time + state).
@@ -1728,10 +1844,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (moveSnapshot.Count == 0 || moveMin.X > moveMax.X)
                 return; // nothing movable (e.g. spinner-only selection)
 
-            // Move by the raw delta, like osu!lazer's OsuSelectionHandler.moveObjects: no magnetic snapping
-            // onto other objects' centres - the selection simply follows the cursor, and stacking (below)
-            // resolves any consecutive overlaps afterwards.
             Vector2 delta = new Vector2((float)Math.Round(rawDelta.X), (float)Math.Round(rawDelta.Y));
+
+            // Magnetic stacking snap: if dragging the selection brings any of its snap points within the
+            // magnetic radius of an unselected on-screen object, latch the two together. This mirrors lazer's
+            // checkSnappingBlueprintToNearbyObjects + snapToVisibleBlueprints - it lets you drop an object onto
+            // another to stack them precisely, no matter how far apart in time (the stacking below then resolves
+            // the diagonal offset if they're within stack leniency).
+            delta = magneticMoveSnap(delta);
 
             // Clamp so the whole selection stays inside the playfield.
             float dx = Math.Clamp(delta.X, -moveMin.X, ParsedBeatmap.PLAYFIELD_WIDTH - moveMax.X);
@@ -1761,7 +1881,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // radius is OsuHitObject.OBJECT_RADIUS * 0.10 (a fixed 6.4 osu!px, independent of circle size),
             // and only on-screen, unselected objects are considered.
             const float magnetic_snap_radius = OsuObjectRadius * 0.10f;
-            if (tryNearestObjectPosition(pos, id => !playfield.IsObjectVisible(id) || selection.Contains(id), out Vector2 target, out float dist) && dist < magnetic_snap_radius)
+            if (tryNearestObjectPosition(pos, o => !playfield.IsObjectVisible(o) || selection.Contains(o.Id), out Vector2 target, out float dist) && dist < magnetic_snap_radius)
                 pos = target;
 
             return pos;
@@ -1822,7 +1942,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// snap points per object mirror osu!lazer's selection blueprints: a circle's centre; a slider's head,
         /// its geometric path end, and the control-point anchors that produce visible kinks; a spinner's centre.
         /// </summary>
-        private bool tryNearestObjectPosition(Vector2 pos, Func<int, bool> isExcluded, out Vector2 nearest, out float distance)
+        private bool tryNearestObjectPosition(Vector2 pos, Func<HitObjectModel, bool> isExcluded, out Vector2 nearest, out float distance)
         {
             nearest = pos;
             distance = float.MaxValue;
@@ -1830,7 +1950,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             foreach (var o in parsed.HitObjects)
             {
-                if (isExcluded(o.Id))
+                if (isExcluded(o))
                     continue;
 
                 foreach (var candidate in snapPointsFor(o))
@@ -1893,6 +2013,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 nearest = candidate;
                 found = true;
             }
+        }
+
+        /// <summary>
+        /// Mirrors lazer's <c>OsuBlueprintContainer.checkSnappingBlueprintToNearbyObjects</c>: tests each
+        /// selected object's snap points (at their original positions, shifted by <paramref name="delta"/>) and,
+        /// if one lands within the magnetic radius of an unselected, on-screen object's (unstacked) snap point,
+        /// returns the adjusted delta that latches them together. Otherwise returns the delta unchanged.
+        /// </summary>
+        private Vector2 magneticMoveSnap(Vector2 delta)
+        {
+            const float magnetic_snap_radius = OsuObjectRadius * 0.10f;
+
+            foreach (var snap in moveSnapshot.Values)
+            {
+                if (snap.Kind == HitObjectKind.Spinner)
+                    continue;
+
+                foreach (var sp in snapPointsFor(snap))
+                {
+                    Vector2 testPos = sp + delta;
+                    if (tryNearestObjectPosition(testPos, o => !playfield.IsObjectVisible(o) || selection.Contains(o.Id), out Vector2 target, out float dist)
+                        && dist < magnetic_snap_radius)
+                        return target - sp;
+                }
+            }
+
+            return delta;
         }
 
         /// <summary>Stack heights the objects would take if the selection were dropped at the current move offset.</summary>
@@ -3006,9 +3153,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Exit is via the configured exit key.
         private FillFlowContainer buildToolButtons() => new FillFlowContainer
         {
-            Anchor = Anchor.TopLeft,
-            Origin = Anchor.TopLeft,
-            Margin = new MarginPadding { Left = 12, Top = top_bar_height + 6 },
+            Anchor = Anchor.TopCentre,
+            Origin = Anchor.TopCentre,
             AutoSizeAxes = Axes.Both,
             Direction = FillDirection.Horizontal,
             Spacing = new Vector2(6, 0),
@@ -3016,14 +3162,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 new OsuButton("Song Setup", OsuColour.Surface)
                 {
-                    Size = new Vector2(86, 24),
+                    Size = new Vector2(84, 24),
                     FontSize = 13,
                     CornerRadius = 5,
                     Action = () => songSettingsOverlay.ToggleVisibility(),
                 },
                 new OsuButton("Settings", OsuColour.Surface)
                 {
-                    Size = new Vector2(72, 24),
+                    Size = new Vector2(68, 24),
                     FontSize = 13,
                     CornerRadius = 5,
                     Action = () => settingsOverlay.ToggleVisibility(),
@@ -3047,6 +3193,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnKeyDown(KeyDownEvent e)
         {
+            // The platform "command" modifier: Cmd on macOS, Ctrl elsewhere (matching osu!lazer).
+            bool cmd = Shortcut.CommandPressed(e);
+
             // Overlay toggles are handled first so the same key both opens AND closes its menu - and pressing
             // another menu's key while one is open switches straight to it.
             if (settings.TimingPointsKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
@@ -3112,40 +3261,40 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Ctrl+S saves in place (updates the carousel without leaving the editor).
-            if (e.ControlPressed && e.Key == Key.S && !e.Repeat)
+            if (cmd && e.Key == Key.S && !e.Repeat)
             {
                 save();
                 return true;
             }
 
             // Ctrl+A selects every object in the map, like lazer.
-            if (e.ControlPressed && !e.Repeat && e.Key == Key.A)
+            if (cmd && !e.Repeat && e.Key == Key.A)
             {
                 selection.SetRange(parsed.HitObjects.Select(o => o.Id));
                 return true;
             }
 
             // Copy / cut / paste (Ctrl+C / Ctrl+X / Ctrl+V), like lazer.
-            if (e.ControlPressed && !e.Repeat && e.Key == Key.C)
+            if (cmd && !e.Repeat && e.Key == Key.C)
             {
                 copySelection();
                 return true;
             }
 
-            if (e.ControlPressed && !e.Repeat && e.Key == Key.X)
+            if (cmd && !e.Repeat && e.Key == Key.X)
             {
                 cutSelection();
                 return true;
             }
 
-            if (e.ControlPressed && !e.Repeat && e.Key == Key.V)
+            if (cmd && !e.Repeat && e.Key == Key.V)
             {
                 paste();
                 return true;
             }
 
             // Bookmarks: Ctrl+B adds one at the current time, Ctrl+Shift+B removes the nearest.
-            if (e.ControlPressed && !e.Repeat && e.Key == Key.B)
+            if (cmd && !e.Repeat && e.Key == Key.B)
             {
                 if (e.ShiftPressed)
                     removeNearestBookmark();
@@ -3155,7 +3304,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Undo / redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y), like lazer.
-            if (e.ControlPressed && !e.Repeat && (e.Key == Key.Z || e.Key == Key.Y))
+            if (cmd && !e.Repeat && (e.Key == Key.Z || e.Key == Key.Y))
             {
                 if (e.Key == Key.Y || e.ShiftPressed)
                     redo();
@@ -3198,21 +3347,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Ctrl+G reverses the selected pattern (order + slider direction), like osu!lazer.
-            if (e.ControlPressed && e.Key == Key.G && !e.Repeat)
+            if (cmd && e.Key == Key.G && !e.Repeat)
             {
                 ReverseSelection();
                 return true;
             }
 
             // Flip the selection: Ctrl+H horizontally, Ctrl+J vertically (lazer defaults).
-            if (e.ControlPressed && !e.Repeat && (e.Key == Key.H || e.Key == Key.J))
+            if (cmd && !e.Repeat && (e.Key == Key.H || e.Key == Key.J))
             {
                 FlipSelection(e.Key == Key.H);
                 return true;
             }
 
             // Ctrl+Shift+R opens the rotate-by-angle dialog (acts on the current selection).
-            if (e.ControlPressed && e.ShiftPressed && e.Key == Key.R && !e.Repeat)
+            if (cmd && e.ShiftPressed && e.Key == Key.R && !e.Repeat)
             {
                 if (selection.Selected.Count > 0)
                     rotationPopover.Show();
@@ -3220,7 +3369,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Playback speed: Ctrl+Shift+< slower, Ctrl+Shift+> faster (osu!lazer has no default binding for this).
-            if (e.ControlPressed && e.ShiftPressed && (e.Key == Key.Comma || e.Key == Key.Period))
+            if (cmd && e.ShiftPressed && (e.Key == Key.Comma || e.Key == Key.Period))
             {
                 if (e.Key == Key.Period)
                     playbackControl.IncreaseRate();
@@ -3230,7 +3379,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // G (no modifier) cycles the grid size, like lazer's EditorCycleGridSpacing.
-            if (e.Key == Key.G && !e.Repeat && !e.ControlPressed)
+            if (e.Key == Key.G && !e.Repeat && !cmd)
             {
                 playfield.CycleGridSize();
                 return true;
@@ -3368,8 +3517,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnScroll(ScrollEvent e)
         {
-            // Ctrl+scroll changes the beat-snap divisor (finer when scrolling up), like lazer.
-            if (e.ControlPressed)
+            bool cmd = Shortcut.CommandPressed(e);
+
+            // Ctrl/Cmd+scroll changes the beat-snap divisor (finer when scrolling up), like lazer.
+            if (cmd)
             {
                 beatDivisor.Step(e.ScrollDelta.Y > 0 ? 1 : -1);
                 return true;

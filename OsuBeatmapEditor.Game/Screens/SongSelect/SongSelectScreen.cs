@@ -431,8 +431,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             if (newBeatmapOverlay.State.Value == Visibility.Visible)
                 return base.OnKeyDown(e);
 
-            // Ctrl+Space pauses/resumes the song preview (with a toast confirming which).
-            if (e.Key == Key.Space && e.ControlPressed)
+            // Ctrl/Cmd+Space pauses/resumes the song preview (with a toast confirming which).
+            if (e.Key == Key.Space && Shortcut.CommandPressed(e))
             {
                 if (currentPreview != null)
                 {

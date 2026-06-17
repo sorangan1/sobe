@@ -139,8 +139,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Node markers shown on each anchor (and the cursor) while a slider is being drawn.
         private Container? sliderNodes;
 
-        // Live control-point editor for the currently-selected single slider.
+        // Live control-point editor for the currently-selected single slider, plus its base position (the
+        // slider's stack offset) so a move preview can add the drag offset on top without losing the stacking.
         private SliderControlPointVisualiser? controlPoints;
+        private Vector2 controlPointsBase;
 
         // Transform box (rotate/scale/flip), shown while Shift is held with a selection.
         private SelectionBox? transformBox;
@@ -402,20 +404,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         public bool IsObjectVisible(int id)
         {
-            double t = TimeSource?.Invoke() ?? 0;
-
             foreach (var o in currentHitObjects)
             {
-                if (o.Id != id)
-                    continue;
-
-                // Match what's actually drawn (and what selection treats as hittable): the approach window
-                // plus the configurable fade-out tail, so a passed object stays snappable while it lingers.
-                double end = o.StartTime + (o.Kind is HitObjectKind.Slider or HitObjectKind.Spinner ? o.Duration : 0);
-                return t >= o.StartTime - lastPreempt && t <= end + settings.ObjectFadeOut.Value;
+                if (o.Id == id)
+                    return IsObjectVisible(o);
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Whether the object is currently within the drawn window, computed directly from the model (no lookup).
+        /// Prefer this overload in hot paths that already hold the object - the id overload scans to find it.
+        /// </summary>
+        public bool IsObjectVisible(HitObjectModel o)
+        {
+            double t = TimeSource?.Invoke() ?? 0;
+
+            // Match what's actually drawn (and what selection treats as hittable): the approach window
+            // plus the configurable fade-out tail, so a passed object stays snappable while it lingers.
+            double end = o.StartTime + (o.Kind is HitObjectKind.Slider or HitObjectKind.Spinner ? o.Duration : 0);
+            return t >= o.StartTime - lastPreempt && t <= end + settings.ObjectFadeOut.Value;
         }
 
         /// <summary>The top-most currently-visible object under an osu!pixel position, or null.</summary>
@@ -524,7 +533,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             if (o != null)
             {
-                if (e.ControlPressed)
+                if (Shortcut.CommandPressed(e))
                 {
                     selection.Toggle(o.Id);
                     nodeSelection.Clear();
@@ -538,7 +547,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     nodeSelection.Clear();
                 }
             }
-            else if (!e.ControlPressed)
+            else if (!Shortcut.CommandPressed(e))
             {
                 selection.Clear();
                 nodeSelection.Clear();
@@ -581,7 +590,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Dragging empty space rubber-band selects, like lazer's composer.
             boxSelecting = true;
             boxStart = start;
-            dragBaseline = e.ControlPressed ? new HashSet<int>(selection.Selected) : new HashSet<int>();
+            dragBaseline = Shortcut.CommandPressed(e) ? new HashSet<int>(selection.Selected) : new HashSet<int>();
             boxSelected = new HashSet<int>(dragBaseline);
 
             overlayLayer.Add(selectionBox = new Box
@@ -627,7 +636,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Commits a slider anchor at the given (clamped) position, starting the trace on the first click.</summary>
         private void addSliderAnchor(Vector2 osuPosition)
         {
-            Vector2 p = clampToPlayfield(osuPosition);
+            // The head (the first anchor) snaps exactly like a placed circle (distance + magnetic snap); the
+            // later anchors are placed freely where clicked.
+            bool isHead = !buildingSlider;
+            Vector2 p = clampToPlayfield(isHead && PlacementSnap != null ? PlacementSnap(osuPosition) : osuPosition);
 
             if (!buildingSlider)
             {
@@ -971,9 +983,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             selectionLayer.Position = osuOffset;
 
-            // Keep the slider's control-point handles glued to the body as it is dragged.
+            // Keep the slider's control-point handles glued to the body as it is dragged (on top of the
+            // slider's stack offset, which is the visualiser's resting position).
             if (controlPoints != null)
-                controlPoints.Position = osuOffset;
+                controlPoints.Position = controlPointsBase + osuOffset;
 
             // Keep the follow-point chain glued to the moving objects (only the touched connections update).
             previewFollowPoints(osuOffset);
@@ -1033,8 +1046,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (o.Id == id && o.Kind == HitObjectKind.Slider && o.ControlPoints is { Count: >= 2 })
                 {
                     int sliderId = o.Id;
+                    controlPointsBase = DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
                     overlayLayer.Add(controlPoints = new SliderControlPointVisualiser(o, currentDiameter, actions)
                     {
+                        // Shift the whole editor by the slider's stack offset so its handles/polygon line up with
+                        // the stacked body (the control points themselves stay in unstacked coordinates, which is
+                        // what gets edited - ToLocalSpace then maps clicks/drags back through this offset).
+                        Position = controlPointsBase,
                         // Two-stage part selection: with the slider already the sole selection, clicking a
                         // head/tail node or the body selects just that part.
                         PartNodeClicked = node => nodeSelection.Select(sliderId, node),
@@ -1277,10 +1295,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             var (colour, number) = previewCombo();
 
-            // Ghost head circle: at the slider's head while tracing, otherwise at the (snapped) cursor.
+            // Ghost head circle: at the slider's (already-snapped) head while tracing, otherwise at the snapped
+            // cursor. The slider head snaps exactly like a placed circle - both the circle and slider tools do.
             Vector2 ghost = buildingSlider && sliderAnchors.Count > 0
                 ? sliderAnchors[0].Position
-                : PlacementActive && PlacementSnap != null ? PlacementSnap(pos) : pos;
+                : (PlacementActive || SliderPlacementActive) && PlacementSnap != null ? PlacementSnap(pos) : pos;
 
             placementPreview.Size = new Vector2(currentDiameter);
             placementPreview.BorderThickness = currentDiameter * 0.08f;

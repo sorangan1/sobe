@@ -133,6 +133,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly Dictionary<int, Container> blueprints = new Dictionary<int, Container>();
         private readonly Dictionary<int, float> blueprintBaseX = new Dictionary<int, float>();
 
+        // Virtualised timing lines + bookmarks: the lightweight index (sorted by time) is rebuilt only when the
+        // timing/bookmark data changes; the heavy drawables (line + pill, or bookmark line) are realised on demand
+        // for the visible window, so an SV-heavy map stays cheap to zoom/scroll.
+        private readonly List<TimingEntry> timingEntries = new List<TimingEntry>();
+        private readonly Dictionary<int, Drawable[]> realizedTiming = new Dictionary<int, Drawable[]>();
+        private readonly List<int> _toDerealizeTiming = new List<int>();
+
         // Virtualisation: only objects whose time falls in (or near) the visible window get a realised drawable,
         // so a map with thousands of objects stays cheap to zoom/scroll. objectBounds keeps ALL objects (cheap
         // structs) for hit-testing; the heavy blueprints + hitsound cells are realised/derealised on demand.
@@ -167,6 +174,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Time extent (ms) of a hit object marker, with its stable id and kind.</summary>
         private readonly record struct ObjBounds(int Id, double StartTime, double EndTime, HitObjectKind Kind);
+
+        /// <summary>A lightweight description of one timing line or bookmark, realised into drawables on demand.</summary>
+        private readonly record struct TimingEntry(double Time, bool IsBookmark, Color4 Colour, string Label, float PillY, int PointId, bool Coexists);
 
         protected override void LoadComplete()
         {
@@ -235,9 +245,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             nodeSelection.Changed += refreshSelectionVisuals;
 
             // Rebuild the timing/bookmark lines when the user customises their colours.
-            settings.UninheritedColour.ValueChanged += _ => buildTimingPoints();
-            settings.InheritedColour.ValueChanged += _ => buildTimingPoints();
-            settings.BookmarkColour.ValueChanged += _ => buildTimingPoints();
+            settings.UninheritedColour.ValueChanged += _ => rebuildTimingPoints();
+            settings.InheritedColour.ValueChanged += _ => rebuildTimingPoints();
+            settings.BookmarkColour.ValueChanged += _ => rebuildTimingPoints();
             // Recolour the timeline objects live when the combo palette/toggle/map colours change.
             editable.ColoursChanged += buildObjects;
             // Toggling the hitsound editor adds/removes the per-object lane cells: rebuild the visible set.
@@ -285,6 +295,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             updateGrid();
             updateLaneLayout();
             updateVisibleObjects();
+            updateVisibleTimingPoints();
 
             // While a rubber-band box is held, keep extending the selection as the timeline scrolls under a
             // stationary cursor during playback (otherwise it only updates when the mouse actually moves).
@@ -374,7 +385,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             for (int i = 0; i < 3; i++)
                 laneCellContainers[i]?.Clear();
 
-            buildTimingPoints();
+            buildTimingIndex();
             buildBreaks();
             buildMods();
 
@@ -391,6 +402,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             updateVisibleObjects();
+            updateVisibleTimingPoints();
             refreshSelectionVisuals();
         }
 
@@ -1061,12 +1073,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
-        /// Draws a vertical line at each timing point, scrolling with the content: red for uninherited
-        /// (BPM) points, green for inherited (slider-velocity) ones - matching osu!lazer's timeline.
+        /// Rebuilds the lightweight timing/bookmark index and re-realises the visible window. Called when the
+        /// timing-line/bookmark colours change (the data itself is re-indexed by <see cref="buildObjects"/>).
         /// </summary>
-        private void buildTimingPoints()
+        private void rebuildTimingPoints()
+        {
+            buildTimingIndex();
+            updateVisibleTimingPoints();
+        }
+
+        /// <summary>
+        /// Builds the time-sorted index of timing lines (red = uninherited/BPM, green = inherited/SV) and
+        /// bookmarks. The heavy drawables are realised on demand by <see cref="updateVisibleTimingPoints"/>, so
+        /// this stays O(timing points + bookmarks) once, not per frame - matching the object virtualisation.
+        /// </summary>
+        private void buildTimingIndex()
         {
             timingLayer.Clear();
+            realizedTiming.Clear();
+            timingEntries.Clear();
 
             // Bookmark times (rounded) that coincide with a timing point: there, the bookmark line is drawn
             // only above the baseline, leaving the lower part to the timing line + pill.
@@ -1086,20 +1111,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Colour4 custom = tp.Uninherited ? settings.UninheritedColour.Value : settings.InheritedColour.Value;
                     Color4 colour = new Color4(custom.R, custom.G, custom.B, 0.85f);
 
-                    float x = (float)(tp.Time * pixelsPerMs);
-
-                    timingLayer.Add(new Box
-                    {
-                        Anchor = Anchor.TopLeft,
-                        Origin = Anchor.TopCentre,
-                        // Confined to the object band so it doesn't extend down through the hitsound lanes.
-                        Height = HEIGHT,
-                        Width = 2f,
-                        X = x,
-                        Colour = colour,
-                    });
-
-                    // A pill readout just right of the line: BPM for red, "x" multiplier for green.
+                    // BPM for red, "x" multiplier for green.
                     string label = tp.Uninherited
                         ? tp.Value.ToString("0.##", CultureInfo.InvariantCulture)
                         : tp.Value.ToString("0.##", CultureInfo.InvariantCulture) + "x";
@@ -1107,38 +1119,128 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     // Slot 0 sits just below the baseline; further slots stack up towards the top edge.
                     float pillY = slot == 0 ? baseline_y + 7 : 1f;
 
-                    int pointId = timingPointId(tp);
-                    timingLayer.Add(new TimingPill(pointId, label, new Color4(colour.R, colour.G, colour.B, 1f))
-                    {
-                        BaseX = x + 3,
-                        BaseY = pillY,
-                        Clicked = pos => TimingPillClicked?.Invoke(pointId, pos),
-                    });
+                    timingEntries.Add(new TimingEntry(tp.Time, false, colour, label, pillY, timingPointId(tp), false));
                 }
             }
 
-            // Bookmarks: a vertical line in the user's bookmark colour. A standalone bookmark spans the full
-            // height; one sharing a time with a timing point is drawn only from the baseline upward, leaving
-            // the red/green line + pill visible below.
             Colour4 bm = settings.BookmarkColour.Value;
             Color4 bookmarkColour = new Color4(bm.R, bm.G, bm.B, 0.9f);
 
             foreach (int bookmark in beatmap.Bookmarks)
-            {
-                bool coexists = timingTimes.Contains(bookmark);
-                float x = (float)(bookmark * pixelsPerMs);
+                timingEntries.Add(new TimingEntry(bookmark, true, bookmarkColour, string.Empty, 0, -1, timingTimes.Contains(bookmark)));
 
-                timingLayer.Add(new Box
+            timingEntries.Sort((a, b) => a.Time.CompareTo(b.Time));
+        }
+
+        /// <summary>
+        /// Realises the timing lines/bookmarks whose time falls within the visible window (plus a screen of margin)
+        /// and derealises those scrolled away. O(visible) per frame, not O(timing-point count).
+        /// </summary>
+        private void updateVisibleTimingPoints()
+        {
+            if (timingEntries.Count == 0)
+                return;
+
+            double now = currentTime();
+            double margin = pixelsPerMs > 0 ? DrawWidth / pixelsPerMs : 0; // a full screen of padding each side
+            double from = now - margin;
+            double to = now + margin;
+
+            for (int i = lowerBoundTiming(from); i < timingEntries.Count; i++)
+            {
+                if (timingEntries[i].Time > to)
+                    break;
+                if (!realizedTiming.ContainsKey(i))
+                    realizeTimingEntry(i);
+            }
+
+            if (realizedTiming.Count > 0)
+            {
+                _toDerealizeTiming.Clear();
+                foreach (var kv in realizedTiming)
+                {
+                    double t = timingEntries[kv.Key].Time;
+                    if (t < from || t > to)
+                        _toDerealizeTiming.Add(kv.Key);
+                }
+
+                foreach (int i in _toDerealizeTiming)
+                    derealizeTimingEntry(i);
+            }
+        }
+
+        /// <summary>Index of the first timing entry whose time is >= the given time (timingEntries is time-sorted).</summary>
+        private int lowerBoundTiming(double time)
+        {
+            int lo = 0, hi = timingEntries.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (timingEntries[mid].Time < time)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            return lo;
+        }
+
+        private void realizeTimingEntry(int index)
+        {
+            var e = timingEntries[index];
+            float x = (float)(e.Time * pixelsPerMs);
+
+            if (e.IsBookmark)
+            {
+                // A standalone bookmark spans the full height; one sharing a time with a timing point is drawn
+                // only from the baseline upward, leaving the red/green line + pill visible below.
+                var bookmark = new Box
                 {
                     Anchor = Anchor.TopLeft,
                     Origin = Anchor.TopCentre,
                     Width = 2f,
                     X = x,
                     Y = 0,
-                    Height = coexists ? baseline_y : HEIGHT,
-                    Colour = bookmarkColour,
-                });
+                    Height = e.Coexists ? baseline_y : HEIGHT,
+                    Colour = e.Colour,
+                };
+                timingLayer.Add(bookmark);
+                realizedTiming[index] = new Drawable[] { bookmark };
+                return;
             }
+
+            var line = new Box
+            {
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.TopCentre,
+                // Confined to the object band so it doesn't extend down through the hitsound lanes.
+                Height = HEIGHT,
+                Width = 2f,
+                X = x,
+                Colour = e.Colour,
+            };
+
+            int pointId = e.PointId;
+            var pill = new TimingPill(pointId, e.Label, new Color4(e.Colour.R, e.Colour.G, e.Colour.B, 1f))
+            {
+                BaseX = x + 3,
+                BaseY = e.PillY,
+                Clicked = pos => TimingPillClicked?.Invoke(pointId, pos),
+            };
+
+            timingLayer.Add(line);
+            timingLayer.Add(pill);
+            realizedTiming[index] = new Drawable[] { line, pill };
+        }
+
+        private void derealizeTimingEntry(int index)
+        {
+            if (!realizedTiming.TryGetValue(index, out var drawables))
+                return;
+
+            foreach (var d in drawables)
+                d.Expire();
+
+            realizedTiming.Remove(index);
         }
 
         /// <summary>
@@ -1452,11 +1554,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (hit < 0)
             {
                 // Clicking empty space clears both selections (unless adding to the object selection).
-                if (!e.ControlPressed)
+                if (!Shortcut.CommandPressed(e))
                     selection.Clear();
                 nodeSelection.Clear();
             }
-            else if (e.ControlPressed)
+            else if (Shortcut.CommandPressed(e))
             {
                 selection.Toggle(hit);
                 nodeSelection.Clear();
@@ -1580,7 +1682,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             dragStartTime = startTime;
-            dragBaseline = e.ControlPressed ? new HashSet<int>(selection.Selected) : new HashSet<int>();
+            dragBaseline = Shortcut.CommandPressed(e) ? new HashSet<int>(selection.Selected) : new HashSet<int>();
 
             content.Add(dragBox = new Box
             {

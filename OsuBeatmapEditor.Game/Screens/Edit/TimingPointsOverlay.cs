@@ -289,7 +289,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Ctrl+A selects every point; Delete removes the current selection.
-            if (e.Key == Key.A && e.ControlPressed)
+            if (e.Key == Key.A && Shortcut.CommandPressed(e))
             {
                 selectedIds.Clear();
                 foreach (var tp in beatmap.TimingPointModels)
@@ -462,7 +462,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             var selected = beatmap.TimingPointModels.Where(t => selectedIds.Contains(t.Id)).OrderBy(t => t.Time).ToList();
 
             if (selected.Count == 0)
-                editPanel.Child = hint("Select a timing point to edit.\nCtrl+click to add, Shift+click for a range.");
+                editPanel.Child = hint($"Select a timing point to edit.\n{Shortcut.CommandName}+click to add, Shift+click for a range.");
             else if (selected.Count == 1)
                 editPanel.Child = buildSingleEdit(selected[0]);
             else
@@ -871,7 +871,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             protected override bool OnClick(ClickEvent e)
             {
-                Clicked?.Invoke(e.ControlPressed, e.ShiftPressed);
+                Clicked?.Invoke(Shortcut.CommandPressed(e), e.ShiftPressed);
                 return true;
             }
 

@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
+using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Input.Events;
+using osu.Framework.Localisation;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
@@ -82,7 +84,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             for (int i = 0; i < controlPoints.Count; i++)
             {
-                var piece = new ControlPointPiece(i, controlPoints[i].IsSegmentStart, diameter * 0.26f)
+                var piece = new ControlPointPiece(i, controlPoints[i].Type, diameter * 0.26f)
                 {
                     Position = controlPoints[i].Position,
                     Moved = handleMoved,
@@ -208,7 +210,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             // Ctrl+left-click inserts a new anchor, checked first so it works even when hovering the head/tail
             // circle (where edge-node selection would otherwise consume the click).
-            if (e.ControlPressed && nearPath(pos, Math.Max(8f, diameter / 2f)))
+            if (Shortcut.CommandPressed(e) && nearPath(pos, Math.Max(8f, diameter / 2f)))
             {
                 int insertAt = nearestSegmentIndex(pos);
                 controlPoints.Insert(insertAt, new SliderControlPoint(pos));
@@ -298,7 +300,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Math.Clamp(p.Y, 0, ParsedBeatmap.PLAYFIELD_HEIGHT));
 
         /// <summary>A single draggable control-point handle; reports moves, double-click toggles and right-clicks upward.</summary>
-        private partial class ControlPointPiece : CircularContainer
+        private partial class ControlPointPiece : CircularContainer, IHasTooltip
         {
             public Action<int, Vector2, bool>? Moved;
             public Action<int>? Toggled;
@@ -306,12 +308,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             public Action<int>? Clicked;
 
             private readonly int index;
+            private readonly SliderPathType? segmentType;
             private readonly Box fill;
             private double lastClickTime = double.MinValue;
 
-            public ControlPointPiece(int index, bool red, float size)
+            public ControlPointPiece(int index, SliderPathType? segmentType, float size)
             {
                 this.index = index;
+                this.segmentType = segmentType;
+
+                // A typeless point continues the previous segment smoothly; a typed one starts a new segment
+                // (a corner). The fill colour names which kind of segment it begins, mirroring osu!lazer:
+                // yellow = smooth, red = straight/corner, purple = circular arc, pink = curved (bezier).
+                Color4 colour = colourFor(segmentType);
 
                 Origin = Anchor.Centre;
                 Size = new Vector2(size);
@@ -321,10 +330,32 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Child = fill = new Box
                 {
                     RelativeSizeAxes = Axes.Both,
-                    Colour = red ? OsuColour.Pink : Color4.White,
-                    Alpha = red ? 0.95f : 0.85f,
+                    Colour = colour,
+                    Alpha = 0.9f,
                 };
             }
+
+            private static Color4 colourFor(SliderPathType? type)
+            {
+                if (type is not SliderPathType t)
+                    return OsuColour.Yellow; // smooth continuation point
+
+                return t.Type switch
+                {
+                    SliderSplineType.Linear => EditorTheme.Colours.Error,   // straight segment / sharp corner
+                    SliderSplineType.PerfectCurve => OsuColour.Purple,       // circular arc
+                    _ => OsuColour.Pink,                                      // bezier / other curves
+                };
+            }
+
+            public LocalisableString TooltipText => segmentType is not SliderPathType t
+                ? "Smooth point - the curve flows through it (double-click to make a corner)"
+                : t.Type switch
+                {
+                    SliderSplineType.Linear => "Corner: straight segment",
+                    SliderSplineType.PerfectCurve => "Corner: circular arc",
+                    _ => "Corner: curved (bezier)",
+                };
 
             protected override bool OnMouseDown(MouseDownEvent e)
             {
