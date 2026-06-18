@@ -66,6 +66,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Stable per-map key for the statistics tracker (independent of the .osu hash).</summary>
         private string statisticsKey => Statistics.StatisticsTracker.MapKey(set.Artist, set.Title, set.Author, difficulty.DifficultyName);
 
+        // Online login session + local collab links (both optional; absent under the test browser / when logged out).
+        [Resolved(CanBeNull = true)]
+        private Online.AuthManager? auth { get; set; }
+
+        [Resolved(CanBeNull = true)]
+        private Online.CollabSession? collabs { get; set; }
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
@@ -175,6 +182,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private RotationPopover rotationPopover = null!;
         private TimingPillPopover timingPillPopover = null!;
         private PlaybackControl playbackControl = null!;
+
+        private CollabOverlay collabOverlay = null!;
+
+        /// <summary>True while the open difficulty is linked to a server collab; lights the COLLAB chip.</summary>
+        private readonly BindableBool collabLinked = new BindableBool();
 
         private GameHost host = null!;
         private ITrackStore? trackStore;
@@ -322,6 +334,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     {
                                         new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
                                         new HitsoundModeButton(hitsoundMode),
+                                        new CollabButton(collabLinked, () => collabOverlay.ToggleVisibility(), "Collab - co-map this difficulty with someone (\"git for maps\")"),
                                     },
                                 },
                             },
@@ -496,6 +509,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     OnApply = UpdateTimingPoint,
                     OnDelete = DeleteTimingPoint,
+                },
+                collabOverlay = new CollabOverlay
+                {
+                    IsLoggedIn = () => auth?.IsLoggedIn == true,
+                    CurrentLink = () => collabs?.Get(statisticsKey),
+                    StartCollab = startCollabAsync,
+                    AddMember = addCollabMemberAsync,
                 },
                 // Frontmost so the beta notice sits above all editor chrome when shown on open.
                 betaOverlay = new BetaNoticeOverlay(),
@@ -2526,8 +2546,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             bool many = sel.Count > 1;
-            int startTime = sel.Min(o => o.StartTime);
-            int endTime = sel.Max(o => o.StartTime + (int)Math.Round(o.Duration));
+            double startTime = sel.Min(o => o.StartTime);
+            double endTime = sel.Max(o => o.StartTime + o.Duration);
             var newComboOrder = sel.Select(o => (rawType(o.RawLine) & 0b100) != 0).ToList();
 
             pushUndo();
@@ -2539,8 +2559,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (many)
                 {
-                    int objEnd = o.StartTime + (int)Math.Round(o.Duration);
-                    int newStart = endTime - (objEnd - startTime);
+                    double objEnd = o.StartTime + o.Duration;
+                    double newStart = endTime - (objEnd - startTime);
                     n = n with { StartTime = newStart, RawLine = HitObjectLineEditor.ShiftTime(n.RawLine, newStart - o.StartTime) };
                 }
 
@@ -2935,9 +2955,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             var clip = HitObjectClipboard.Objects;
-            int target = (int)Math.Round(snapTime(CurrentTime));
-            int baseTime = clip.Min(o => o.StartTime);
-            int offset = target - baseTime;
+            double target = Math.Round(snapTime(CurrentTime));
+            double baseTime = clip.Min(o => o.StartTime);
+            double offset = target - baseTime;
 
             pushUndo();
 
@@ -3183,6 +3203,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             rebuildHitObjects();
 
+            // Light the COLLAB chip if this difficulty is already linked to a server collab.
+            collabLinked.Value = collabs?.IsLinked(statisticsKey) == true;
+
             if (track != null && parsed.HitObjects.Count > 0)
                 track.Seek(Math.Max(0, parsed.HitObjects[0].StartTime - 200));
 
@@ -3313,6 +3336,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Z / X jump the playhead to the first / last hit object (no modifier).
+            if (!cmd && !e.Repeat && (e.Key == Key.Z || e.Key == Key.X) && parsed.HitObjects.Count > 0)
+            {
+                seekTo(e.Key == Key.Z
+                    ? parsed.HitObjects.Min(o => o.StartTime)
+                    : parsed.HitObjects.Max(o => o.StartTime));
+                return true;
+            }
+
             // Tools: (1) select, (2) circle, (3) slider, (4) spinner - matching osu!lazer's toolbox shortcuts.
             // Routed through applyTool so each one fully disarms the others (e.g. 1 also clears the spinner).
             if (e.Key == Key.Number1 && !e.Repeat)
@@ -3415,7 +3447,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             || timingPointsOverlay.State.Value == Visibility.Visible
             || confirmExit.State.Value == Visibility.Visible
             || rotationPopover.State.Value == Visibility.Visible
-            || timingPillPopover.State.Value == Visibility.Visible;
+            || timingPillPopover.State.Value == Visibility.Visible
+            || collabOverlay.State.Value == Visibility.Visible;
 
         /// <summary>Opens the inline timing-point editor beneath a clicked timeline pill.</summary>
         private void onTimingPillClicked(int id, Vector2 screenPosition)
@@ -3466,27 +3499,30 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 this.Exit();
         }
 
+        /// <summary>Snapshots the editable metadata/difficulty fields into the saver's edit set.</summary>
+        private BeatmapSaver.Edits buildEdits() => new BeatmapSaver.Edits
+        {
+            Title = editable.Title.Value,
+            TitleUnicode = editable.TitleUnicode.Value,
+            Artist = editable.Artist.Value,
+            ArtistUnicode = editable.ArtistUnicode.Value,
+            Creator = editable.Creator.Value,
+            Version = editable.Version.Value,
+            Source = editable.Source.Value,
+            Tags = editable.Tags.Value,
+            Hp = editable.Hp.Value,
+            Cs = editable.Cs.Value,
+            Ar = editable.Ar.Value,
+            Od = editable.Od.Value,
+            StackLeniency = editable.StackLeniency.Value,
+            SliderMultiplier = editable.SliderMultiplier.Value,
+            SliderTickRate = editable.SliderTickRate.Value,
+            ComboColours = editable.MapColours.Select(c => c.Value).ToList(),
+        };
+
         private bool save()
         {
-            var edits = new BeatmapSaver.Edits
-            {
-                Title = editable.Title.Value,
-                TitleUnicode = editable.TitleUnicode.Value,
-                Artist = editable.Artist.Value,
-                ArtistUnicode = editable.ArtistUnicode.Value,
-                Creator = editable.Creator.Value,
-                Version = editable.Version.Value,
-                Source = editable.Source.Value,
-                Tags = editable.Tags.Value,
-                Hp = editable.Hp.Value,
-                Cs = editable.Cs.Value,
-                Ar = editable.Ar.Value,
-                Od = editable.Od.Value,
-                StackLeniency = editable.StackLeniency.Value,
-                SliderMultiplier = editable.SliderMultiplier.Value,
-                SliderTickRate = editable.SliderTickRate.Value,
-                ComboColours = editable.MapColours.Select(c => c.Value).ToList(),
-            };
+            var edits = buildEdits();
 
             // Existing maps are written in place directly in lazer's realm (exactly how lazer's own editor
             // saves) - going through the .osz importer would make lazer file the edit as a duplicate set.
@@ -3511,8 +3547,143 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 editable.IsDirty.Value = false;
                 DidSave = true;
                 toasts?.Push("Beatmap saved", EditorTheme.Colours.Success);
+                tryPushCollab(edits);
             }
             return ok;
+        }
+
+        /// <summary>
+        /// If the saved diff is a collab and we're logged in, push the new .osu as a fast-forward revision.
+        /// Fire-and-forget: a 409 means a partner pushed first, so the user is told to pull before saving again.
+        /// </summary>
+        private void tryPushCollab(BeatmapSaver.Edits edits)
+        {
+            var link = collabs?.Get(statisticsKey);
+            string? token = auth?.Token;
+            if (link == null || token == null)
+                return;
+
+            string? osu = BeatmapSaver.BuildPatchedOsu(set, difficulty, parsed, edits);
+            if (osu == null)
+                return;
+
+            Guid collabId = link.CollabId;
+            int baseRevision = link.BaseRevision;
+            string key = statisticsKey;
+
+            Task.Run(async () =>
+            {
+                var result = await Online.SobeApi.PushRevisionAsync(token, collabId, baseRevision, osu, null).ConfigureAwait(false);
+                Schedule(() =>
+                {
+                    if (result.Ok)
+                    {
+                        collabs?.SetBaseRevision(key, result.Number);
+                        if (!result.NoOp)
+                            toasts?.Push($"Pushed to collab (rev {result.Number})", EditorTheme.Colours.Success);
+                    }
+                    else if (result.Conflict)
+                    {
+                        toasts?.Push("Collab: your partner pushed first - pull their changes before saving again", EditorTheme.Colours.Warning);
+                    }
+                    else
+                    {
+                        toasts?.Push("Collab push failed", EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        /// <summary>
+        /// Starts a collab for the open difficulty: creates it on the server, pushes the current .osu as the
+        /// first revision, and uploads the audio/background so a collaborator can bootstrap. Links the diff
+        /// locally on success. Returns (ok, message) for the panel.
+        /// </summary>
+        private async Task<(bool ok, string message)> startCollabAsync()
+        {
+            string? token = auth?.Token;
+            if (token == null)
+                return (false, "Not logged in.");
+            if (collabs == null)
+                return (false, "Collab unavailable.");
+            if (collabs.IsLinked(statisticsKey))
+                return (false, "This difficulty is already a collab.");
+
+            string? osu = BeatmapSaver.BuildPatchedOsu(set, difficulty, parsed, buildEdits());
+            if (osu == null)
+                return (false, "Couldn't read this difficulty's .osu.");
+
+            string title = $"{set.Artist} - {set.Title} [{difficulty.DifficultyName}]";
+            long? onlineId = set.OnlineID > 0 ? set.OnlineID : null;
+
+            Guid? created = await Online.SobeApi.CreateCollabAsync(token, title, onlineId).ConfigureAwait(false);
+            if (created is not Guid collabId)
+                return (false, "Couldn't create the collab.");
+
+            var push = await Online.SobeApi.PushRevisionAsync(token, collabId, 0, osu, "Initial").ConfigureAwait(false);
+            if (!push.Ok)
+                return (false, "Couldn't upload the map.");
+
+            // The diff references these by filename; upload so a new collaborator can bootstrap the set.
+            await uploadCollabAssetAsync(token, collabId, "audio", firstFilename(parsed.AudioFilename, difficulty.AudioFile)).ConfigureAwait(false);
+            await uploadCollabAssetAsync(token, collabId, "background", firstFilename(parsed.BackgroundFilename, difficulty.BackgroundFile)).ConfigureAwait(false);
+
+            int rev = push.Number;
+            string key = statisticsKey;
+            Schedule(() =>
+            {
+                collabs.Link(key, collabId, rev);
+                collabLinked.Value = true;
+            });
+
+            return (true, "Collab started. Add a collaborator below.");
+        }
+
+        /// <summary>Adds a collaborator to the open diff's collab by osu! username.</summary>
+        private async Task<(bool ok, string message)> addCollabMemberAsync(string username)
+        {
+            string? token = auth?.Token;
+            var link = collabs?.Get(statisticsKey);
+            if (token == null || link == null)
+                return (false, "This difficulty isn't a collab.");
+
+            bool ok = await Online.SobeApi.AddMemberAsync(token, link.CollabId, username).ConfigureAwait(false);
+            return ok ? (true, $"Added {username}.") : (false, "No sobe user with that username.");
+        }
+
+        private async Task uploadCollabAssetAsync(string token, Guid collabId, string kind, string? filename)
+        {
+            if (string.IsNullOrEmpty(filename))
+                return;
+
+            byte[]? bytes = readSetFile(filename);
+            if (bytes == null)
+                return;
+
+            await Online.SobeApi.UploadAssetAsync(token, collabId, kind, filename, bytes).ConfigureAwait(false);
+        }
+
+        /// <summary>The first non-empty filename, e.g. the .osu's audio field falling back to realm metadata.</summary>
+        private static string? firstFilename(string a, string b) =>
+            !string.IsNullOrEmpty(a) ? a : (!string.IsNullOrEmpty(b) ? b : null);
+
+        /// <summary>Reads a file from this set's lazer file store by its referenced filename, or null if missing.</summary>
+        private byte[]? readSetFile(string filename)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(set.DataDirectory)
+                    || !set.Files.TryGetValue(filename.ToLowerInvariant(), out string? hash)
+                    || string.IsNullOrEmpty(hash))
+                    return null;
+
+                string? path = LazerFileStore.ResolvePath(set.DataDirectory, hash);
+                return path != null && File.Exists(path) ? File.ReadAllBytes(path) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         protected override bool OnScroll(ScrollEvent e)

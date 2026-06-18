@@ -361,7 +361,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 double endTime = parts.Length >= 6 && double.TryParse(parts[5], NumberStyles.Float, CultureInfo.InvariantCulture, out double et) ? et : time;
                 double spinnerDuration = Math.Max(0, endTime - time);
 
-                result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Spinner, null, Duration: spinnerDuration,
+                result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Spinner, null, Duration: spinnerDuration,
                     ComboNumber: comboNumber, ComboIndex: comboIndex,
                     HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line));
             }
@@ -370,12 +370,12 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 var controlPoints = SliderGeometry.ParseControlPoints(line, result.FormatVersion);
                 (var path, double duration, int slides) = parseSlider(time, parts, timingPoints, sliderMultiplier, controlPoints);
                 var nodeSamples = parseNodeSamples(parts, slides, time, timingPoints, hitSound, normalBank, additionBank);
-                result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Slider, path, duration, slides, comboNumber, comboIndex,
+                result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Slider, path, duration, slides, comboNumber, comboIndex,
                     hitSound, normalBank, additionBank, sampleVolume, line, ControlPoints: controlPoints, NodeSamples: nodeSamples));
             }
             else
             {
-                result.HitObjects.Add(new HitObjectModel(x, y, (int)time, HitObjectKind.Circle, null, ComboNumber: comboNumber, ComboIndex: comboIndex,
+                result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Circle, null, ComboNumber: comboNumber, ComboIndex: comboIndex,
                     HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line));
             }
         }

@@ -58,6 +58,8 @@ namespace OsuBeatmapEditor.Game
             var host = parent.Get<GameHost>();
             auth = new AuthManager(host.Storage, host);
             deps.CacheAs(auth);
+            // Local "git checkout HEAD" pointers for collab difficulties; no per-frame work, so not in the tree.
+            deps.CacheAs(new Online.CollabSession(host.Storage));
             return deps;
         }
 

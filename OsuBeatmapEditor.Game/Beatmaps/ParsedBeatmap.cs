@@ -77,7 +77,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
     public readonly record struct HitObjectModel(
         float X,
         float Y,
-        int StartTime,
+        double StartTime,
         HitObjectKind Kind,
         IReadOnlyList<Vector2>? Path,
         double Duration = 0,

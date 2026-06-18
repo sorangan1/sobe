@@ -31,11 +31,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return parts.Length >= 4 && int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int type) && (type & 0b100) != 0;
         }
 
-        /// <summary>Shifts the object's time (and a spinner's end time) by <paramref name="deltaMs"/>.</summary>
-        public static string ShiftTime(string raw, int deltaMs)
+        /// <summary>
+        /// Shifts the object's time (and a spinner's end time) by <paramref name="deltaMs"/>. Times are parsed
+        /// and re-emitted as doubles so lazer's fractional object times (osu file format v128) round-trip intact.
+        /// </summary>
+        public static string ShiftTime(string raw, double deltaMs)
         {
             string[] parts = raw.Split(',');
-            if (parts.Length < 4 || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int time))
+            if (parts.Length < 4 || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double time))
                 return raw;
 
             parts[2] = (time + deltaMs).ToString(CultureInfo.InvariantCulture);
@@ -44,7 +47,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int type)
                 && (type & 0b1000) != 0
                 && parts.Length >= 6
-                && int.TryParse(parts[5], NumberStyles.Integer, CultureInfo.InvariantCulture, out int end))
+                && double.TryParse(parts[5], NumberStyles.Float, CultureInfo.InvariantCulture, out double end))
             {
                 parts[5] = (end + deltaMs).ToString(CultureInfo.InvariantCulture);
             }
