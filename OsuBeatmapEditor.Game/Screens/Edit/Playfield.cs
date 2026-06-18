@@ -456,12 +456,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // A placement tool is armed but nothing has been started yet (we're still just previewing) -
-            // right-click returns to the selection tool, like pressing 1.
+            // right-click toggles "new combo" for the next placed object (the phantom preview reflects it).
             if (e.Button == MouseButton.Right && (PlacementActive || SliderPlacementActive || SpinnerPlacementActive))
             {
-                SetPlacementActive(false);
-                SetSliderPlacementActive(false);
-                SetSpinnerPlacementActive(false);
+                NewComboArmed = !NewComboArmed;
                 return true;
             }
 

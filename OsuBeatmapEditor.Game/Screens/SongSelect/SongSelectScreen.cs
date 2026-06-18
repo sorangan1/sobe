@@ -50,6 +50,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private NewDifficultyOverlay newDifficultyOverlay = null!;
         private ConfirmOverlay confirmOverlay = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
+        private CollabsListOverlay collabsOverlay = null!;
         private UpdateBanner updateBanner = null!;
         private UpdatePromptOverlay updatePrompt = null!;
 
@@ -73,6 +74,13 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         // Cached by the game host; absent under the standalone test browser, so calls are null-guarded.
         [Resolved(CanBeNull = true)]
         private ToastOverlay? toasts { get; set; }
+
+        // Online login session + local collab links (cached at the game root; absent under the test browser).
+        [Resolved(CanBeNull = true)]
+        private Online.AuthManager? auth { get; set; }
+
+        [Resolved(CanBeNull = true)]
+        private Online.CollabSession? collabs { get; set; }
 
         private Storage storage = null!;
 
@@ -187,6 +195,14 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Margin = new MarginPadding { Left = 30 + 220 + 12, Bottom = 30 },
                         Action = () => settingsOverlay.ToggleVisibility(),
                     },
+                    new OsuButton("Collabs", OsuColour.Surface)
+                    {
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Size = new Vector2(140, 56),
+                        Margin = new MarginPadding { Left = 30 + 220 + 12 + 140 + 12, Bottom = 30 },
+                        Action = () => collabsOverlay.ToggleVisibility(),
+                    },
                     // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
                     // and the search box stay interactive.
                     rightArea = new Container
@@ -253,6 +269,21 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     },
                     confirmOverlay = new ConfirmOverlay(),
                     settingsOverlay = new EditorSettingsOverlay(),
+                    collabsOverlay = new CollabsListOverlay
+                    {
+                        Session = collabs,
+                        IsLoggedIn = () => auth?.IsLoggedIn == true,
+                        Fetch = () => auth?.Token is string tok
+                            ? Online.SobeApi.GetMyCollabsAsync(tok)
+                            : Task.FromResult(new List<Online.CollabSummary>()),
+                        Download = c => auth?.Token is string tok && collabs != null
+                            ? Online.CollabSync.DownloadAsync(tok, c, collabs)
+                            : Task.FromResult((false, "Not logged in.")),
+                        Pull = c => auth?.Token is string tok && collabs != null
+                            ? Online.CollabSync.PullAsync(tok, c, collabs)
+                            : Task.FromResult((false, "Not logged in.")),
+                        OnLibraryChanged = () => reloadBeatmaps(),
+                    },
                     // Update notice, bottom-left just above the New Beatmap button.
                     updateBanner = new UpdateBanner
                     {

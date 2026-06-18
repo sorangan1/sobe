@@ -32,16 +32,56 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// </summary>
         public static string? Save(BeatmapSetModel set, BeatmapDifficultyModel difficulty, ParsedBeatmap parsed, BeatmapSaver.Edits edits)
         {
-            string oldHash = difficulty.OsuFileHash;
-            if (string.IsNullOrEmpty(oldHash))
-                return "This difficulty has no saved .osu file to update in place.";
-
             string? patched = BeatmapSaver.BuildPatchedOsu(set, difficulty, parsed, edits);
             if (patched == null)
                 return "The original .osu file could not be located.";
 
+            return writeOsu(set, difficulty, new UTF8Encoding(false).GetBytes(patched), edits);
+        }
+
+        /// <summary>
+        /// Overwrites an existing difficulty with the exact .osu text pulled from a collab (no re-encoding, so the
+        /// content matches the collaborator's byte-for-byte). Metadata/difficulty fields are taken from the pulled
+        /// text. Returns null on success, otherwise an error message.
+        /// </summary>
+        public static string? SaveRaw(BeatmapSetModel set, BeatmapDifficultyModel difficulty, string osuText)
+        {
+            if (string.IsNullOrEmpty(osuText))
+                return "The pulled .osu is empty.";
+
+            ParsedBeatmap parsed = OsuFileDecoder.Decode(new StringReader(osuText));
+            return writeOsu(set, difficulty, new UTF8Encoding(false).GetBytes(osuText), editsFromParsed(parsed));
+        }
+
+        /// <summary>Snapshots a decoded beatmap's metadata/difficulty into the saver's edit set (for SaveRaw).</summary>
+        private static BeatmapSaver.Edits editsFromParsed(ParsedBeatmap p) => new BeatmapSaver.Edits
+        {
+            Title = p.Title,
+            TitleUnicode = string.IsNullOrEmpty(p.TitleUnicode) ? p.Title : p.TitleUnicode,
+            Artist = p.Artist,
+            ArtistUnicode = string.IsNullOrEmpty(p.ArtistUnicode) ? p.Artist : p.ArtistUnicode,
+            Creator = p.Creator,
+            Version = p.Version,
+            Source = p.Source,
+            Tags = p.Tags,
+            Hp = p.HpDrainRate,
+            Cs = p.CircleSize,
+            Ar = p.EffectiveApproachRate,
+            Od = p.OverallDifficulty,
+            StackLeniency = p.StackLeniency,
+            SliderMultiplier = p.SliderMultiplier,
+            SliderTickRate = p.SliderTickRate,
+            ComboColours = p.ComboColours.ToList(),
+        };
+
+        /// <summary>Stores the given .osu bytes for the difficulty and re-points its realm entry (shared by Save/SaveRaw).</summary>
+        private static string? writeOsu(BeatmapSetModel set, BeatmapDifficultyModel difficulty, byte[] bytes, BeatmapSaver.Edits edits)
+        {
+            string oldHash = difficulty.OsuFileHash;
+            if (string.IsNullOrEmpty(oldHash))
+                return "This difficulty has no saved .osu file to update in place.";
+
             // The exact bytes we will store (UTF-8, no BOM) and the hashes lazer keys off.
-            byte[] bytes = new UTF8Encoding(false).GetBytes(patched);
             string newSha = LazerRealmFiles.Sha256Hex(bytes);
             string newMd5 = LazerRealmFiles.Md5Hex(bytes);
 

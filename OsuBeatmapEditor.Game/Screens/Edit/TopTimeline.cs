@@ -106,6 +106,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Invoked when a discussion bubble is clicked (passes its timestamp in ms).</summary>
         public Action<double>? ModBubbleClicked;
 
+        /// <summary>Invoked when the user selects an object via the timeline, so the editor can switch to the select tool.</summary>
+        public Action? ObjectSelectedHere;
+
         // --- Hitsound lanes (the expanded Clap/Whistle/Finish editor) ---
         private const int hs_whistle = 0b0010, hs_finish = 0b0100, hs_clap = 0b1000;
 
@@ -1582,6 +1585,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         nodeSelection.SelectBody(hit);
                 }
             }
+
+            // Selecting an object from the timeline switches the editor to the select tool (disarms placement).
+            if (hit >= 0)
+                ObjectSelectedHere?.Invoke();
 
             return true;
         }

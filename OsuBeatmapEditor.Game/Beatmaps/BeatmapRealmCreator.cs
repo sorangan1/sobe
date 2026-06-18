@@ -173,6 +173,103 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             });
         }
 
+        /// <summary>
+        /// Bootstraps ("clones") a collab into lazer's realm from its full .osu text plus the audio and optional
+        /// background bytes (downloaded from the collab server). Creates a one-difficulty set whose .osu is the
+        /// collab content verbatim, so the collaborator can open and edit it. Returns null on success, else an error.
+        /// </summary>
+        public static string? BootstrapCollab(string osuText, byte[] audioBytes, string audioFilename, byte[]? backgroundBytes, string? backgroundFilename)
+        {
+            if (string.IsNullOrEmpty(osuText))
+                return "The collab has no map content yet.";
+            if (audioBytes.Length == 0)
+                return "The collab is missing its audio.";
+
+            ParsedBeatmap parsed = OsuFileDecoder.Decode(new StringReader(osuText));
+
+            // The .osu references these by name; keep them in step so the bootstrapped set resolves its files.
+            string audioName = !string.IsNullOrEmpty(parsed.AudioFilename) ? parsed.AudioFilename : audioFilename;
+            string? bgName = !string.IsNullOrEmpty(parsed.BackgroundFilename) ? parsed.BackgroundFilename : backgroundFilename;
+
+            byte[] osuBytes = new UTF8Encoding(false).GetBytes(osuText);
+            string osuSha = LazerRealmFiles.Sha256Hex(osuBytes);
+            string osuMd5 = LazerRealmFiles.Md5Hex(osuBytes);
+            string audioSha = LazerRealmFiles.Sha256Hex(audioBytes);
+            string? bgSha = backgroundBytes is { Length: > 0 } ? LazerRealmFiles.Sha256Hex(backgroundBytes) : null;
+
+            string osuFilename = LazerRealmFiles.ValidFilename($"{parsed.Artist} - {parsed.Title} ({parsed.Creator}) [{parsed.Version}].osu");
+
+            return mutate(LazerStorage.FindDataDirectory(), (realm, dataDir) =>
+            {
+                dynamic? ruleset = realm.DynamicApi.Find("Ruleset", "osu");
+                if (ruleset == null)
+                    return "The osu! ruleset is missing from lazer's realm.";
+
+                // Stage every file in the content store before referencing it from the realm.
+                LazerRealmFiles.WriteToStore(dataDir, osuSha, osuBytes);
+                LazerRealmFiles.WriteToStore(dataDir, audioSha, audioBytes);
+                if (bgSha != null && backgroundBytes != null)
+                    LazerRealmFiles.WriteToStore(dataDir, bgSha, backgroundBytes);
+
+                realm.Write(() =>
+                {
+                    dynamic set = realm.DynamicApi.CreateObject("BeatmapSet", Guid.NewGuid());
+                    set.DateAdded = DateTimeOffset.Now;
+                    set.OnlineID = -1;
+                    set.DeletePending = false;
+                    set.Status = locally_modified_status;
+
+                    dynamic metadata = realm.DynamicApi.CreateObject("BeatmapMetadata"); // no primary key
+                    metadata.Title = parsed.Title;
+                    metadata.TitleUnicode = string.IsNullOrEmpty(parsed.TitleUnicode) ? parsed.Title : parsed.TitleUnicode;
+                    metadata.Artist = parsed.Artist;
+                    metadata.ArtistUnicode = string.IsNullOrEmpty(parsed.ArtistUnicode) ? parsed.Artist : parsed.ArtistUnicode;
+                    metadata.Source = parsed.Source;
+                    metadata.Tags = parsed.Tags;
+                    metadata.PreviewTime = parsed.PreviewTime;
+                    metadata.AudioFile = audioName;
+                    metadata.BackgroundFile = bgName ?? string.Empty;
+                    dynamic author = realm.DynamicApi.CreateEmbeddedObjectForProperty((IRealmObjectBase)metadata, "Author");
+                    author.Username = parsed.Creator;
+
+                    dynamic beatmap = realm.DynamicApi.CreateObject("Beatmap", Guid.NewGuid());
+                    beatmap.Ruleset = ruleset;
+                    beatmap.Metadata = metadata;
+
+                    dynamic difficulty = realm.DynamicApi.CreateEmbeddedObjectForProperty((IRealmObjectBase)beatmap, "Difficulty");
+                    difficulty.DrainRate = parsed.HpDrainRate;
+                    difficulty.CircleSize = parsed.CircleSize;
+                    difficulty.OverallDifficulty = parsed.OverallDifficulty;
+                    difficulty.ApproachRate = parsed.EffectiveApproachRate;
+                    difficulty.SliderMultiplier = (double)parsed.SliderMultiplier;
+                    difficulty.SliderTickRate = (double)parsed.SliderTickRate;
+
+                    realm.DynamicApi.CreateEmbeddedObjectForProperty((IRealmObjectBase)beatmap, "UserSettings");
+
+                    beatmap.DifficultyName = parsed.Version;
+                    beatmap.Hash = osuSha;
+                    beatmap.MD5Hash = osuMd5;
+                    beatmap.OnlineID = -1;
+                    beatmap.BeatDivisor = 4;
+                    beatmap.StarRating = 0;
+                    beatmap.Status = locally_modified_status;
+                    beatmap.LastLocalUpdate = DateTimeOffset.Now;
+
+                    set.Beatmaps.Add(beatmap);
+                    beatmap.BeatmapSet = set;
+
+                    addFileUsage(realm, set, audioSha, audioName);
+                    if (bgSha != null && !string.IsNullOrEmpty(bgName))
+                        addFileUsage(realm, set, bgSha, bgName);
+                    addFileUsage(realm, set, osuSha, osuFilename);
+
+                    set.Hash = LazerRealmFiles.ComputeSetHash(set, dataDir, osuSha);
+                });
+
+                return null;
+            });
+        }
+
         /// <summary>Creates a fresh BeatmapMetadata for a new set, with a RealmUser author.</summary>
         private static dynamic cloneNewMetadata(Realm realm, NewBeatmapRequest request, string audioFilename)
         {

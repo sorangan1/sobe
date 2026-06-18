@@ -630,6 +630,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             moddingPanel.OnFiltersChanged = refreshModdingViews;
             moddingPanel.OnSeek = SeekTo;
             topTimeline.ModBubbleClicked = SeekTo;
+            // Selecting an object in the timeline switches back to the select tool.
+            topTimeline.ObjectSelectedHere = () => applyTool(EditorTool.Selection);
         }
 
         private static Color4 toColor4(Colour4 c) => new Color4(c.R, c.G, c.B, c.A);

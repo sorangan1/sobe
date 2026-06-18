@@ -43,6 +43,28 @@ namespace OsuBeatmapEditor.Game.Online
 
         public bool IsLinked(string mapKey) => links.ContainsKey(mapKey);
 
+        /// <summary>True if any local difficulty is linked to this collab (i.e. it's already been bootstrapped).</summary>
+        public bool IsLinkedTo(Guid collabId)
+        {
+            foreach (var l in links.Values)
+            {
+                if (l.CollabId == collabId)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>The map key linked to this collab, or null if none is (it hasn't been bootstrapped here).</summary>
+        public string? KeyForCollab(Guid collabId)
+        {
+            foreach (var kv in links)
+            {
+                if (kv.Value.CollabId == collabId)
+                    return kv.Key;
+            }
+            return null;
+        }
+
         /// <summary>Links a diff to a collab at the given base revision (called when creating or cloning a collab).</summary>
         public void Link(string mapKey, Guid collabId, int baseRevision)
         {
