@@ -43,6 +43,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private bool hidden;
         private readonly bool flipText;
 
+        // When set (authorship-colour mode), tints the object by who placed it instead of the combo colour.
+        private readonly Color4? authorColour;
+
         private Container? approachCircle;
         private Container? hitRing;
         private Drawable? sliderBall;
@@ -124,7 +127,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The diagonal offset a stacked object is nudged by, per the osu! stacking convention.</summary>
         public static Vector2 StackOffsetFor(int stackHeight, float diameter) => new Vector2(stackHeight * diameter * -0.05f);
 
-        public DrawableHitObject(HitObjectModel hitObject, float diameter, double preempt, double fadeOut, double tickDistance = 0, bool hidden = false, bool flipText = false)
+        public DrawableHitObject(HitObjectModel hitObject, float diameter, double preempt, double fadeOut, double tickDistance = 0, bool hidden = false, bool flipText = false, Color4? authorColour = null)
         {
             this.hitObject = hitObject;
             this.diameter = diameter;
@@ -133,6 +136,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             this.tickDistance = tickDistance;
             this.hidden = hidden;
             this.flipText = flipText;
+            this.authorColour = authorColour;
             path = hitObject.Path;
 
             RelativeSizeAxes = Axes.Both;
@@ -195,7 +199,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void load()
         {
             Colour4 cc = editable.ComboColourFor(hitObject.ComboIndex);
-            Color4 combo = new Color4(cc.R, cc.G, cc.B, cc.A);
+            Color4 combo = authorColour ?? new Color4(cc.R, cc.G, cc.B, cc.A);
 
             if (hitObject.Kind == HitObjectKind.Slider && path is { Count: > 1 })
             {

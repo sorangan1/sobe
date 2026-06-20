@@ -16,16 +16,29 @@ using osuTK.Input;
 namespace OsuBeatmapEditor.Game.UI
 {
     /// <summary>
-    /// Lists the collabs the logged-in user belongs to (from the server) and, per row, lets them download
-    /// ("clone") one they don't have yet or pull the latest changes onto one they do. Opened from song select.
+    /// Lists the collabs the logged-in user belongs to, plus any pending invites to accept/decline. Per collab
+    /// row the user can download ("clone") one they don't have yet, pull the latest changes, open the local map,
+    /// or view its revision history. Opened from song select.
     /// </summary>
     public partial class CollabsListOverlay : VisibilityContainer
     {
         public Func<bool>? IsLoggedIn;
         public Func<Task<List<CollabSummary>>>? Fetch;
+        public Func<Task<List<CollabInvite>>>? FetchInvites;
+        public Func<CollabInvite, Task<bool>>? Accept;
+        public Func<CollabInvite, Task<bool>>? Decline;
         public Func<CollabSummary, Task<(bool ok, string message)>>? Download;
         public Func<CollabSummary, Task<(bool ok, string message)>>? Pull;
         public CollabSession? Session;
+
+        /// <summary>True when the collab's linked local map still exists (false if never downloaded or deleted).</summary>
+        public Func<CollabSummary, bool>? IsDownloaded;
+
+        /// <summary>Opens the collab's local map in the editor (only offered when it's downloaded).</summary>
+        public Action<CollabSummary>? OpenMap;
+
+        /// <summary>Opens the revision-history timeline for a collab.</summary>
+        public Action<CollabSummary>? ShowInfo;
 
         /// <summary>Invoked after a successful download/pull so the host can reload its beatmap library.</summary>
         public Action? OnLibraryChanged;
@@ -49,7 +62,7 @@ namespace OsuBeatmapEditor.Game.UI
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
-                    Size = new Vector2(540, 480),
+                    Size = new Vector2(560, 520),
                     Masking = true,
                     CornerRadius = EditorTheme.Radius.Lg,
                     Children = new Drawable[]
@@ -72,7 +85,7 @@ namespace OsuBeatmapEditor.Game.UI
                                 new BasicScrollContainer
                                 {
                                     RelativeSizeAxes = Axes.X,
-                                    Height = 340,
+                                    Height = 380,
                                     ScrollbarVisible = false,
                                     Child = list = new FillFlowContainer
                                     {
@@ -103,6 +116,9 @@ namespace OsuBeatmapEditor.Game.UI
             };
         }
 
+        /// <summary>Re-fetches invites + collabs from the server and rebuilds the list. Safe to call repeatedly.</summary>
+        public void Refresh() => refresh();
+
         private void refresh()
         {
             list.Clear();
@@ -118,41 +134,123 @@ namespace OsuBeatmapEditor.Game.UI
                 return;
 
             list.Add(message("Loading..."));
-            Fetch().ContinueWith(t =>
+
+            var invitesTask = FetchInvites?.Invoke() ?? Task.FromResult(new List<CollabInvite>());
+            var collabsTask = Fetch();
+            Task.WhenAll(invitesTask, collabsTask).ContinueWith(_ =>
             {
-                var collabs = t.IsCompletedSuccessfully ? t.Result : new List<CollabSummary>();
-                Schedule(() => populate(collabs));
+                var invites = invitesTask.IsCompletedSuccessfully ? invitesTask.Result : new List<CollabInvite>();
+                var collabs = collabsTask.IsCompletedSuccessfully ? collabsTask.Result : new List<CollabSummary>();
+                Schedule(() => populate(invites, collabs));
             });
         }
 
-        private void populate(List<CollabSummary> collabs)
+        private void populate(List<CollabInvite> invites, List<CollabSummary> collabs)
         {
             list.Clear();
 
-            if (collabs.Count == 0)
+            if (invites.Count > 0)
+            {
+                list.Add(sectionHeader("INVITES"));
+                foreach (var i in invites)
+                    list.Add(inviteRow(i));
+            }
+
+            if (collabs.Count == 0 && invites.Count == 0)
             {
                 list.Add(message("No collabs yet. Start one from a difficulty's COLLAB chip."));
                 return;
             }
 
-            foreach (var c in collabs)
-                list.Add(row(c));
+            if (collabs.Count > 0)
+            {
+                if (invites.Count > 0)
+                    list.Add(sectionHeader("YOUR COLLABS"));
+                foreach (var c in collabs)
+                    list.Add(row(c));
+            }
+        }
+
+        private Drawable inviteRow(CollabInvite invite)
+        {
+            return new Container
+            {
+                RelativeSizeAxes = Axes.X,
+                Height = 56,
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Accent, Alpha = 0.12f },
+                    new FillFlowContainer
+                    {
+                        Anchor = Anchor.CentreLeft,
+                        Origin = Anchor.CentreLeft,
+                        AutoSizeAxes = Axes.Y,
+                        RelativeSizeAxes = Axes.X,
+                        Width = 0.55f,
+                        Direction = FillDirection.Vertical,
+                        Padding = new MarginPadding { Left = EditorTheme.Spacing.Lg },
+                        Children = new Drawable[]
+                        {
+                            new SpriteText
+                            {
+                                Text = string.IsNullOrEmpty(invite.Title) ? "(untitled)" : invite.Title,
+                                Colour = EditorTheme.Colours.Text,
+                                Font = EditorTheme.Type.Body(),
+                                Truncate = true,
+                                RelativeSizeAxes = Axes.X,
+                            },
+                            new SpriteText
+                            {
+                                Text = $"invited by {invite.OwnerUsername ?? "?"}",
+                                Colour = EditorTheme.Colours.Accent,
+                                Font = EditorTheme.Type.Caption(),
+                            },
+                        },
+                    },
+                    new FillFlowContainer
+                    {
+                        Anchor = Anchor.CentreRight,
+                        Origin = Anchor.CentreRight,
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Sm, 0),
+                        Margin = new MarginPadding { Right = EditorTheme.Spacing.Lg },
+                        Children = new Drawable[]
+                        {
+                            new OsuButton("Decline", OsuColour.Surface)
+                            {
+                                Anchor = Anchor.CentreRight,
+                                Origin = Anchor.CentreRight,
+                                Size = new Vector2(100, 40),
+                                Action = () => runInvite(Decline, invite, "Invite declined."),
+                            },
+                            new OsuButton("Accept", OsuColour.Pink)
+                            {
+                                Anchor = Anchor.CentreRight,
+                                Origin = Anchor.CentreRight,
+                                Size = new Vector2(100, 40),
+                                Action = () => runInvite(Accept, invite, "Joined the collab. Download it below."),
+                            },
+                        },
+                    },
+                },
+            };
         }
 
         private Drawable row(CollabSummary c)
         {
-            bool downloaded = Session?.IsLinkedTo(c.Id) == true;
+            bool downloaded = IsDownloaded?.Invoke(c) ?? false;
             int localBase = localBaseOf(c.Id);
             bool changes = downloaded && c.HeadRevision > localBase;
 
             string actionLabel = !downloaded ? "Download" : changes ? $"Pull (rev {c.HeadRevision})" : "Up to date";
             bool actionable = !downloaded || changes;
 
-            var button = new OsuButton(actionLabel, actionable ? OsuColour.Pink : OsuColour.Surface)
+            var actionButton = new OsuButton(actionLabel, actionable ? OsuColour.Pink : OsuColour.Surface)
             {
                 Anchor = Anchor.CentreRight,
                 Origin = Anchor.CentreRight,
-                Size = new Vector2(160, 40),
+                Size = new Vector2(150, 40),
                 Action = () =>
                 {
                     if (!downloaded)
@@ -161,7 +259,63 @@ namespace OsuBeatmapEditor.Game.UI
                         run(Pull, c);
                 },
             };
-            button.Enabled.Value = actionable;
+            actionButton.Enabled.Value = actionable;
+
+            var buttons = new FillFlowContainer
+            {
+                Anchor = Anchor.CentreRight,
+                Origin = Anchor.CentreRight,
+                AutoSizeAxes = Axes.Both,
+                Direction = FillDirection.Horizontal,
+                Spacing = new Vector2(EditorTheme.Spacing.Sm, 0),
+                Margin = new MarginPadding { Right = EditorTheme.Spacing.Lg },
+                Children = new Drawable[]
+                {
+                    new OsuButton("Info", OsuColour.Surface)
+                    {
+                        Anchor = Anchor.CentreRight,
+                        Origin = Anchor.CentreRight,
+                        Size = new Vector2(64, 40),
+                        Action = () => ShowInfo?.Invoke(c),
+                    },
+                    actionButton,
+                },
+            };
+
+            // The title area opens the local map when it's downloaded (a quick way to jump into it).
+            var titleArea = new ClickableInfo(downloaded ? () => OpenMap?.Invoke(c) : null)
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.CentreLeft,
+                RelativeSizeAxes = Axes.Both,
+                Width = 0.62f,
+                Child = new FillFlowContainer
+                {
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    AutoSizeAxes = Axes.Y,
+                    RelativeSizeAxes = Axes.X,
+                    Direction = FillDirection.Vertical,
+                    Padding = new MarginPadding { Left = EditorTheme.Spacing.Lg },
+                    Children = new Drawable[]
+                    {
+                        new SpriteText
+                        {
+                            Text = string.IsNullOrEmpty(c.Title) ? "(untitled)" : c.Title,
+                            Colour = EditorTheme.Colours.Text,
+                            Font = EditorTheme.Type.Body(),
+                            Truncate = true,
+                            RelativeSizeAxes = Axes.X,
+                        },
+                        new SpriteText
+                        {
+                            Text = subtitleFor(c, downloaded, changes),
+                            Colour = changes ? EditorTheme.Colours.Warning : EditorTheme.Colours.TextMuted,
+                            Font = EditorTheme.Type.Caption(),
+                        },
+                    },
+                },
+            };
 
             return new Container
             {
@@ -170,36 +324,20 @@ namespace OsuBeatmapEditor.Game.UI
                 Children = new Drawable[]
                 {
                     new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface, Alpha = 0.5f },
-                    new FillFlowContainer
-                    {
-                        Anchor = Anchor.CentreLeft,
-                        Origin = Anchor.CentreLeft,
-                        AutoSizeAxes = Axes.Y,
-                        RelativeSizeAxes = Axes.X,
-                        Width = 0.66f,
-                        Direction = FillDirection.Vertical,
-                        Padding = new MarginPadding { Left = EditorTheme.Spacing.Lg },
-                        Children = new Drawable[]
-                        {
-                            new SpriteText
-                            {
-                                Text = string.IsNullOrEmpty(c.Title) ? "(untitled)" : c.Title,
-                                Colour = EditorTheme.Colours.Text,
-                                Font = EditorTheme.Type.Body(),
-                                Truncate = true,
-                                RelativeSizeAxes = Axes.X,
-                            },
-                            new SpriteText
-                            {
-                                Text = $"by {c.OwnerUsername ?? "?"} - revision {c.HeadRevision}" + (changes ? " - changes available" : string.Empty),
-                                Colour = changes ? EditorTheme.Colours.Warning : EditorTheme.Colours.TextMuted,
-                                Font = EditorTheme.Type.Caption(),
-                            },
-                        },
-                    },
-                    button,
+                    titleArea,
+                    buttons,
                 },
             };
+        }
+
+        private static string subtitleFor(CollabSummary c, bool downloaded, bool changes)
+        {
+            string who = $"by {c.OwnerUsername ?? "?"} - revision {c.HeadRevision}";
+            if (changes)
+                return who + " - changes available";
+            if (!downloaded)
+                return who + " - not downloaded";
+            return who + " - click to open";
         }
 
         private int localBaseOf(Guid collabId)
@@ -228,6 +366,24 @@ namespace OsuBeatmapEditor.Game.UI
             });
         }
 
+        private void runInvite(Func<CollabInvite, Task<bool>>? op, CollabInvite invite, string okMessage)
+        {
+            if (busy || op == null)
+                return;
+
+            setBusy(true);
+            op(invite).ContinueWith(t =>
+            {
+                bool ok = t.IsCompletedSuccessfully && t.Result;
+                Schedule(() =>
+                {
+                    busy = false;
+                    showStatus(ok ? okMessage : "Couldn't update the invite.", ok);
+                    refresh();
+                });
+            });
+        }
+
         private void setBusy(bool value)
         {
             busy = value;
@@ -245,6 +401,14 @@ namespace OsuBeatmapEditor.Game.UI
             statusText.Colour = ok ? EditorTheme.Colours.Success : EditorTheme.Colours.Error;
             statusText.Alpha = string.IsNullOrEmpty(msg) ? 0 : 1;
         }
+
+        private SpriteText sectionHeader(string text) => new SpriteText
+        {
+            Text = text,
+            Colour = EditorTheme.Colours.TextMuted,
+            Font = EditorTheme.Type.Caption(),
+            Margin = new MarginPadding { Top = EditorTheme.Spacing.Xs, Left = EditorTheme.Spacing.Xs },
+        };
 
         private SpriteText message(string text) => new SpriteText
         {
@@ -288,6 +452,25 @@ namespace OsuBeatmapEditor.Game.UI
         {
             protected override bool OnClick(ClickEvent e) => true;
             protected override bool OnMouseDown(MouseDownEvent e) => true;
+        }
+
+        /// <summary>A click target that blocks the overlay's dismiss-on-click and runs an optional action.</summary>
+        private partial class ClickableInfo : Container
+        {
+            private readonly Action? onClick;
+
+            public ClickableInfo(Action? onClick)
+            {
+                this.onClick = onClick;
+            }
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                onClick?.Invoke();
+                return true;
+            }
+
+            protected override bool OnHover(HoverEvent e) => onClick != null;
         }
     }
 }

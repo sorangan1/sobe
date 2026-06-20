@@ -243,6 +243,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         public void RebuildObjects() => rebuildAppearance();
 
+        /// <summary>When set, objects are tinted by who placed them (authorship mode) instead of by combo colour.</summary>
+        public Func<HitObjectModel, Color4?>? AuthorColourProvider;
+
+        /// <summary>Sets (or clears) the per-object author-colour provider and repaints every object once.</summary>
+        public void SetAuthorColouring(Func<HitObjectModel, Color4?>? provider)
+        {
+            AuthorColourProvider = provider;
+            rebuildAppearance();
+        }
+
         /// <summary>
         /// Sets the active mod-preview state. HardRock changes circle size (diameter) + AR (preempt) and flips
         /// the field, so it needs every drawable rebuilt - it just flags the rebuild and lets the caller's
@@ -1039,7 +1049,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     hitObjectContainer.Remove(existing);
 
                 double tick = o.Kind == HitObjectKind.Slider ? SliderTickDistance?.Invoke(o) ?? 0 : 0;
-                var drawable = new DrawableHitObject(o, circleDiameter, preempt, settings.ObjectFadeOut.Value, tick, modHidden, modHardRock);
+                Color4? author = AuthorColourProvider?.Invoke(o);
+                var drawable = new DrawableHitObject(o, circleDiameter, preempt, settings.ObjectFadeOut.Value, tick, modHidden, modHardRock, author);
                 drawableMap[o.Id] = drawable;
                 modelMap[o.Id] = o;
                 hitObjectContainer.Add(drawable);

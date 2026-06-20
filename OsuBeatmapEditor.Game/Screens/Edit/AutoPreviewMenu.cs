@@ -150,7 +150,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void updateSwatches(Color4 selected)
         {
             foreach (var s in swatches)
-                s.SetSelected(s.Colour.Equals(selected));
+                s.SetSelected(s.SwatchColour.Equals(selected));
         }
 
         private static SpriteText label(string text) => new SpriteText
@@ -228,12 +228,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>A small clickable colour swatch; lights a white ring when it is the active colour.</summary>
         private partial class SwatchButton : CircularContainer
         {
-            public readonly Color4 Colour;
+            public readonly Color4 SwatchColour;
             private readonly System.Action onClick;
 
             public SwatchButton(Color4 colour, System.Action onClick)
             {
-                Colour = colour;
+                SwatchColour = colour;
                 this.onClick = onClick;
 
                 Size = new Vector2(20);

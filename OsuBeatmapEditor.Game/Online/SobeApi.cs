@@ -164,6 +164,74 @@ namespace OsuBeatmapEditor.Game.Online
             return resp.IsSuccessStatusCode;
         }
 
+        /// <summary>Lists pending invites for the current user (collabs they've been added to but not accepted).</summary>
+        public static async Task<List<CollabInvite>> GetInvitesAsync(string token)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Get, "/api/collabs/invites", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new List<CollabInvite>();
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<List<CollabInvite>>(body, json) ?? new List<CollabInvite>();
+            }
+            catch
+            {
+                return new List<CollabInvite>();
+            }
+        }
+
+        /// <summary>Accepts an invite; afterwards the collab appears in the user's list and can be pulled.</summary>
+        public static async Task<bool> AcceptInviteAsync(string token, Guid collabId)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Post, $"/api/collabs/{collabId}/accept", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                return resp.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Declines (drops) a pending invite.</summary>
+        public static async Task<bool> DeclineInviteAsync(string token, Guid collabId)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Post, $"/api/collabs/{collabId}/decline", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                return resp.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Lists a collab's full revision history (metadata + object stats), newest first. Empty on failure.</summary>
+        public static async Task<List<CollabRevisionSummary>> GetRevisionsAsync(string token, Guid collabId)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Get, $"/api/collabs/{collabId}/revisions", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new List<CollabRevisionSummary>();
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<List<CollabRevisionSummary>>(body, json) ?? new List<CollabRevisionSummary>();
+            }
+            catch
+            {
+                return new List<CollabRevisionSummary>();
+            }
+        }
+
         /// <summary>Lists the collabs the current user belongs to (drives the "added" / "changes available" UI).</summary>
         public static async Task<List<CollabSummary>> GetMyCollabsAsync(string token)
         {

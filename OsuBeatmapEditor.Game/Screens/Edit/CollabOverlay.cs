@@ -36,6 +36,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Adds a collaborator by osu! username. Returns (ok, message).</summary>
         public Func<string, Task<(bool ok, string message)>>? AddMember;
 
+        /// <summary>Uploads the current map state as a new collab revision (manual push). Returns (ok, message).</summary>
+        public Func<Task<(bool ok, string message)>>? PushProgress;
+
         private Container panel = null!;
         private FillFlowContainer content = null!;
         private SpriteText statusText = null!;
@@ -131,8 +134,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             content.Add(label($"Collab active - revision {link.BaseRevision}.", EditorTheme.Colours.Text));
-            content.Add(label("Changes you save are pushed automatically.", EditorTheme.Colours.TextMuted));
-            content.Add(label("Add collaborator (osu! username):", EditorTheme.Colours.TextMuted));
+            content.Add(label("Saving keeps your work local. Upload progress to share it as a new revision.", EditorTheme.Colours.TextMuted));
+            content.Add(new OsuButton("Upload progress", OsuColour.Pink)
+            {
+                Size = new Vector2(200, 44),
+                Action = runPush,
+                Margin = new MarginPadding { Top = EditorTheme.Spacing.Xs, Bottom = EditorTheme.Spacing.Sm },
+            });
+            content.Add(label("Invite collaborator (osu! username):", EditorTheme.Colours.TextMuted));
 
             var memberBox = new BasicTextBox
             {
@@ -143,7 +152,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             memberBox.OnCommit += (_, _) => runAddMember(memberBox);
 
             content.Add(memberBox);
-            content.Add(new OsuButton("Add", OsuColour.Pink)
+            content.Add(new OsuButton("Invite", OsuColour.Pink)
             {
                 Size = new Vector2(140, 44),
                 Action = () => runAddMember(memberBox),
@@ -191,6 +200,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     showStatus(msg, ok);
                     if (ok)
                         memberBox.Text = string.Empty;
+                });
+            });
+        }
+
+        private void runPush()
+        {
+            if (busy || PushProgress == null)
+                return;
+
+            setBusy(true);
+            PushProgress().ContinueWith(t =>
+            {
+                var (ok, msg) = t.IsCompletedSuccessfully ? t.Result : (false, "Something went wrong.");
+                Schedule(() =>
+                {
+                    setBusy(false);
+                    showStatus(msg, ok);
+                    // Reflect the advanced revision number in the panel header.
+                    if (ok)
+                        rebuild();
                 });
             });
         }

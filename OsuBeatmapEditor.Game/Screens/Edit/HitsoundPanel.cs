@@ -178,7 +178,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     {
                         Anchor = Anchor.Centre,
                         Origin = Anchor.Centre,
-                        Text = text,
+                        Text = text ?? string.Empty,
                         Colour = EditorTheme.Colours.Text,
                         Font = EditorTheme.Type.Label(),
                     };

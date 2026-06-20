@@ -24,11 +24,50 @@ namespace OsuBeatmapEditor.Game.Online
 
         public string? OwnerUsername { get; set; }
 
+        /// <summary>"accepted" for a real member. Only accepted collabs are returned by <c>/mine</c>.</summary>
+        public string Status { get; set; } = "accepted";
+
         /// <summary>True when the server tip is ahead of what this user has pulled (changes available).</summary>
         public bool HasUnseen => HeadRevision > (LastSeenRevision ?? 0);
 
         /// <summary>True before the first-ever pull: the user still needs to bootstrap ("clone") the set.</summary>
         public bool NeedsBootstrap => LastSeenRevision is null;
+    }
+
+    /// <summary>A pending invite the current user has not yet accepted, from <c>/api/collabs/invites</c>.</summary>
+    public class CollabInvite
+    {
+        public Guid Id { get; set; }
+
+        public string Title { get; set; } = string.Empty;
+
+        public long OwnerId { get; set; }
+
+        public string? OwnerUsername { get; set; }
+
+        public DateTimeOffset AddedAt { get; set; }
+    }
+
+    /// <summary>One entry in a collab's revision history (metadata + object stats), from <c>/api/collabs/{id}/revisions</c>.</summary>
+    public class CollabRevisionSummary
+    {
+        public int Number { get; set; }
+
+        public long AuthorId { get; set; }
+
+        public string? AuthorUsername { get; set; }
+
+        public string? Message { get; set; }
+
+        public DateTimeOffset CreatedAt { get; set; }
+
+        public int Circles { get; set; }
+
+        public int Sliders { get; set; }
+
+        public int Spinners { get; set; }
+
+        public int TotalObjects => Circles + Sliders + Spinners;
     }
 
     /// <summary>The current tip of a collab, from <c>/api/collabs/{id}/head</c> (cheap to poll).</summary>

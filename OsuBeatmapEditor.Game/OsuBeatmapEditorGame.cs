@@ -82,6 +82,8 @@ namespace OsuBeatmapEditor.Game
                 new StatsSync(),
                 // Heartbeats online/editing presence to the backend while logged in; no visual footprint.
                 new PresenceReporter(),
+                // Polls for pending collab invites and toasts them while logged in; no visual footprint.
+                new InviteWatcher(),
                 // Behind the screens: catches scroll over empty space to drive global volume.
                 new ScrollCatcher { Scrolled = volume.AdjustMaster },
                 // Wraps the screens so any IHasTooltip drawable (control-point handles, toolbar chips, ...) can

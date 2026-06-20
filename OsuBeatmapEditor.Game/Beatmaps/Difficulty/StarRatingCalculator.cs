@@ -203,7 +203,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps.Difficulty
         {
             double duration = ho.Duration;
             double spanDuration = duration / d.Slides;
-            if (spanDuration <= 0)
+            if (spanDuration <= 0 || ho.Path is not { Count: >= 2 })
                 return;
 
             double pathLength = SliderGeometry.PathLength(ho.Path);
@@ -285,11 +285,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps.Difficulty
             var result = new List<NestedObject>();
             int spanCount = d.Slides;
 
+            // The caller only generates nested objects for sliders with a real path; assert it for flow analysis.
+            var path = ho.Path ?? (IReadOnlyList<Vector2>)Array.Empty<Vector2>();
+
             double length = Math.Min(100000, totalDistance);
             tickDistance = Math.Clamp(tickDistance, 0, length);
             double minDistanceFromEnd = velocity * 10;
 
-            Vector2 posAt(double progress) => d.StackedPosition + relativePositionAt(ho.Path, progress);
+            Vector2 posAt(double progress) => d.StackedPosition + relativePositionAt(path, progress);
 
             // Head.
             result.Add(new NestedObject { Time = ho.StartTime, StackedPosition = d.StackedPosition });

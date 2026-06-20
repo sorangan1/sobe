@@ -52,6 +52,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private ConfirmOverlay confirmOverlay = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
         private CollabsListOverlay collabsOverlay = null!;
+        private CollabRevisionsOverlay revisionsOverlay = null!;
         private DownloadMapsOverlay downloadOverlay = null!;
         private UpdateBanner updateBanner = null!;
         private UpdatePromptOverlay updatePrompt = null!;
@@ -296,8 +297,21 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Pull = c => auth?.Token is string tok && collabs != null
                             ? Online.CollabSync.PullAsync(tok, c, collabs)
                             : Task.FromResult((false, "Not logged in.")),
+                        FetchInvites = () => auth?.Token is string tok
+                            ? Online.SobeApi.GetInvitesAsync(tok)
+                            : Task.FromResult(new List<Online.CollabInvite>()),
+                        Accept = i => auth?.Token is string tok
+                            ? Online.SobeApi.AcceptInviteAsync(tok, i.Id)
+                            : Task.FromResult(false),
+                        Decline = i => auth?.Token is string tok
+                            ? Online.SobeApi.DeclineInviteAsync(tok, i.Id)
+                            : Task.FromResult(false),
+                        IsDownloaded = collabIsDownloaded,
+                        OpenMap = openCollabMap,
+                        ShowInfo = showCollabRevisions,
                         OnLibraryChanged = () => reloadBeatmaps(),
                     },
+                    revisionsOverlay = new CollabRevisionsOverlay(),
                     downloadOverlay = new DownloadMapsOverlay
                     {
                         OpenUrl = url => gameHost.OpenUrlExternally(url),
@@ -704,6 +718,67 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
             pushedEditor = new EditorScreen(set, diff);
             this.Push(pushedEditor);
+        }
+
+        // --- Collab list helpers (downloaded-state, open, revision history) ---
+
+        /// <summary>Resolves a collab to its local set+difficulty via the stored link key, against the loaded library.
+        /// Returns false when the collab isn't linked here or its map has since been deleted.</summary>
+        private bool tryResolveCollabMap(Online.CollabSummary c, out BeatmapSetModel? set, out BeatmapDifficultyModel? diff)
+        {
+            set = null;
+            diff = null;
+
+            string? key = collabs?.KeyForCollab(c.Id);
+            if (key == null)
+                return false;
+
+            string[] parts = key.Split('|');
+            if (parts.Length < 4)
+                return false;
+
+            foreach (var s in sets)
+            {
+                if (s.Artist != parts[0] || s.Title != parts[1] || s.Author != parts[2])
+                    continue;
+
+                foreach (var d in s.Difficulties)
+                {
+                    if (d.DifficultyName == parts[3])
+                    {
+                        set = s;
+                        diff = d;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>A collab counts as downloaded only if its linked local map still exists (handles a deleted map).</summary>
+        private bool collabIsDownloaded(Online.CollabSummary c) => tryResolveCollabMap(c, out _, out _);
+
+        /// <summary>Opens the collab's local difficulty in the editor.</summary>
+        private void openCollabMap(Online.CollabSummary c)
+        {
+            if (!tryResolveCollabMap(c, out var set, out var diff) || set == null || diff == null)
+            {
+                toasts?.Push("That map isn't downloaded anymore - download it again.");
+                return;
+            }
+
+            collabsOverlay.Hide();
+            openEditor(set, diff);
+        }
+
+        /// <summary>Opens the revision-history timeline for a collab.</summary>
+        private void showCollabRevisions(Online.CollabSummary c)
+        {
+            string title = string.IsNullOrEmpty(c.Title) ? "(untitled)" : c.Title;
+            revisionsOverlay.Show(title, () => auth?.Token is string tok
+                ? Online.SobeApi.GetRevisionsAsync(tok, c.Id)
+                : Task.FromResult(new List<Online.CollabRevisionSummary>()));
         }
 
         private void onBeatmapCreated(NewBeatmapRequest request)

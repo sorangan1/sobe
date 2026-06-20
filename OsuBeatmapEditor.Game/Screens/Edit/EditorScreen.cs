@@ -229,11 +229,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private PlaybackControl playbackControl = null!;
 
         private CollabOverlay collabOverlay = null!;
+        private UI.SliderToStreamOverlay sliderToStreamOverlay = null!;
         private UI.PatternGalleryOverlay patternGallery = null!;
         private SavePatternButton savePatternButton = null!;
 
         /// <summary>True while the open difficulty is linked to a server collab; lights the COLLAB chip.</summary>
         private readonly BindableBool collabLinked = new BindableBool();
+
+        /// <summary>True while authorship-colour mode is on (objects tinted by who placed them).</summary>
+        private readonly BindableBool authorshipOn = new BindableBool();
+        private AuthorsButton authorsButton = null!;
+        private FillFlowContainer authorLegend = null!;
+        private Online.CollabAuthorship? authorship;
+        private readonly System.Collections.Generic.Dictionary<long, Color4> authorColours = new System.Collections.Generic.Dictionary<long, Color4>();
+        private bool authorshipBusy;
+
+        // Distinct palette for authorship colouring, assigned per author in contribution order.
+        private static readonly Color4[] author_palette =
+        {
+            new Color4(0.36f, 0.72f, 1f, 1f),    // blue
+            new Color4(1f, 0.46f, 0.46f, 1f),    // red
+            new Color4(0.55f, 0.86f, 0.40f, 1f), // green
+            new Color4(1f, 0.78f, 0.30f, 1f),    // amber
+            new Color4(0.78f, 0.55f, 1f, 1f),    // purple
+            new Color4(0.40f, 0.86f, 0.80f, 1f), // teal
+            new Color4(1f, 0.60f, 0.85f, 1f),    // pink
+            new Color4(0.85f, 0.85f, 0.55f, 1f), // olive
+        };
 
         private GameHost host = null!;
         private ITrackStore? trackStore;
@@ -332,6 +354,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Padding = new MarginPadding { Top = top_bar_height, Bottom = bottom_bar_height },
                     Child = playfield = new Playfield(),
                 },
+                // Authorship legend (who-placed-what colours); shown only while authorship mode is on.
+                authorLegend = new FillFlowContainer
+                {
+                    Anchor = Anchor.BottomLeft,
+                    Origin = Anchor.BottomLeft,
+                    Margin = new MarginPadding { Left = timeline_side_width + 12, Bottom = bottom_bar_height + 12 },
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Vertical,
+                    Spacing = new Vector2(0, 3),
+                    Alpha = 0,
+                },
                 // The top bar is a fixed block: a left panel (tool buttons), the timeline, and the settings panel
                 // (divisor/BPM/SV) on the right. The timeline is inset by the SAME width on both sides so its centre
                 // playhead (the pink line) stays at the true screen centre, and so it sits flush against both panels.
@@ -381,6 +414,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     {
                                         new HitsoundModeButton(hitsoundMode),
                                         new CollabButton(collabLinked, () => collabOverlay.ToggleVisibility(), "Collab - co-map this difficulty with someone (\"git for maps\")"),
+                                        authorsButton = new AuthorsButton(authorshipOn, toggleAuthorship, "Authors - colour objects by who placed them") { Alpha = 0 },
                                     },
                                 },
                             },
@@ -600,6 +634,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     CurrentLink = () => collabs?.Get(statisticsKey),
                     StartCollab = startCollabAsync,
                     AddMember = addCollabMemberAsync,
+                    PushProgress = pushCollabProgressAsync,
+                },
+                sliderToStreamOverlay = new UI.SliderToStreamOverlay
+                {
+                    Preview = refreshStreamPreview,
+                    Confirmed = confirmStreamPreview,
+                    Cancelled = cancelStreamPreview,
                 },
                 patternGallery = new UI.PatternGalleryOverlay
                 {
@@ -613,6 +654,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             playfield.SnappedTimeSource = () => snapTime(CurrentTime);
             playfield.PlacementSnap = SnapPlacement;
             playfield.SliderTickDistance = sliderTickDistance;
+
+            // The Authors chip only makes sense for a collab; show it when linked, and drop authorship mode if
+            // the link goes away.
+            collabLinked.BindValueChanged(v =>
+            {
+                authorsButton.Alpha = v.NewValue ? 1 : 0;
+                if (!v.NewValue && authorshipOn.Value)
+                    toggleAuthorship();
+            }, true);
 
             // Hide the left tool/hitsound column while the lanes editor is open (it owns hitsound editing now),
             // and show the lazer-style bank bar instead. Modding Mode also hides this left chrome, so the
@@ -2287,13 +2337,22 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return heights;
         }
 
+        /// <summary>The original slider being converted while the slider-to-stream panel is open (preview state).</summary>
+        private HitObjectModel? streamOriginal;
+
+        /// <summary>The ids of the live-preview circles currently standing in for <see cref="streamOriginal"/>.</summary>
+        private readonly List<int> streamPreviewIds = new List<int>();
+
         /// <summary>
-        /// Converts the single selected slider into a stream of circles, one per beat-snap division along its
-        /// duration, positioned at the matching point on the slider path (honouring repeats). The first circle
-        /// inherits the slider's new-combo flag. Mirrors osu!stable's "convert slider to stream".
+        /// Opens the slider-to-stream panel for the single selected slider, seeding it with the beat-snap tick
+        /// count (what osu!stable's "convert slider to stream" would use). While the panel is open the stream is
+        /// previewed live on the playfield via <see cref="refreshStreamPreview"/>; confirm/cancel commit or undo it.
         /// </summary>
         private void convertSelectedSliderToStream()
         {
+            if (streamOriginal != null)
+                return; // already converting - ignore re-triggers
+
             if (selection.Selected.Count != 1)
                 return;
 
@@ -2307,46 +2366,178 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             double step = beatLengthAt(slider.StartTime) / beatDivisor.Value.Value;
-            if (step <= 0)
+            int defaultCount = step > 0 ? Math.Clamp((int)Math.Round(slider.Duration / step) + 1, 2, 128) : 8;
+
+            streamOriginal = slider;
+            sliderToStreamOverlay.Show(defaultCount); // fires Preview -> refreshStreamPreview builds the live stream
+        }
+
+        /// <summary>Rebuilds the live preview circles for the current panel values (no undo entry).</summary>
+        private void refreshStreamPreview(int count, float curve)
+        {
+            if (streamOriginal == null)
                 return;
 
-            int count = Math.Clamp((int)Math.Round(slider.Duration / step), 1, 256);
-            bool firstNewCombo = HitObjectLineEditor.HasNewCombo(slider.RawLine);
-            double spanDuration = slider.Duration / Math.Max(1, slider.Slides);
+            var original = streamOriginal.Value;
+            parsed.HitObjects.RemoveAll(o => streamPreviewIds.Contains(o.Id) || o.Id == original.Id);
+            streamPreviewIds.Clear();
+
+            foreach (var circle in buildStreamCircles(original, count, curve))
+            {
+                parsed.HitObjects.Add(circle);
+                streamPreviewIds.Add(circle.Id);
+            }
+
+            parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            selection.SetRange(streamPreviewIds);
+            afterEdit();
+        }
+
+        /// <summary>Commits the preview into a single undo-able conversion (Convert button / Enter).</summary>
+        private void confirmStreamPreview(int count, float curve)
+        {
+            if (streamOriginal == null)
+                return;
+
+            var original = streamOriginal.Value;
+
+            // Restore the original slider first, then run the conversion through pushUndo so a single Ctrl+Z
+            // brings the slider back (the preview mutations themselves never touched the undo stack).
+            parsed.HitObjects.RemoveAll(o => streamPreviewIds.Contains(o.Id));
+            streamPreviewIds.Clear();
+            if (parsed.HitObjects.All(o => o.Id != original.Id))
+                parsed.HitObjects.Add(original);
+            streamOriginal = null;
+
+            applyStreamConversion(original, count, curve);
+        }
+
+        /// <summary>Drops the preview and restores the original slider (Cancel button / Escape / close).</summary>
+        private void cancelStreamPreview()
+        {
+            if (streamOriginal == null)
+                return;
+
+            var original = streamOriginal.Value;
+            parsed.HitObjects.RemoveAll(o => streamPreviewIds.Contains(o.Id));
+            streamPreviewIds.Clear();
+            if (parsed.HitObjects.All(o => o.Id != original.Id))
+                parsed.HitObjects.Add(original);
+            streamOriginal = null;
+
+            parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
+            selection.SetRange(new[] { original.Id });
+            afterEdit();
+        }
+
+        /// <summary>Replaces a slider with a stream of circles as a single undo-able edit.</summary>
+        private void applyStreamConversion(HitObjectModel slider, int count, float curve)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == slider.Id);
+            if (idx < 0)
+                return;
 
             pushUndo();
             parsed.HitObjects.RemoveAt(idx);
             selection.Clear();
 
-            int newId = nextId();
             var added = new List<int>();
-
-            for (int i = 0; i <= count; i++)
+            foreach (var circle in buildStreamCircles(slider, count, curve))
             {
-                double elapsed = i * step;
-                if (elapsed > slider.Duration + 1)
-                    break;
-
-                // Map elapsed time to a position on the path, bouncing back and forth across repeats.
-                int span = spanDuration > 0 ? (int)(elapsed / spanDuration) : 0;
-                double within = spanDuration > 0 ? (elapsed - span * spanDuration) / spanDuration : 0;
-                double frac = span % 2 == 0 ? within : 1 - within;
-                Vector2 pos = samplePath(slider.Path, Math.Clamp(frac, 0, 1));
-
-                int px = Math.Clamp((int)Math.Round(pos.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH);
-                int py = Math.Clamp((int)Math.Round(pos.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT);
-                int t = (int)Math.Round(slider.StartTime + elapsed);
-                int type = i == 0 && firstNewCombo ? 0b101 : 0b001;
-                string raw = $"{px},{py},{t},{type},0,0:0:0:0:";
-
-                parsed.HitObjects.Add(new HitObjectModel(px, py, t, HitObjectKind.Circle, null, RawLine: raw, Id: newId));
-                added.Add(newId);
-                newId++;
+                parsed.HitObjects.Add(circle);
+                added.Add(circle.Id);
             }
 
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
             afterEdit();
             selection.SetRange(added);
+        }
+
+        /// <summary>
+        /// Builds the stream circles for a slider. The circles are placed on the beat-snap <em>tick grid</em> in
+        /// time (one per tick, starting at the slider's start), so adding more circles simply extends the stream
+        /// onto the following ticks - even past where the original slider ended. <paramref name="curve"/> only
+        /// ramps the <em>playfield position</em> along the path (a purely visual acceleration that never moves a
+        /// circle off its tick) - see <see cref="streamSpacing"/>. The first circle inherits the slider's
+        /// new-combo flag. Pure (no mutation).
+        /// </summary>
+        private List<HitObjectModel> buildStreamCircles(HitObjectModel slider, int count, float curve)
+        {
+            if (slider.Path is not { Count: >= 2 })
+                return new List<HitObjectModel>();
+
+            count = Math.Clamp(count, 1, 256);
+            bool firstNewCombo = HitObjectLineEditor.HasNewCombo(slider.RawLine);
+            int slides = Math.Max(1, slider.Slides);
+
+            // Time step between circles = one beat-snap tick (constant). This is what fixes the circles to the
+            // timeline grid and lets the stream run past the original slider's duration when count is raised.
+            double step = beatLengthAt(slider.StartTime) / beatDivisor.Value.Value;
+            if (step <= 0)
+                step = count > 1 ? slider.Duration / (count - 1) : slider.Duration;
+
+            // Position-only spacing curve: where along the path each circle sits (visual acceleration).
+            double[] u = streamSpacing(count, curve);
+
+            var result = new List<HitObjectModel>(count);
+            int newId = nextId();
+
+            for (int i = 0; i < count; i++)
+            {
+                // Map the (warped) progress onto the path, bouncing back and forth across repeats.
+                double travel = u[i] * slides;
+                int span = Math.Min((int)travel, slides - 1);
+                double within = travel - span;
+                double frac = span % 2 == 0 ? within : 1 - within;
+                Vector2 pos = samplePath(slider.Path, Math.Clamp(frac, 0, 1));
+
+                int px = Math.Clamp((int)Math.Round(pos.X), 0, (int)ParsedBeatmap.PLAYFIELD_WIDTH);
+                int py = Math.Clamp((int)Math.Round(pos.Y), 0, (int)ParsedBeatmap.PLAYFIELD_HEIGHT);
+                // Time is the even tick grid - the curve must NOT affect this, or the circles fall off their ticks.
+                int t = (int)Math.Round(slider.StartTime + i * step);
+                int type = i == 0 && firstNewCombo ? 0b101 : 0b001;
+                string raw = $"{px},{py},{t},{type},0,0:0:0:0:";
+
+                result.Add(new HitObjectModel(px, py, t, HitObjectKind.Circle, null, RawLine: raw, Id: newId));
+                newId++;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Returns the normalised positions (0..1) of <paramref name="count"/> stream circles for a spacing
+        /// <paramref name="curve"/> in [-1,1]. The gap between consecutive circles changes <em>linearly</em>
+        /// from the first gap to the last (constant acceleration), so the ramp is smooth and progressive rather
+        /// than bunched at one end: curve&gt;0 packs the circles toward the start, curve&lt;0 toward the end,
+        /// 0 = even spacing.
+        /// </summary>
+        private static double[] streamSpacing(int count, float curve)
+        {
+            var pos = new double[Math.Max(count, 1)];
+            if (count <= 1)
+                return pos;
+
+            int gaps = count - 1;
+            // ratio = last gap / first gap. curve in [-1,1] -> ratio in [1/5, 5], applied as a linear ramp.
+            double ratio = Math.Pow(5, curve);
+
+            double total = 0;
+            for (int i = 0; i < gaps; i++)
+            {
+                double f = gaps > 1 ? (double)i / (gaps - 1) : 0;
+                total += 1 + (ratio - 1) * f;
+            }
+
+            double acc = 0;
+            for (int j = 1; j < count; j++)
+            {
+                double f = gaps > 1 ? (double)(j - 1) / (gaps - 1) : 0;
+                acc += 1 + (ratio - 1) * f;
+                pos[j] = acc / total;
+            }
+
+            return pos;
         }
 
         /// <summary>Samples a polyline at a fraction (0..1) of its total length.</summary>
@@ -3987,6 +4178,123 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             });
         }
 
+        // --- Authorship colouring (who placed what, from the collab's revision history) ---
+
+        private void toggleAuthorship()
+        {
+            if (authorshipBusy)
+                return;
+
+            if (authorshipOn.Value)
+            {
+                // Turn off: drop the tint and the legend.
+                authorshipOn.Value = false;
+                authorship = null;
+                authorColours.Clear();
+                playfield.SetAuthorColouring(null);
+                updateAuthorLegend();
+                return;
+            }
+
+            var link = collabs?.Get(statisticsKey);
+            string? token = auth?.Token;
+            if (link == null || token == null)
+            {
+                toasts?.Push("Authorship needs this map linked to a collab.");
+                return;
+            }
+
+            authorshipBusy = true;
+            toasts?.Push("Loading authorship...");
+            Guid collabId = link.CollabId;
+            Task.Run(async () =>
+            {
+                var built = await Online.CollabAuthorship.BuildAsync(token, collabId).ConfigureAwait(false);
+                Schedule(() =>
+                {
+                    authorshipBusy = false;
+                    if (built == null)
+                    {
+                        toasts?.Push("No revision history to colour by yet.");
+                        return;
+                    }
+
+                    authorship = built;
+                    assignAuthorColours();
+                    authorshipOn.Value = true;
+                    playfield.SetAuthorColouring(authorColourForObject);
+                    updateAuthorLegend();
+                });
+            });
+        }
+
+        private Color4? authorColourForObject(HitObjectModel o)
+        {
+            if (authorship?.AuthorAt(o.StartTime) is long id && authorColours.TryGetValue(id, out var c))
+                return c;
+            return null; // unknown placement -> fall back to the combo colour
+        }
+
+        private void assignAuthorColours()
+        {
+            authorColours.Clear();
+            if (authorship == null)
+                return;
+
+            int i = 0;
+            foreach (var (id, _) in authorship.Authors)
+                authorColours[id] = author_palette[i++ % author_palette.Length];
+        }
+
+        private void updateAuthorLegend()
+        {
+            authorLegend.Clear();
+
+            if (!authorshipOn.Value || authorship == null)
+            {
+                authorLegend.FadeOut(EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                return;
+            }
+
+            authorLegend.Add(new SpriteText
+            {
+                Text = "PLACED BY",
+                Colour = EditorTheme.Colours.TextMuted,
+                Font = EditorTheme.Type.Caption(),
+            });
+
+            foreach (var (id, name) in authorship.Authors)
+            {
+                var colour = authorColours.TryGetValue(id, out var c) ? c : Color4.White;
+                authorLegend.Add(new FillFlowContainer
+                {
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new Vector2(6, 0),
+                    Children = new Drawable[]
+                    {
+                        new Circle
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Size = new Vector2(10),
+                            Colour = colour,
+                        },
+                        new SpriteText
+                        {
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Text = name,
+                            Colour = EditorTheme.Colours.Text,
+                            Font = EditorTheme.Type.Caption(),
+                        },
+                    },
+                });
+            }
+
+            authorLegend.FadeIn(EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+        }
+
         protected override void LoadComplete()
         {
             base.LoadComplete();
@@ -4008,6 +4316,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             // The platform "command" modifier: Cmd on macOS, Ctrl elsewhere (matching osu!lazer).
             bool cmd = Shortcut.CommandPressed(e);
+
+            // While the (non-intrusive) slider-to-stream preview is live, Enter commits and Escape cancels;
+            // every other key is swallowed so an edit can't corrupt the transient preview state.
+            if (streamOriginal != null)
+            {
+                if (e.Key is Key.Enter or Key.KeypadEnter)
+                    sliderToStreamOverlay.Commit();
+                else if (e.Key == Key.Escape)
+                    sliderToStreamOverlay.Hide();
+                return true;
+            }
 
             // Overlay toggles are handled first so the same key both opens AND closes its menu - and pressing
             // another menu's key while one is open switches straight to it.
@@ -4374,51 +4693,46 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 editable.IsDirty.Value = false;
                 DidSave = true;
                 toasts?.Push("Beatmap saved", EditorTheme.Colours.Success);
-                tryPushCollab(edits);
+
+                // Saving no longer auto-pushes a collab revision - the mapper uploads progress on demand from the
+                // COLLAB panel, so every Ctrl+S doesn't spawn a new revision. Nudge them once if it's a collab.
+                if (collabs?.Get(statisticsKey) != null)
+                    toasts?.Push("Collab: use \"Upload progress\" to share this", EditorTheme.Colours.Info);
             }
             return ok;
         }
 
         /// <summary>
-        /// If the saved diff is a collab and we're logged in, push the new .osu as a fast-forward revision.
-        /// Fire-and-forget: a 409 means a partner pushed first, so the user is told to pull before saving again.
+        /// Uploads the current map state to the collab as a new fast-forward revision (driven on demand by the
+        /// "Upload progress" button, not by every save). A 409 means a partner pushed first, so the user must
+        /// pull before uploading again. Returns (ok, message) for the COLLAB panel.
         /// </summary>
-        private void tryPushCollab(BeatmapSaver.Edits edits)
+        private async Task<(bool ok, string message)> pushCollabProgressAsync()
         {
             var link = collabs?.Get(statisticsKey);
             string? token = auth?.Token;
             if (link == null || token == null)
-                return;
+                return (false, "This difficulty isn't a collab.");
 
-            string? osu = BeatmapSaver.BuildPatchedOsu(set, difficulty, parsed, edits);
-            if (osu == null)
-                return;
-
+            // Build the .osu from the current in-memory state (what the mapper sees), off the update thread.
+            var edits = buildEdits();
             Guid collabId = link.CollabId;
             int baseRevision = link.BaseRevision;
             string key = statisticsKey;
 
-            Task.Run(async () =>
+            string? osu = await Task.Run(() => BeatmapSaver.BuildPatchedOsu(set, difficulty, parsed, edits)).ConfigureAwait(false);
+            if (osu == null)
+                return (false, "Couldn't build the map.");
+
+            var result = await Online.SobeApi.PushRevisionAsync(token, collabId, baseRevision, osu, null).ConfigureAwait(false);
+            if (result.Ok)
             {
-                var result = await Online.SobeApi.PushRevisionAsync(token, collabId, baseRevision, osu, null).ConfigureAwait(false);
-                Schedule(() =>
-                {
-                    if (result.Ok)
-                    {
-                        collabs?.SetBaseRevision(key, result.Number);
-                        if (!result.NoOp)
-                            toasts?.Push($"Pushed to collab (rev {result.Number})", EditorTheme.Colours.Success);
-                    }
-                    else if (result.Conflict)
-                    {
-                        toasts?.Push("Collab: your partner pushed first - pull their changes before saving again", EditorTheme.Colours.Warning);
-                    }
-                    else
-                    {
-                        toasts?.Push("Collab push failed", EditorTheme.Colours.Error);
-                    }
-                });
-            });
+                Schedule(() => collabs?.SetBaseRevision(key, result.Number));
+                return (true, result.NoOp ? "Already up to date - nothing to upload." : $"Uploaded progress (revision {result.Number}).");
+            }
+            if (result.Conflict)
+                return (false, "Your partner pushed first - pull their changes before uploading.");
+            return (false, "Upload failed.");
         }
 
         /// <summary>
@@ -4475,7 +4789,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return (false, "This difficulty isn't a collab.");
 
             bool ok = await Online.SobeApi.AddMemberAsync(token, link.CollabId, username).ConfigureAwait(false);
-            return ok ? (true, $"Added {username}.") : (false, "No sobe user with that username.");
+            return ok ? (true, $"Invited {username}. They'll join once they accept.") : (false, "No sobe user with that username.");
         }
 
         private async Task uploadCollabAssetAsync(string token, Guid collabId, string kind, string? filename)
