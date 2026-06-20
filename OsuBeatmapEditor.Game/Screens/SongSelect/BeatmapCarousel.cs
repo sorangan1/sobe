@@ -56,7 +56,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
         // The panels occupy a fixed-width strip on the right; the scroll itself spans the whole screen,
         // so clicking, dragging and scrolling work anywhere - not just over the cards.
-        private const float panel_strip_width = 556;
+        public const float PANEL_STRIP_WIDTH = 556;
+        private const float panel_strip_width = PANEL_STRIP_WIDTH;
         private const float panel_strip_margin_right = 24;
 
         private readonly CarouselScrollContainer scroll;

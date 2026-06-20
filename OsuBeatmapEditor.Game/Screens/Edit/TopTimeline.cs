@@ -104,6 +104,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container previewLayer = null!;
         private readonly List<Box> gridPool = new List<Box>();
 
+        // Shift-hover "add SV point" affordance: a gray pill below the nearest tick in the timing-pill band.
+        private Container svHoverPill = null!;
+
         // Modding-mode bubbles: the currently-shown (already-filtered) discussions with an in-song timestamp.
         private IReadOnlyList<Online.ModdingDiscussion> modDiscussions = System.Array.Empty<Online.ModdingDiscussion>();
         /// <summary>Invoked when a discussion bubble is clicked (passes its timestamp in ms).</summary>
@@ -246,6 +249,30 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             buildObjects();
 
+            // The gray "+ SV" hover pill rides on top of the scrolling content (above the grid + objects) so it
+            // tracks the ticks. Hidden until the user Shift-hovers the timing-pill band.
+            content.Add(svHoverPill = new CircularContainer
+            {
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.TopCentre,
+                Y = baseline_y + 5,
+                AutoSizeAxes = Axes.Both,
+                Masking = true,
+                CornerRadius = 7f,
+                Alpha = 0,
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = new Color4(0.62f, 0.62f, 0.66f, 1f) },
+                    new SpriteText
+                    {
+                        Padding = new MarginPadding { Horizontal = 6f, Vertical = 1f },
+                        Text = "+ SV",
+                        Colour = OsuColour.BackgroundDark,
+                        Font = FontUsage.Default.With(size: 11, weight: "Bold"),
+                    },
+                },
+            });
+
             // Reflect selection changes from any source (here or the playfield).
             selection.Changed += refreshSelectionVisuals;
             nodeSelection.Changed += refreshSelectionVisuals;
@@ -256,13 +283,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             settings.BookmarkColour.ValueChanged += _ => rebuildTimingPoints();
             // Recolour the timeline objects live when the combo palette/toggle/map colours change.
             editable.ColoursChanged += buildObjects;
-            // Toggling the hitsound editor adds/removes the per-object lane cells: rebuild the visible set.
+            // Toggling the hitsound editor adds/removes just the per-object lane cells (not a full rebuild - that
+            // churned every drawable and made closing the panel hitch on GC after a long session).
             hitsoundMode.BindValueChanged(_ =>
             {
                 // Opening the lanes editor eases the zoom in (via targetPixelsPerMs) if needed so cells never overlap.
                 if (hitsoundMode.Value)
                     targetPixelsPerMs = Math.Max(targetPixelsPerMs, minPixelsPerMs());
-                buildObjects();
+                refreshLaneCells();
             });
 
             // A finer divisor raises the minimum zoom (cells sit closer); ease the zoom in if we'd now overlap.
@@ -302,6 +330,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             updateLaneLayout();
             updateVisibleObjects();
             updateVisibleTimingPoints();
+            updateSvHoverPill();
 
             // While a rubber-band box is held, keep extending the selection as the timeline scrolls under a
             // stationary cursor during playback (otherwise it only updates when the mouse actually moves).
@@ -603,6 +632,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             objectCells[o.Id] = cells;
+        }
+
+        /// <summary>
+        /// Adds or removes just the per-object hitsound lane cells when the lanes editor is toggled, instead of the
+        /// full <see cref="buildObjects"/> teardown/rebuild. That rebuild re-allocated every blueprint + break + mod
+        /// + timing drawable on each toggle; over a long session the garbage occasionally tipped into a GC pause, so
+        /// closing the panel would hitch. This touches only the cells (O(visible objects)). When opening with a zoom
+        /// change, the zoom-ease's <see cref="buildObjects"/> still rebuilds cells too - harmless (it clears first).
+        /// </summary>
+        private void refreshLaneCells()
+        {
+            objectCells.Clear();
+            for (int i = 0; i < 3; i++)
+                laneCellContainers[i]?.Clear();
+
+            if (!hitsoundMode.Value)
+                return;
+
+            foreach (int id in realizedIds)
+                if (objectIndexById.TryGetValue(id, out int idx))
+                    realizeCells(beatmap.HitObjects[idx]);
         }
 
         // --- Hitsound lanes ---
@@ -919,22 +969,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return o.NormalBank;
         }
 
-        /// <summary>Left-click on a cell: creates the hitsound (turns the addition on). No-op if already on.</summary>
-        private void createCellAt(double time, int lane)
+        /// <summary>Left-click on a cell: toggles that lane's addition off -> on -> off for the column under the cursor.</summary>
+        private void toggleCellAt(double time, int lane)
         {
             if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
                 return;
 
             int bit = hitsoundLaneDefs[lane].Bit;
-            if (!cellOn(objectId, nodeIndex, bit))
-            {
-                actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: true, pushUndoStep: true);
-                spawnCellFeedback(columnTime, lane, hitsoundLaneDefs[lane].Colour, positive: true);
-            }
+            bool on = cellOn(objectId, nodeIndex, bit);
+            actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: !on, pushUndoStep: true);
+            spawnCellFeedback(columnTime, lane, on ? EditorTheme.Colours.Error : hitsoundLaneDefs[lane].Colour, positive: !on);
         }
 
         /// <summary>
-        /// Shift+left-click on a cell: cycles the note's NORMAL bank Auto -> Normal -> Soft -> Drum -> Auto (the
+        /// Shift+right-click on a cell: cycles the note's NORMAL bank Auto -> Normal -> Soft -> Drum -> Auto (the
         /// addition bank is set separately in the bank bar). If the cell is off, it's created first.
         /// </summary>
         private void cycleBankAt(double time, int lane)
@@ -959,20 +1007,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             };
             actions.SetHitsoundBank(objectId, nodeIndex, addition: false, next);
             spawnCellFeedback(columnTime, lane, hitsoundLaneDefs[lane].Colour, positive: true);
-        }
-
-        /// <summary>Right-click on a cell: deletes (clears) that lane's addition for the column under the cursor.</summary>
-        private void deleteCellAt(double time, int lane)
-        {
-            if (!tryColumnAt(time, out int objectId, out int nodeIndex, out double columnTime))
-                return;
-
-            int bit = hitsoundLaneDefs[lane].Bit;
-            if (cellOn(objectId, nodeIndex, bit))
-            {
-                actions.SetHitsoundAddition(objectId, nodeIndex, bit, on: false, pushUndoStep: true);
-                spawnCellFeedback(columnTime, lane, EditorTheme.Colours.Error, positive: false);
-            }
         }
 
         /// <summary>Applies the active paint stroke's on/off to the column under the cursor (once per column).</summary>
@@ -1511,9 +1545,67 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The time (ms) under a screen-space position, in beatmap time.</summary>
         private double timeAt(Vector2 screenPosition) => (ToLocalSpace(screenPosition).X - content.X) / pixelsPerMs;
 
+        /// <summary>Whether a screen position is inside the lower timing-pill band (below the baseline, above any lanes).</summary>
+        private bool timingBandAt(Vector2 screenPosition)
+        {
+            float y = ToLocalSpace(screenPosition).Y;
+            return y >= baseline_y && y <= HEIGHT;
+        }
+
+        /// <summary>The beat tick (at the current snap divisor) nearest the given time; false if there's no timing.</summary>
+        private bool nearestTick(double time, out double tickTime)
+        {
+            tickTime = 0;
+            if (beatmap.BeatPoints.Count == 0)
+                return false;
+
+            var point = beatmap.BeatPoints[0];
+            foreach (var bp in beatmap.BeatPoints)
+            {
+                if (bp.Time <= time)
+                    point = bp;
+                else
+                    break;
+            }
+
+            double step = point.BeatLength / divisor;
+            if (step <= 0)
+                return false;
+
+            tickTime = point.Time + Math.Round((time - point.Time) / step) * step;
+            return true;
+        }
+
+        /// <summary>
+        /// Positions the gray "+ SV" pill below the tick nearest the cursor while Shift is held over the timing-pill
+        /// band, so the user sees (and can click) where an SV point would land. Hidden otherwise.
+        /// </summary>
+        private void updateSvHoverPill()
+        {
+            var input = GetContainingInputManager();
+            if (input == null || !input.CurrentState.Keyboard.ShiftPressed)
+            {
+                svHoverPill.Alpha = 0;
+                return;
+            }
+
+            Vector2 mouse = input.CurrentState.Mouse.Position;
+            Vector2 local = ToLocalSpace(mouse);
+            bool inBand = local.X >= 0 && local.X <= DrawWidth && local.Y >= baseline_y && local.Y <= HEIGHT;
+
+            if (!inBand || !nearestTick(timeAt(mouse), out double tickTime))
+            {
+                svHoverPill.Alpha = 0;
+                return;
+            }
+
+            svHoverPill.X = (float)(tickTime * pixelsPerMs);
+            svHoverPill.Alpha = 1;
+        }
+
         protected override bool OnMouseDown(MouseDownEvent e)
         {
-            // In the hitsound lanes, defer to click/drag/up handlers (left cycles, right deletes, drag paints).
+            // In the hitsound lanes, defer to click/drag/up handlers (left toggles, drag paints, Shift+right sets bank).
             if (tryLaneAt(e.ScreenSpaceMousePosition, out _))
             {
                 hitsoundDragged = false;
@@ -1542,14 +1634,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnClick(ClickEvent e)
         {
-            // In the hitsound lanes: left-click creates the hitsound, Shift+left-click cycles its bank (N/S/D).
+            // Shift + click in the lower timing-pill band adds a green SV point at the nearest beat tick (the gray
+            // "+ SV" pill previews exactly where it lands).
+            if (e.ShiftPressed && timingBandAt(e.ScreenSpaceMousePosition)
+                && nearestTick(timeAt(e.ScreenSpaceMousePosition), out double svTickTime))
+            {
+                actions.AddTimingPointAt(svTickTime, uninherited: false);
+                return true;
+            }
+
+            // In the hitsound lanes: left-click toggles the hitsound on/off (the bank lives on Shift+right-click).
             if (tryLaneAt(e.ScreenSpaceMousePosition, out int lane))
             {
-                double laneTime = timeAt(e.ScreenSpaceMousePosition);
-                if (e.ShiftPressed)
-                    cycleBankAt(laneTime, lane);
-                else
-                    createCellAt(laneTime, lane);
+                toggleCellAt(timeAt(e.ScreenSpaceMousePosition), lane);
                 return true;
             }
 
@@ -1779,10 +1876,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void OnMouseUp(MouseUpEvent e)
         {
-            // A right-click (no drag) in the hitsound lanes deletes that cell's addition. A right-DRAG is handled
-            // by the paint stroke (hitsoundDragged), so it isn't double-processed here.
-            if (e.Button == MouseButton.Right && !hitsoundDragged && tryLaneAt(e.ScreenSpaceMousePosition, out int lane))
-                deleteCellAt(timeAt(e.ScreenSpaceMousePosition), lane);
+            // Shift+right-click (no drag) in the hitsound lanes cycles that cell's sample bank (N/S/D). A right-DRAG
+            // erases (handled by the paint stroke via hitsoundDragged), so it isn't double-processed here.
+            if (e.Button == MouseButton.Right && e.ShiftPressed && !hitsoundDragged && tryLaneAt(e.ScreenSpaceMousePosition, out int lane))
+                cycleBankAt(timeAt(e.ScreenSpaceMousePosition), lane);
 
             base.OnMouseUp(e);
         }

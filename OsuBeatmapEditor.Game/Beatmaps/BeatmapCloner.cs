@@ -106,14 +106,25 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// metadata, difficulty settings, audio and background are preserved, but hit objects start empty,
         /// the version is renamed and the online id is zeroed. Used by the direct realm creator.
         /// </summary>
-        public static string BuildEmptyDifficultyOsu(string[] lines, string difficultyName) =>
-            cloneWithEmptyHitObjects(lines, difficultyName);
+        public static string BuildEmptyDifficultyOsu(string[] lines, string difficultyName,
+            bool copyDifficultySettings = true, bool copyBpm = true, bool copySv = true) =>
+            cloneWithEmptyHitObjects(lines, difficultyName, copyDifficultySettings, copyBpm, copySv);
 
-        /// <summary>Copies a .osu verbatim, but renames the version, zeroes the online id and empties the hit objects.</summary>
-        private static string cloneWithEmptyHitObjects(string[] lines, string difficultyName)
+        /// <summary>
+        /// Copies a .osu verbatim, but renames the version, zeroes the online id and empties the hit objects.
+        /// The <paramref name="copyDifficultySettings"/>/<paramref name="copyBpm"/>/<paramref name="copySv"/>
+        /// flags optionally reset HP/CS/OD/AR to osu!'s defaults and drop uninherited (red) / inherited (green)
+        /// timing points respectively.
+        /// </summary>
+        private static string cloneWithEmptyHitObjects(string[] lines, string difficultyName,
+            bool copyDifficultySettings = true, bool copyBpm = true, bool copySv = true)
         {
             var sb = new StringBuilder();
             string section = string.Empty;
+
+            // A valid osu! map needs at least one uninherited (red) timing point, so even when the user opts
+            // out of copying BPM points we keep the first (earliest) one to anchor the timing.
+            bool keptAnchorRed = false;
 
             foreach (string raw in lines)
             {
@@ -128,6 +139,33 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 // Drop the original hit objects - the new difficulty starts blank.
                 if (section == "HitObjects")
                     continue;
+
+                // Optionally reset the four base difficulty settings to osu!'s neutral default (5).
+                if (section == "Difficulty" && !copyDifficultySettings)
+                {
+                    switch (key(raw))
+                    {
+                        case "HPDrainRate": sb.Append("HPDrainRate:5").Append('\n'); continue;
+                        case "CircleSize": sb.Append("CircleSize:5").Append('\n'); continue;
+                        case "OverallDifficulty": sb.Append("OverallDifficulty:5").Append('\n'); continue;
+                        case "ApproachRate": sb.Append("ApproachRate:5").Append('\n'); continue;
+                    }
+                }
+
+                // Optionally drop red (BPM/uninherited) or green (SV/inherited) timing lines. When BPM points
+                // are dropped, the first red line is still kept as a timing anchor (lines are time-ordered).
+                if (section == "TimingPoints" && trimmed.Length > 0)
+                {
+                    bool red = isUninheritedLine(trimmed);
+                    if (red && !copyBpm)
+                    {
+                        if (keptAnchorRed)
+                            continue;
+                        keptAnchorRed = true;
+                    }
+                    else if (!red && !copySv)
+                        continue;
+                }
 
                 if (section == "Metadata")
                 {
@@ -148,6 +186,21 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             }
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// True if a [TimingPoints] line is uninherited (red / BPM). osu! format: the 7th field (index 6) is 1
+        /// for uninherited and 0 for inherited; when it's absent, a positive beatLength means uninherited.
+        /// </summary>
+        private static bool isUninheritedLine(string line)
+        {
+            string[] f = line.Split(',');
+            if (f.Length > 6 && int.TryParse(f[6].Trim(), out int u))
+                return u != 0;
+
+            return f.Length > 1
+                   && double.TryParse(f[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double beatLength)
+                   && beatLength > 0;
         }
 
         private static (string artist, string title, string creator) readMetadata(string[] lines)

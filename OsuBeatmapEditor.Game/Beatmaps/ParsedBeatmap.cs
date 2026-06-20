@@ -219,7 +219,12 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// </summary>
         public void RebuildTimingDerived()
         {
-            TimingPointModels.Sort((a, b) => a.Time.CompareTo(b.Time));
+            // Order by time, and on a tie put the red (uninherited/BPM) line BEFORE the green (inherited/SV) one.
+            // This is load-bearing, not cosmetic: the loop below resets sv=1 when it hits a red line, so if a
+            // coincident green sorted first its velocity would be immediately overwritten by the red's reset and
+            // the SV would never apply. (List.Sort is unstable, so a plain time-only compare could swap them.)
+            TimingPointModels.Sort((a, b) =>
+                a.Time != b.Time ? a.Time.CompareTo(b.Time) : b.Uninherited.CompareTo(a.Uninherited));
 
             TimingPoints.Clear();
             BeatPoints.Clear();

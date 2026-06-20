@@ -117,7 +117,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public readonly Bindable<Shortcut> ModdingModeKey = new Bindable<Shortcut>(new Shortcut(Key.M, Ctrl: true, Shift: true));
 
         /// <summary>Toggles the Pattern Gallery (saved selections).</summary>
-        public readonly Bindable<Shortcut> PatternGalleryKey = new Bindable<Shortcut>(new Shortcut(Key.P, Ctrl: true, Shift: true));
+        public readonly Bindable<Shortcut> PatternGalleryKey = new Bindable<Shortcut>(new Shortcut(Key.P));
+
+        /// <summary>Adds an uninherited (red/BPM) timing point at the playhead.</summary>
+        public readonly Bindable<Shortcut> AddBpmPointKey = new Bindable<Shortcut>(new Shortcut(Key.P, Ctrl: true));
+
+        /// <summary>Adds an inherited (green/SV) timing point at the playhead.</summary>
+        public readonly Bindable<Shortcut> AddSvPointKey = new Bindable<Shortcut>(new Shortcut(Key.P, Ctrl: true, Shift: true));
 
         // Auto-preview cursor settings (persisted; the AU chip's mini-menu edits these).
         public readonly Bindable<Colour4> AutoCursorColour = new Bindable<Colour4>(Colour4.FromHex("ffdb33"));
@@ -179,6 +185,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["convertstream"] = ConvertStreamKey,
                 ["moddingmode"] = ModdingModeKey,
                 ["patterngallery"] = PatternGalleryKey,
+                ["addbpmpoint"] = AddBpmPointKey,
+                ["addsvpoint"] = AddSvPointKey,
             };
 
             floats = new Dictionary<string, BindableFloat>

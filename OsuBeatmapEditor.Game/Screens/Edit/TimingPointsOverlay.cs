@@ -288,12 +288,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
-            // Ctrl+A selects every point; Delete removes the current selection.
+            // Ctrl+A selects every point in the active tab (All / BPM / SV) — not literally every point,
+            // since the user only sees the filtered list. Delete removes the current selection.
             if (e.Key == Key.A && Shortcut.CommandPressed(e))
             {
                 selectedIds.Clear();
                 foreach (var tp in beatmap.TimingPointModels)
-                    selectedIds.Add(tp.Id);
+                    if (matchesFilter(tp))
+                        selectedIds.Add(tp.Id);
                 rebuildList();
                 return true;
             }

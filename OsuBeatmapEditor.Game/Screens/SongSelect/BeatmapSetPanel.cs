@@ -93,7 +93,11 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             Colour = OsuColour.Text,
                             Font = FontUsage.Default.With(size: 22, weight: "SemiBold"),
                             Truncate = true,
-                            RelativeSizeAxes = Axes.X,
+                            // Definite width (not RelativeSizeAxes.X): these panels are virtualized, so on the
+                            // re-realization frame after returning from the editor a relative width can resolve
+                            // to 0 and the truncation would bake down to a lone "..." ellipsis. Mirror the inner
+                            // padding (Left 18, Right 18 or 78 when the NEW badge shows).
+                            Width = BeatmapCarousel.PANEL_STRIP_WIDTH - 18 - (isNew ? 78 : 18),
                         },
                         new SpriteText
                         {

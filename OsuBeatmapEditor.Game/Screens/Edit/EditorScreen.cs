@@ -23,6 +23,7 @@ using osu.Framework.Screens;
 using osu.Framework.Threading;
 using osu.Framework.Timing;
 using OsuBeatmapEditor.Game.Beatmaps;
+using OsuBeatmapEditor.Game.Beatmaps.Difficulty;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.UI;
 using OsuBeatmapEditor.Resources;
@@ -202,6 +203,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private SpriteText bpmText = null!;
         private SpriteText svText = null!;
         private SpriteText distanceSnapText = null!;
+
+        // Live star-rating chip (same pill design as the carousel) + its debounced recompute state.
+        private Container starChip = null!;
+        private double currentStars;
+        private int starComputeGeneration;
+        private ScheduledDelegate? starRecomputeDebounce;
         private BeatDivisorControl beatDivisorControl = null!;
         private Container timelineSidePanel = null!;
         private Container timelineLeftPanel = null!;
@@ -468,6 +475,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     Colour = EditorTheme.Colours.Velocity,
                                     Font = EditorTheme.Type.Label(numeric: true),
                                 },
+                                // Live star rating - the same pill design as the song-select carousel.
+                                starChip = new Container
+                                {
+                                    Anchor = Anchor.TopCentre,
+                                    Origin = Anchor.TopCentre,
+                                    AutoSizeAxes = Axes.Both,
+                                    Margin = new MarginPadding { Top = 2 },
+                                    Child = new StarRatingDisplay(0),
+                                },
                             },
                         },
                     },
@@ -644,6 +660,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // Tick rate isn't part of the per-object model, so force a redraw to refresh the tick dots.
                 playfield.RebuildObjects();
             });
+
+            // The difficulty settings that move the star rating: recompute the live SR chip (debounced). Object
+            // and timing edits are already covered via afterEdit(). AR doesn't affect the no-mod SR.
+            editable.Cs.BindValueChanged(_ => scheduleStarRecompute());
+            editable.Od.BindValueChanged(_ => scheduleStarRecompute());
+            editable.SliderMultiplier.BindValueChanged(_ => scheduleStarRecompute());
+            editable.SliderTickRate.BindValueChanged(_ => scheduleStarRecompute());
+
+            // Seed the chip with the map's initial rating.
+            recomputeStars();
 
             // Toggling a mod re-renders the playfield: HardRock/Easy change CS (diameter) + AR (preempt) (and HR
             // flips the field vertically); DoubleTime shortens the approach; Hidden changes the per-object fade.
@@ -2334,8 +2360,43 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             pushUndo();
             int id = nextTimingPointId();
             parsed.TimingPointModels.Add(point with { Id = id });
-            afterTimingEdit();
+            afterTimingEdit(); // RebuildTimingDerived re-sorts (red-before-green on a tie), so no manual sort here
             return id;
+        }
+
+        /// <summary>
+        /// Inserts a timing point at <paramref name="time"/>: an uninherited red (BPM) line carrying the active
+        /// tempo, or an inherited green (SV) line carrying the velocity currently in force there - both inheriting
+        /// the surrounding sample context so only the intended property changes. Bound to Ctrl/Cmd+P (BPM) and
+        /// Ctrl/Cmd+Shift+P (SV), and to the timeline's Shift-hover add-pill. A same-colour point already on that
+        /// tick is left untouched (no duplicate).
+        /// </summary>
+        public void AddTimingPointAt(double time, bool uninherited)
+        {
+            int t = (int)Math.Round(time);
+
+            if (parsed.TimingPointModels.Any(tp => tp.Uninherited == uninherited && (int)Math.Round(tp.Time) == t))
+                return;
+
+            TimingPointModel? ctx = null;
+            double bestTime = double.NegativeInfinity;
+            foreach (var tp in parsed.TimingPointModels)
+                if (tp.Time <= t && tp.Time >= bestTime) { bestTime = tp.Time; ctx = tp; }
+
+            double beatLength = uninherited
+                ? beatLengthAt(time)
+                : TimingPointLineEditor.BeatLengthFromSv(Math.Clamp(velocityAt(time), 0.1, 10));
+
+            AddTimingPoint(new TimingPointModel(
+                Id: 0,
+                Time: t,
+                BeatLength: beatLength,
+                Meter: ctx?.Meter ?? 4,
+                SampleSet: ctx?.SampleSet ?? 0,
+                SampleIndex: ctx?.SampleIndex ?? 0,
+                Volume: ctx?.Volume ?? 100,
+                Uninherited: uninherited,
+                Effects: TimingPointLineEditor.WithKiai(0, ctx?.Kiai ?? false)));
         }
 
         public void UpdateTimingPoint(TimingPointModel point)
@@ -3245,7 +3306,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (cps[0].Type == null)
                     cps[0] = cps[0] with { Type = SliderPathType.Bezier };
 
-                double pixelLength = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+                // Keep the slider's stored expected distance: a selection-box rotate/scale only moves the control
+                // points (it shouldn't lengthen or shorten the body). Re-deriving the length from the transformed
+                // hull made rotating or resizing the box change every slider's size - so we preserve the original.
+                double pixelLength = originalPixelLength(orig);
                 var path = SliderGeometry.ComputePath(cps, pixelLength);
                 if (path.Count < 2 || pixelLength < 1)
                     return orig; // degenerate transform - leave the slider as-is
@@ -3411,6 +3475,53 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             rebuildSampleEvents();
             topTimeline.Rebuild();
             editable.IsDirty.Value = true;
+            scheduleStarRecompute();
+        }
+
+        /// <summary>
+        /// Recomputes the star rating off the update thread after a short idle (edits often arrive in bursts -
+        /// drags, paints, multi-object moves - so we debounce rather than recompute on every micro-edit).
+        /// </summary>
+        private void scheduleStarRecompute()
+        {
+            starRecomputeDebounce?.Cancel();
+            starRecomputeDebounce = Scheduler.AddDelayed(recomputeStars, 350);
+        }
+
+        /// <summary>Snapshots the difficulty + objects (value-type lists) so the calc can run on a background thread.</summary>
+        private ParsedBeatmap snapshotForStars()
+        {
+            var b = new ParsedBeatmap
+            {
+                CircleSize = editable.Cs.Value,
+                OverallDifficulty = editable.Od.Value,
+                ApproachRate = editable.Ar.Value,
+                SliderMultiplier = editable.SliderMultiplier.Value,
+                SliderTickRate = editable.SliderTickRate.Value,
+            };
+            b.HitObjects.AddRange(parsed.HitObjects);
+            b.BeatPoints.AddRange(parsed.BeatPoints);
+            return b;
+        }
+
+        private void recomputeStars()
+        {
+            int generation = ++starComputeGeneration;
+            var snapshot = snapshotForStars();
+
+            Task.Run(() =>
+            {
+                double stars = StarRatingCalculator.Calculate(snapshot);
+                Schedule(() =>
+                {
+                    // Drop the result if another recompute has since superseded this one.
+                    if (generation != starComputeGeneration)
+                        return;
+
+                    currentStars = stars;
+                    starChip.Child = new StarRatingDisplay(stars);
+                });
+            });
         }
 
         /// <summary>Recomputes stack heights for the current AR window and stack leniency.</summary>
@@ -3975,6 +4086,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Add a timing point at the playhead: Ctrl/Cmd+Shift+P a green SV line, Ctrl/Cmd+P a red BPM line.
+            if (settings.AddSvPointKey.Value.Matches(e) && !e.Repeat)
+            {
+                AddTimingPointAt(CurrentTime, uninherited: false);
+                return true;
+            }
+
+            if (settings.AddBpmPointKey.Value.Matches(e) && !e.Repeat)
+            {
+                AddTimingPointAt(CurrentTime, uninherited: true);
+                return true;
+            }
+
             // Ctrl+A selects every object in the map, like lazer.
             if (cmd && !e.Repeat && e.Key == Key.A)
             {
@@ -4123,6 +4247,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Hitsound additions on the selection (or the pending placement defaults), matching osu!lazer:
+            // W whistle, E finish, R clap; with Shift they set the normal sample bank instead (Shift+W normal,
+            // Shift+E soft, Shift+R drum).
+            if (!cmd && !e.Repeat && e.Key is Key.W or Key.E or Key.R)
+            {
+                if (e.ShiftPressed)
+                    SetNormalBank(e.Key switch { Key.W => SampleBank.Normal, Key.E => SampleBank.Soft, _ => SampleBank.Drum });
+                else
+                    ToggleAddition(e.Key switch { Key.W => 0b0010, Key.E => 0b0100, _ => 0b1000 });
+                return true;
+            }
+
             return base.OnKeyDown(e);
         }
 
@@ -4208,6 +4344,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private bool save()
         {
             var edits = buildEdits();
+
+            // Compute a fresh star rating synchronously so the value written to the realm reflects the exact
+            // saved state (the live chip is debounced and might be a beat behind). Cheap relative to the I/O.
+            currentStars = StarRatingCalculator.Calculate(snapshotForStars());
+            edits.StarRating = currentStars;
+            starChip.Child = new StarRatingDisplay(currentStars);
 
             // Existing maps are written in place directly in lazer's realm (exactly how lazer's own editor
             // saves) - going through the .osz importer would make lazer file the edit as a duplicate set.
@@ -4375,9 +4517,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             bool cmd = Shortcut.CommandPressed(e);
 
-            // Ctrl/Cmd+scroll changes the beat-snap divisor (finer when scrolling up), like lazer.
+            // Ctrl/Cmd+scroll rotates the current selection around its centre (5 deg per notch); with nothing
+            // selected it falls back to changing the beat-snap divisor (finer when scrolling up), like lazer.
             if (cmd)
             {
+                if (selection.Selected.Count > 0)
+                {
+                    RotateSelectionBy(e.ScrollDelta.Y > 0 ? -5f : 5f, aroundPlayfieldCentre: false);
+                    return true;
+                }
+
                 beatDivisor.Step(e.ScrollDelta.Y > 0 ? 1 : -1);
                 return true;
             }

@@ -26,7 +26,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// Adds a new (empty) difficulty cloned from <paramref name="template"/> to the existing set, writing
         /// it straight into lazer's realm. Returns <c>null</c> on success, otherwise an error message.
         /// </summary>
-        public static string? CreateDifficulty(BeatmapSetModel set, BeatmapDifficultyModel template, string difficultyName)
+        public static string? CreateDifficulty(BeatmapSetModel set, BeatmapDifficultyModel template, string difficultyName,
+            bool copyDifficultySettings = true, bool copyBpm = true, bool copySv = true)
         {
             if (template.OsuFileHash.Length == 0)
                 return "The template difficulty has no saved .osu file.";
@@ -35,8 +36,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (templatePath == null)
                 return "The template difficulty's .osu file could not be located.";
 
-            // Empty-hitobjects clone of the template, with the new difficulty name (timing/metadata kept).
-            string osuText = BeatmapCloner.BuildEmptyDifficultyOsu(File.ReadAllLines(templatePath), difficultyName);
+            // Empty-hitobjects clone of the template, with the new difficulty name. Metadata/audio/background are
+            // always kept; the toggles control whether difficulty settings and BPM/SV timing points are copied.
+            string osuText = BeatmapCloner.BuildEmptyDifficultyOsu(File.ReadAllLines(templatePath), difficultyName,
+                copyDifficultySettings, copyBpm, copySv);
             byte[] bytes = new UTF8Encoding(false).GetBytes(osuText);
             string sha = LazerRealmFiles.Sha256Hex(bytes);
             string md5 = LazerRealmFiles.Md5Hex(bytes);
@@ -71,7 +74,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     dynamic beatmap = realm.DynamicApi.CreateObject("Beatmap", Guid.NewGuid());
                     beatmap.Ruleset = source.Ruleset; // shared osu! ruleset object
                     beatmap.Metadata = cloneMetadata(realm, source.Metadata);
-                    copyDifficulty(realm, beatmap, source.Difficulty);
+                    copyDifficulty(realm, beatmap, source.Difficulty, copyDifficultySettings);
                     realm.DynamicApi.CreateEmbeddedObjectForProperty((IRealmObjectBase)beatmap, "UserSettings");
 
                     beatmap.DifficultyName = difficultyName;
@@ -314,16 +317,30 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         }
 
         /// <summary>Copies the source beatmap's difficulty settings into the new beatmap's embedded Difficulty.</summary>
-        private static void copyDifficulty(Realm realm, dynamic beatmap, dynamic source)
+        private static void copyDifficulty(Realm realm, dynamic beatmap, dynamic source, bool copySettings = true)
         {
             dynamic difficulty = realm.DynamicApi.CreateEmbeddedObjectForProperty((IRealmObjectBase)beatmap, "Difficulty");
             if (source == null)
                 return;
 
-            difficulty.DrainRate = source.DrainRate;
-            difficulty.CircleSize = source.CircleSize;
-            difficulty.OverallDifficulty = source.OverallDifficulty;
-            difficulty.ApproachRate = source.ApproachRate;
+            // When the user opts out of copying difficulty settings, fall back to osu!'s neutral defaults for
+            // HP/CS/OD/AR (matching the reset applied to the .osu text). Slider multiplier/tick are SV-related
+            // and always carried over so velocity stays consistent with the copied timing.
+            if (copySettings)
+            {
+                difficulty.DrainRate = source.DrainRate;
+                difficulty.CircleSize = source.CircleSize;
+                difficulty.OverallDifficulty = source.OverallDifficulty;
+                difficulty.ApproachRate = source.ApproachRate;
+            }
+            else
+            {
+                difficulty.DrainRate = 5f;
+                difficulty.CircleSize = 5f;
+                difficulty.OverallDifficulty = 5f;
+                difficulty.ApproachRate = 5f;
+            }
+
             difficulty.SliderMultiplier = source.SliderMultiplier;
             difficulty.SliderTickRate = source.SliderTickRate;
         }

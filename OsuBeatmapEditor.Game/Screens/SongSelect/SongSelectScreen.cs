@@ -192,7 +192,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Action = onNewBeatmap,
                     },
                     // Action icon row, to the right of the New Beatmap button: settings, collabs, download,
-                    // refresh-library, and a play/pause toggle for the song preview.
+                    // a random-map jump, refresh-library, and a play/pause toggle for the song preview.
                     new FillFlowContainer
                     {
                         Anchor = Anchor.BottomLeft,
@@ -209,6 +209,8 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                                 () => collabsOverlay.ToggleVisibility()),
                             new MenuIconButton(FontAwesome.Solid.Download, "Download maps",
                                 () => downloadOverlay.ToggleVisibility()),
+                            new MenuIconButton(FontAwesome.Solid.Random, "Random map (F2)",
+                                () => carousel.SelectRandom()),
                             new MenuIconButton(FontAwesome.Solid.Sync, "Refresh library (F5)",
                                 () => { toasts?.Push("Reloading library..."); reloadBeatmaps(notify: true); }),
                             previewToggleButton = new MenuIconButton(FontAwesome.Solid.Pause, "Pause preview (Ctrl+Space)",
@@ -729,7 +731,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             newDifficultyOverlay.Show(set.Difficulties.Select(d => d.DifficultyName));
         }
 
-        private void onCreateDifficultyConfirmed(string name)
+        private void onCreateDifficultyConfirmed(string name, bool copySettings, bool copyBpm, bool copySv)
         {
             var set = pendingDifficultySet;
             var template = pendingDifficultyTemplate;
@@ -741,7 +743,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             Task.Run(() =>
             {
                 // Write the new difficulty straight into lazer's realm (no importer, no launch).
-                string? error = BeatmapRealmCreator.CreateDifficulty(set, template, name);
+                string? error = BeatmapRealmCreator.CreateDifficulty(set, template, name, copySettings, copyBpm, copySv);
                 Schedule(() =>
                 {
                     if (error == null)

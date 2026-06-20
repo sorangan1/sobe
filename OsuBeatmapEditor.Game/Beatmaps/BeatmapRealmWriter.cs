@@ -172,6 +172,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             beatmap.LastLocalUpdate = DateTimeOffset.Now;
             beatmap.Status = locally_modified_status;
 
+            // Persist our own star-rating computation (lazer would recompute on its next scan, but this keeps our
+            // carousel correct immediately). -1 means the caller didn't compute one, so leave the stored value.
+            if (e.StarRating >= 0)
+                beatmap.StarRating = e.StarRating;
+
             dynamic difficulty = beatmap.Difficulty;
             if (difficulty != null)
             {

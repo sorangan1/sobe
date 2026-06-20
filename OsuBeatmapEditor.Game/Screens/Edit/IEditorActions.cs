@@ -146,6 +146,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Adds a timing point and returns its new stable id.</summary>
         int AddTimingPoint(TimingPointModel point);
 
+        /// <summary>Inserts a red (BPM) or green (SV) timing point at a time, inheriting the active context.</summary>
+        void AddTimingPointAt(double time, bool uninherited);
+
         /// <summary>Replaces the timing point with the matching id (keeping its id), then re-derives timing.</summary>
         void UpdateTimingPoint(TimingPointModel point);
 

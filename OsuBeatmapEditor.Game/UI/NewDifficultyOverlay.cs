@@ -10,6 +10,7 @@ using osu.Framework.Graphics.Sprites;
 using osu.Framework.Graphics.UserInterface;
 using osu.Framework.Input.Events;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.Screens.Edit;
 using osuTK;
 using osuTK.Input;
 
@@ -21,13 +22,20 @@ namespace OsuBeatmapEditor.Game.UI
     /// </summary>
     public partial class NewDifficultyOverlay : VisibilityContainer
     {
-        /// <summary>Invoked with the confirmed difficulty name.</summary>
-        public Action<string>? Confirmed;
+        /// <summary>
+        /// Invoked with the confirmed difficulty name and which aspects of the template to copy
+        /// (difficulty settings HP/CS/AR/OD, BPM/uninherited timing points, SV/inherited timing points).
+        /// </summary>
+        public Action<string, bool, bool, bool>? Confirmed;
 
         private Container panel = null!;
         private BasicTextBox nameBox = null!;
         private OsuButton createButton = null!;
         private SpriteText errorText = null!;
+
+        private readonly BindableBool copySettings = new BindableBool(true);
+        private readonly BindableBool copyBpm = new BindableBool(true);
+        private readonly BindableBool copySv = new BindableBool(true);
 
         private HashSet<string> existingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -50,7 +58,7 @@ namespace OsuBeatmapEditor.Game.UI
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
-                    Size = new Vector2(460, 220),
+                    Size = new Vector2(460, 360),
                     Masking = true,
                     CornerRadius = EditorTheme.Radius.Lg,
                     Children = new Drawable[]
@@ -94,6 +102,16 @@ namespace OsuBeatmapEditor.Game.UI
                                     Font = EditorTheme.Type.Caption(),
                                     Alpha = 0,
                                 },
+                                new SpriteText
+                                {
+                                    Text = "Copy from source difficulty",
+                                    Colour = EditorTheme.Colours.TextMuted,
+                                    Font = EditorTheme.Type.Body(),
+                                    Margin = new MarginPadding { Top = EditorTheme.Spacing.Md },
+                                },
+                                toggleRow("Difficulty settings (HP, CS, AR, OD)", copySettings),
+                                toggleRow("BPM timing points", copyBpm),
+                                toggleRow("SV timing points", copySv),
                             },
                         },
                         new FillFlowContainer
@@ -126,11 +144,37 @@ namespace OsuBeatmapEditor.Game.UI
             nameBox.OnCommit += (_, _) => onConfirm();
         }
 
+        /// <summary>A row with a label on the left and a toggle switch on the right.</summary>
+        private static Drawable toggleRow(string label, BindableBool value) => new Container
+        {
+            RelativeSizeAxes = Axes.X,
+            Height = 26,
+            Children = new Drawable[]
+            {
+                new SpriteText
+                {
+                    Text = label,
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    Colour = EditorTheme.Colours.TextMuted,
+                    Font = EditorTheme.Type.Body(),
+                },
+                new ToggleSwitch(value)
+                {
+                    Anchor = Anchor.CentreRight,
+                    Origin = Anchor.CentreRight,
+                },
+            },
+        };
+
         /// <summary>Opens the dialog, seeding a suggested unique name and remembering the set's existing names.</summary>
         public void Show(IEnumerable<string> existing)
         {
             existingNames = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
             nameBox.Text = suggestName();
+            copySettings.Value = true;
+            copyBpm.Value = true;
+            copySv.Value = true;
             errorText.Alpha = 0;
             Show();
             Schedule(() => GetContainingFocusManager()?.ChangeFocus(nameBox));
@@ -167,7 +211,7 @@ namespace OsuBeatmapEditor.Game.UI
             if (!isValid)
                 return;
 
-            Confirmed?.Invoke(trimmedName);
+            Confirmed?.Invoke(trimmedName, copySettings.Value, copyBpm.Value, copySv.Value);
             Hide();
         }
 

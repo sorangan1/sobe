@@ -185,7 +185,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         beatmap.MD5Hash = diff.Md5;
                         beatmap.OnlineID = -1;
                         beatmap.BeatDivisor = 4;
-                        beatmap.StarRating = 0;
+                        // Compute the star rating ourselves (these maps were never opened in lazer, so lazer
+                        // never wrote one). See StarRatingCalculator - a faithful port of osu!'s SR algorithm.
+                        beatmap.StarRating = Difficulty.StarRatingCalculator.Calculate(diff.Parsed);
                         beatmap.Status = locally_modified_status;
                         beatmap.LastLocalUpdate = DateTimeOffset.Now;
 
