@@ -22,6 +22,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly Bindable<Color4> colour;
         private readonly BindableInt trailLength;
         private readonly BindableFloat trailWidth;
+        private readonly BindableBool keyOverlay;
 
         // The colours offered for the cursor. Yellow first (the default the user asked for).
         private static readonly Color4[] swatch_colours =
@@ -36,11 +37,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private readonly List<SwatchButton> swatches = new List<SwatchButton>();
 
-        public AutoPreviewMenu(Bindable<Color4> colour, BindableInt trailLength, BindableFloat trailWidth)
+        public AutoPreviewMenu(Bindable<Color4> colour, BindableInt trailLength, BindableFloat trailWidth, BindableBool keyOverlay)
         {
             this.colour = colour;
             this.trailLength = trailLength;
             this.trailWidth = trailWidth;
+            this.keyOverlay = keyOverlay;
 
             AutoSizeAxes = Axes.Both;
         }
@@ -119,6 +121,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     SelectionColour = EditorTheme.Colours.Selection,
                                 },
                             },
+                            new ToggleRow("Key overlay", keyOverlay),
                         },
                     },
                 },
@@ -156,6 +159,71 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Colour = EditorTheme.Colours.Text,
             Font = EditorTheme.Type.Label(),
         };
+
+        /// <summary>A labelled on/off switch bound to a <see cref="BindableBool"/> (click anywhere on the row toggles it).</summary>
+        private partial class ToggleRow : CompositeDrawable
+        {
+            private readonly BindableBool current;
+            private readonly Container knob;
+            private readonly Box track;
+
+            public ToggleRow(string text, BindableBool current)
+            {
+                this.current = current;
+
+                RelativeSizeAxes = Axes.X;
+                Height = 20;
+
+                InternalChildren = new Drawable[]
+                {
+                    new SpriteText
+                    {
+                        Anchor = Anchor.CentreLeft,
+                        Origin = Anchor.CentreLeft,
+                        Text = text,
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.Label(),
+                    },
+                    new Container
+                    {
+                        Anchor = Anchor.CentreRight,
+                        Origin = Anchor.CentreRight,
+                        Size = new Vector2(34, 18),
+                        Masking = true,
+                        CornerRadius = 9,
+                        Children = new Drawable[]
+                        {
+                            track = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Sunken },
+                            knob = new Container
+                            {
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Size = new Vector2(14),
+                                Position = new Vector2(2, 0),
+                                Masking = true,
+                                CornerRadius = 7,
+                                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White },
+                            },
+                        },
+                    },
+                };
+            }
+
+            [BackgroundDependencyLoader]
+            private void load() => current.BindValueChanged(v => updateState(v.NewValue), true);
+
+            private void updateState(bool on)
+            {
+                track.FadeColour(on ? EditorTheme.Colours.Info : EditorTheme.Colours.Sunken, 90);
+                knob.MoveToX(on ? 18 : 2, 90, Easing.OutQuad);
+            }
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                current.Value = !current.Value;
+                return true;
+            }
+        }
 
         /// <summary>A small clickable colour swatch; lights a white ring when it is the active colour.</summary>
         private partial class SwatchButton : CircularContainer

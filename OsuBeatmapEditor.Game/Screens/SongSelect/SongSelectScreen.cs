@@ -45,6 +45,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private CarouselSearchTextBox searchBox = null!;
         private Container backgroundContainer = null!;
         private OsuButton newBeatmapButton = null!;
+        private MenuIconButton previewToggleButton = null!;
         private BeatmapInfoPanel infoPanel = null!;
         private NewBeatmapOverlay newBeatmapOverlay = null!;
         private NewDifficultyOverlay newDifficultyOverlay = null!;
@@ -190,29 +191,29 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Margin = new MarginPadding(30),
                         Action = onNewBeatmap,
                     },
-                    new OsuButton("Settings", OsuColour.Surface)
+                    // Action icon row, to the right of the New Beatmap button: settings, collabs, download,
+                    // refresh-library, and a play/pause toggle for the song preview.
+                    new FillFlowContainer
                     {
                         Anchor = Anchor.BottomLeft,
                         Origin = Anchor.BottomLeft,
-                        Size = new Vector2(140, 56),
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(10, 0),
                         Margin = new MarginPadding { Left = 30 + 220 + 12, Bottom = 30 },
-                        Action = () => settingsOverlay.ToggleVisibility(),
-                    },
-                    new OsuButton("Collabs", OsuColour.Surface)
-                    {
-                        Anchor = Anchor.BottomLeft,
-                        Origin = Anchor.BottomLeft,
-                        Size = new Vector2(140, 56),
-                        Margin = new MarginPadding { Left = 30 + 220 + 12 + 140 + 12, Bottom = 30 },
-                        Action = () => collabsOverlay.ToggleVisibility(),
-                    },
-                    new OsuButton("Download", OsuColour.Surface)
-                    {
-                        Anchor = Anchor.BottomLeft,
-                        Origin = Anchor.BottomLeft,
-                        Size = new Vector2(140, 56),
-                        Margin = new MarginPadding { Left = 30 + 220 + 12 + 140 + 12 + 140 + 12, Bottom = 30 },
-                        Action = () => downloadOverlay.ToggleVisibility(),
+                        Children = new Drawable[]
+                        {
+                            new MenuIconButton(FontAwesome.Solid.Cog, "Settings",
+                                () => settingsOverlay.ToggleVisibility()),
+                            new MenuIconButton(FontAwesome.Solid.Users, "Collabs",
+                                () => collabsOverlay.ToggleVisibility()),
+                            new MenuIconButton(FontAwesome.Solid.Download, "Download maps",
+                                () => downloadOverlay.ToggleVisibility()),
+                            new MenuIconButton(FontAwesome.Solid.Sync, "Refresh library (F5)",
+                                () => { toasts?.Push("Reloading library..."); reloadBeatmaps(notify: true); }),
+                            previewToggleButton = new MenuIconButton(FontAwesome.Solid.Pause, "Pause preview (Ctrl+Space)",
+                                togglePreview),
+                        },
                     },
                     // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
                     // and the search box stay interactive.
@@ -529,6 +530,22 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             });
         }
 
+        /// <summary>Pauses/resumes the song preview, toasts which, and flips the play/pause button icon.</summary>
+        private void togglePreview()
+        {
+            if (currentPreview == null)
+                return;
+
+            bool playing = currentPreview.TogglePause();
+            toasts?.Push(playing ? "Preview playing" : "Preview paused",
+                playing ? EditorTheme.Colours.Success : EditorTheme.Colours.TextMuted);
+            updatePreviewToggleIcon(playing);
+        }
+
+        private void updatePreviewToggleIcon(bool playing) =>
+            previewToggleButton.SetIcon(playing ? FontAwesome.Solid.Pause : FontAwesome.Solid.Play,
+                playing ? "Pause preview (Ctrl+Space)" : "Play preview (Ctrl+Space)");
+
         protected override bool OnKeyDown(KeyDownEvent e)
         {
             // Don't navigate the carousel while the new-beatmap dialog is open.
@@ -538,12 +555,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             // Ctrl/Cmd+Space pauses/resumes the song preview (with a toast confirming which).
             if (e.Key == Key.Space && Shortcut.CommandPressed(e))
             {
-                if (currentPreview != null)
-                {
-                    bool playing = currentPreview.TogglePause();
-                    toasts?.Push(playing ? "Preview playing" : "Preview paused",
-                        playing ? EditorTheme.Colours.Success : EditorTheme.Colours.TextMuted);
-                }
+                togglePreview();
                 return true;
             }
 
@@ -648,6 +660,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 currentPreview?.Expire();
                 currentPreview = loaded;
                 loaded.StartPreview();
+                updatePreviewToggleIcon(true);
             });
         }
 

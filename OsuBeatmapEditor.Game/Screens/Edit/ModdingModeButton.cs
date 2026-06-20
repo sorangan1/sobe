@@ -13,15 +13,17 @@ using osuTK;
 namespace OsuBeatmapEditor.Game.Screens.Edit
 {
     /// <summary>
-    /// Small circular button at the bottom-left of the editor (in the same column as the hitsound/background
+    /// A small text toggle in the editor's top-left panel (next to the Patterns button, below the hitsound
     /// toggles). Toggles Modding Mode - the osu! discussion-review view. Lit in the accent colour when active.
+    /// Styled to match the neutral <see cref="UI.OsuButton"/> next to it (same rounded-rect shape and font).
     /// </summary>
-    public partial class ModdingModeButton : CircularContainer, IHasTooltip
+    public partial class ModdingModeButton : Container, IHasTooltip
     {
         private readonly BindableBool active;
 
         private Box fill = null!;
-        private SpriteText icon = null!;
+        private SpriteText label = null!;
+        private bool hovered;
 
         public LocalisableString TooltipText { get; }
 
@@ -29,8 +31,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             this.active = active;
             TooltipText = tooltip;
-            Size = new Vector2(30);
+            Size = new Vector2(80, 26);
             Masking = true;
+            CornerRadius = 5;
         }
 
         [BackgroundDependencyLoader]
@@ -38,15 +41,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Children = new Drawable[]
             {
-                fill = new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.Surface },
-                icon = new SpriteText
+                fill = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
+                label = new SpriteText
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
-                    // ASCII glyph evoking a discussion / comment bubble.
-                    Text = "M",
-                    Colour = OsuColour.Text,
-                    Font = FontUsage.Default.With(size: 15, weight: "Bold"),
+                    Text = "Modding",
+                    Colour = EditorTheme.Colours.Text,
+                    Font = FontUsage.Default.With(size: 12, weight: "SemiBold"),
                 },
             };
 
@@ -55,8 +57,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private void updateState()
         {
-            fill.FadeColour(active.Value ? EditorTheme.Colours.Accent : OsuColour.Surface, 120);
-            icon.FadeColour(active.Value ? OsuColour.BackgroundDark : OsuColour.Text, 120);
+            fill.FadeColour(active.Value ? EditorTheme.Colours.Accent
+                : hovered ? EditorTheme.Colours.ControlHover : EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            label.FadeColour(active.Value ? EditorTheme.Colours.Sunken : EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
         }
 
         protected override bool OnClick(ClickEvent e)
@@ -67,13 +70,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnHover(HoverEvent e)
         {
-            if (!active.Value)
-                fill.FadeColour(OsuColour.BackgroundDark, 120);
+            hovered = true;
+            updateState();
             return true;
         }
 
         protected override void OnHoverLost(HoverLostEvent e)
         {
+            hovered = false;
             updateState();
             base.OnHoverLost(e);
         }

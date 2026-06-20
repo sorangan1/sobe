@@ -124,6 +124,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public readonly BindableFloat AutoTrailLength = new BindableFloat(10f) { MinValue = 0f, MaxValue = 120f, Precision = 1f };
         public readonly BindableFloat AutoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f, Precision = 0.1f };
 
+        /// <summary>Auto-preview: show the K1/K2 key overlay (the cursor's "tapping"), like osu!lazer.</summary>
+        public readonly BindableBool AutoKeyOverlay = new BindableBool(false);
+
         /// <summary>Modding Mode: discussion types the user has hidden (comma-separated), persisted across maps.</summary>
         public readonly Bindable<string> ModdingMutedTypes = new Bindable<string>(string.Empty);
 
@@ -206,6 +209,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             BackgroundDim.ValueChanged += _ => save();
             AutoUpdate.ValueChanged += _ => save();
             AutoUpdatePrompted.ValueChanged += _ => save();
+            AutoKeyOverlay.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
             // the loading guard is clear.
@@ -259,6 +263,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("autoUpdatePrompted", out string? prompted) && bool.TryParse(prompted, out bool promptedValue))
                     AutoUpdatePrompted.Value = promptedValue;
+
+                if (data.TryGetValue("autoKeyOverlay", out string? keyOverlay) && bool.TryParse(keyOverlay, out bool keyOverlayValue))
+                    AutoKeyOverlay.Value = keyOverlayValue;
 
                 int version = data.TryGetValue("version", out string? vRaw) && int.TryParse(vRaw, out int v) ? v : 0;
                 migrate(version);
@@ -314,6 +321,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
                 data["autoUpdate"] = AutoUpdate.Value.ToString();
                 data["autoUpdatePrompted"] = AutoUpdatePrompted.Value.ToString();
+                data["autoKeyOverlay"] = AutoKeyOverlay.Value.ToString();
                 data["version"] = settings_version.ToString();
 
                 using var stream = storage.GetStream(filename, FileAccess.Write, FileMode.Create);

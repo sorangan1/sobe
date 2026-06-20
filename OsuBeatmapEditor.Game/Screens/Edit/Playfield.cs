@@ -101,6 +101,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private AutoCursor autoCursor = null!;
         private bool modAuto;
 
+        // Optional K1/K2 "tapping" overlay shown alongside the Auto cursor (a setting under the AU chip).
+        private KeyOverlay keyOverlay = null!;
+        private bool modKeyOverlay;
+        // The object index the key overlay is currently lighting (so a new object bumps the count once).
+        private int lastKeyObjectIndex = -1;
+
         // Each live follow-point connection plus the endpoints/ids it was built from, so a position drag can
         // recreate just the connections touching the selection instead of rebuilding the whole map (which lags).
         private sealed class FollowPointConnection
@@ -161,7 +167,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             RelativeSizeAxes = Axes.Both;
 
-            InternalChild = playArea = new Container
+            InternalChildren = new Drawable[]
+            {
+            // The Auto "tapping" overlay floats at the right edge of the play area (screen space), like lazer.
+            keyOverlay = new KeyOverlay
+            {
+                Anchor = Anchor.CentreRight,
+                Origin = Anchor.CentreRight,
+                Margin = new MarginPadding { Right = 12 },
+                Alpha = 0,
+            },
+            playArea = new Container
             {
                 Anchor = Anchor.Centre,
                 Origin = Anchor.Centre,
@@ -199,6 +215,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     // Auto-mod preview cursor, on top of everything (osu!pixel space = the play area itself).
                     autoCursor = new AutoCursor { PositionSource = autoCursorPosition },
                 },
+            },
             };
 
             buildGrid();
@@ -265,6 +282,76 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Sets the Auto cursor trail thickness multiplier.</summary>
         public void SetAutoTrailWidth(float width) => autoCursor.SetTrailWidth(width);
+
+        /// <summary>Toggles the K1/K2 "tapping" overlay shown alongside the Auto cursor (visual only).</summary>
+        public void SetKeyOverlay(bool enabled)
+        {
+            modKeyOverlay = enabled;
+            if (!enabled)
+            {
+                lastKeyObjectIndex = -1;
+                keyOverlay.Reset();
+            }
+        }
+
+        /// <summary>How long after a circle's start the key stays lit, so a tap is visible (sliders/spinners use their own duration).</summary>
+        private const double key_hold_ms = 80;
+
+        /// <summary>
+        /// Drives the Auto key overlay from the current playback time: finds the object being "tapped" (the last one
+        /// whose hit window covers now), alternates K1/K2 per object like a real player, and bumps the count on each
+        /// new object. Only visible while both Auto and the overlay setting are on.
+        /// </summary>
+        private void updateKeyOverlay()
+        {
+            bool show = modAuto && modKeyOverlay && currentHitObjects.Count > 0;
+            keyOverlay.Alpha = show ? 1 : 0;
+
+            if (!show)
+            {
+                if (lastKeyObjectIndex != -1)
+                {
+                    lastKeyObjectIndex = -1;
+                    keyOverlay.SetHeld(-1);
+                }
+                return;
+            }
+
+            double time = TimeSource?.Invoke() ?? 0;
+            var objs = currentHitObjects;
+
+            // Last object whose start is at/before now (binary search; the list is time-sorted).
+            int lo = 0, hi = objs.Count - 1, prev = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (objs[mid].StartTime <= time)
+                {
+                    prev = mid;
+                    lo = mid + 1;
+                }
+                else
+                    hi = mid - 1;
+            }
+
+            // Active only while now is within the object's hit window (its duration, or a short window for circles).
+            int active = -1;
+            if (prev >= 0)
+            {
+                double end = objs[prev].StartTime + Math.Max(objs[prev].Duration, key_hold_ms);
+                if (time <= end)
+                    active = prev;
+            }
+
+            if (active != lastKeyObjectIndex)
+            {
+                lastKeyObjectIndex = active;
+                if (active >= 0)
+                    keyOverlay.Press(active & 1); // alternate K1/K2 per object
+            }
+
+            keyOverlay.SetHeld(active >= 0 ? active & 1 : -1);
+        }
 
         /// <summary>
         /// The osu!pixel position of the Auto cursor at the current playback time, or null when the preview is
@@ -1291,6 +1378,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // (set in SetClock); the lifetime container only updates/draws the ones currently on screen.
             updatePlacementPreview();
             updateTransformBox();
+            updateKeyOverlay();
 
             // While a rubber-band box is held, keep picking up objects that fade in inside it during playback,
             // even when the cursor is stationary (so the selection grows as the song plays).

@@ -177,6 +177,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly Bindable<Color4> autoColour = new Bindable<Color4>(new Color4(1f, 0.86f, 0.2f, 1f));
         private readonly BindableInt autoTrail = new BindableInt(10) { MinValue = 0, MaxValue = 120 };
         private readonly BindableFloat autoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f };
+        // Auto key overlay: show the K1/K2 "tapping" indicator alongside the auto cursor (persisted).
+        private readonly BindableBool autoKeyOverlay = new BindableBool();
         private AutoPreviewMenu autoMenu = null!;
         private MenuDotsButton autoMenuButton = null!;
         private bool autoMenuOpen;
@@ -370,13 +372,35 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     Spacing = new Vector2(6, 0),
                                     Children = new Drawable[]
                                     {
-                                        new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
                                         new HitsoundModeButton(hitsoundMode),
                                         new CollabButton(collabLinked, () => collabOverlay.ToggleVisibility(), "Collab - co-map this difficulty with someone (\"git for maps\")"),
                                     },
                                 },
                             },
                         },
+                    },
+                },
+                // Patterns + Modding text buttons, just below the top-left panel column (under the hitsound
+                // toggles). Kept out of the fixed-height panel above so they aren't clipped by its masking.
+                new FillFlowContainer
+                {
+                    Anchor = Anchor.TopLeft,
+                    Origin = Anchor.TopCentre,
+                    X = timeline_side_width / 2f,
+                    Y = top_bar_height + 8,
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new Vector2(6, 0),
+                    Children = new Drawable[]
+                    {
+                        new OsuButton("Patterns", OsuColour.Surface)
+                        {
+                            Size = new Vector2(80, 26),
+                            FontSize = 12,
+                            CornerRadius = 5,
+                            Action = () => patternGallery.ToggleVisibility(),
+                        },
+                        new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
                     },
                 },
                 bottomTimeline = new EditorTimeline(track, parsed, () => CurrentTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
@@ -480,7 +504,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     },
                 },
                 // The Auto-preview popover (cursor colour + trail length), opened on demand from the "..." button.
-                autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth)
+                autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth, autoKeyOverlay)
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
@@ -660,15 +684,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             autoColour.BindValueChanged(c => playfield.SetAutoColour(c.NewValue), true);
             autoTrail.BindValueChanged(t => playfield.SetAutoTrailLength(t.NewValue), true);
             autoTrailWidth.BindValueChanged(w => playfield.SetAutoTrailWidth(w.NewValue), true);
+            autoKeyOverlay.BindValueChanged(k => playfield.SetKeyOverlay(k.NewValue), true);
 
             // Persist the Auto-cursor settings: seed from the stored values, then mirror edits back so they
             // survive across sessions (the colour stored as Colour4, our cursor uses osuTK Color4).
             autoColour.Value = toColor4(settings.AutoCursorColour.Value);
             autoTrail.Value = (int)settings.AutoTrailLength.Value;
             autoTrailWidth.Value = settings.AutoTrailWidth.Value;
+            autoKeyOverlay.Value = settings.AutoKeyOverlay.Value;
             autoColour.BindValueChanged(c => settings.AutoCursorColour.Value = toColour4(c.NewValue));
             autoTrail.BindValueChanged(t => settings.AutoTrailLength.Value = t.NewValue);
             autoTrailWidth.BindValueChanged(w => settings.AutoTrailWidth.Value = w.NewValue);
+            autoKeyOverlay.BindValueChanged(k => settings.AutoKeyOverlay.Value = k.NewValue);
 
             // Modding Mode: load the discussions the first time it's entered; toggle the side panels + bubbles;
             // force HD/HR off (Auto-only) while active.
@@ -723,10 +750,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             easyButton.SetEnabled(!on);
             rateModButton.SetEnabled(!on);
 
-            // The left composing tools (tool/hitsound column + bank bar + Song Setup/Settings buttons) aren't
-            // useful while reviewing mods - hide them so the editor reads as a dedicated modding view.
+            // The left composing tool/hitsound column + bank bar are hidden while reviewing mods, but the
+            // top-left Settings / Export / Song Setup buttons stay available (they're useful while modding too).
             updateLeftChrome();
-            toolButtons.FadeTo(on ? 0 : 1, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
 
             // The panel slide + playfield inset are eased per-frame in updateHitsoundLayout; nothing to fade here.
             if (on)
@@ -967,6 +993,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Last BPM/SV rendered, so the readout strings are only rebuilt when the value actually changes
         // (this runs every frame during playback; re-formatting identical text allocated garbage each frame).
         private double lastBpmBeatLength = double.NaN;
+        private double lastBpmRate = double.NaN;
         private double lastSv = double.NaN;
 
         /// <summary>Shows the BPM of the timing section under the current playback position.</summary>
@@ -986,10 +1013,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (beatLength <= 0 && parsed.BeatPoints.Count > 0)
                 beatLength = parsed.BeatPoints[0].BeatLength;
 
-            if (beatLength != lastBpmBeatLength)
+            // DT/NC speed the playback up by 1.5x, which also raises the effective BPM - show the sped-up value.
+            double rate = rateMod.Value == RateMod.Off ? 1.0 : rate_mod_speed;
+
+            if (beatLength != lastBpmBeatLength || rate != lastBpmRate)
             {
                 lastBpmBeatLength = beatLength;
-                bpmText.Text = beatLength > 0 ? $"{60000.0 / beatLength:0.##} BPM" : string.Empty;
+                lastBpmRate = rate;
+                bpmText.Text = beatLength > 0
+                    ? (rate > 1.0
+                        ? $"{60000.0 / beatLength * rate:0.##} BPM ({rate:0.##}x)"
+                        : $"{60000.0 / beatLength:0.##} BPM")
+                    : string.Empty;
             }
 
             double sv = velocityAt(now);
@@ -3811,13 +3846,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     FontSize = 13,
                     CornerRadius = 5,
                     Action = () => songSettingsOverlay.ToggleVisibility(),
-                },
-                new OsuButton("Patterns", OsuColour.Surface)
-                {
-                    Size = new Vector2(74, 24),
-                    FontSize = 13,
-                    CornerRadius = 5,
-                    Action = () => patternGallery.ToggleVisibility(),
                 },
             },
         };

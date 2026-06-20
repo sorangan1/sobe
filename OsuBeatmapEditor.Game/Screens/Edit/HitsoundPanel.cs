@@ -44,9 +44,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Masking = true;
             CornerRadius = EditorTheme.Radius.Lg;
 
-            whistleChip = new Chip("W", () => ToggleAddition?.Invoke(whistle));
-            finishChip = new Chip("F", () => ToggleAddition?.Invoke(finish));
-            clapChip = new Chip("C", () => ToggleAddition?.Invoke(clap));
+            // Whistle / Finish / Clap shown as icons (with the letter kept as the tooltip).
+            whistleChip = new Chip(FontAwesome.Solid.VolumeUp, "Whistle", () => ToggleAddition?.Invoke(whistle));
+            finishChip = new Chip(FontAwesome.Solid.Star, "Finish", () => ToggleAddition?.Invoke(finish));
+            clapChip = new Chip(FontAwesome.Solid.HandPaper, "Clap", () => ToggleAddition?.Invoke(clap));
 
             InternalChildren = new Drawable[]
             {
@@ -125,17 +126,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 chip.SetActive(bank == s.Addition);
         }
 
-        /// <summary>A small toggleable square button; active = solid accent (matches the tool rows).</summary>
-        private partial class Chip : ClickableContainer
+        /// <summary>A small toggleable square button; active = solid accent (matches the tool rows). Shows either a
+        /// letter or an icon; icon chips carry a tooltip with their full name.</summary>
+        private partial class Chip : ClickableContainer, osu.Framework.Graphics.Cursor.IHasTooltip
         {
             private Box background = null!;
-            private SpriteText label = null!;
-            private readonly string text;
+            private Drawable content = null!;
+            private readonly string? text;
+            private readonly IconUsage? icon;
             private bool active;
+
+            public osu.Framework.Localisation.LocalisableString TooltipText { get; }
 
             public Chip(string label, Action onClick)
             {
                 text = label;
+                TooltipText = string.Empty;
+                init(onClick);
+            }
+
+            public Chip(IconUsage icon, string tooltip, Action onClick)
+            {
+                this.icon = icon;
+                TooltipText = tooltip;
+                init(onClick);
+            }
+
+            private void init(Action onClick)
+            {
                 Action = onClick;
 
                 // Three chips share a 124-wide panel inset by 8 each side, with 4px gaps → ~33 each.
@@ -147,17 +165,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             [osu.Framework.Allocation.BackgroundDependencyLoader]
             private void load()
             {
-                Children = new Drawable[]
-                {
-                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
-                    label = new SpriteText
+                content = icon is { } i
+                    ? new SpriteIcon
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Size = new Vector2(13),
+                        Icon = i,
+                        Colour = EditorTheme.Colours.Text,
+                    }
+                    : new SpriteText
                     {
                         Anchor = Anchor.Centre,
                         Origin = Anchor.Centre,
                         Text = text,
                         Colour = EditorTheme.Colours.Text,
                         Font = EditorTheme.Type.Label(),
-                    },
+                    };
+
+                Children = new Drawable[]
+                {
+                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
+                    content,
                 };
             }
 
@@ -168,7 +197,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 active = value;
                 background.FadeColour(active ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                label.FadeColour(active ? EditorTheme.Colours.Sunken : EditorTheme.Colours.Text, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                content.FadeColour(active ? EditorTheme.Colours.Sunken : EditorTheme.Colours.Text, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             }
 
             protected override bool OnHover(osu.Framework.Input.Events.HoverEvent e)

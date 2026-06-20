@@ -30,12 +30,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private readonly Dictionary<EditorTool, ToolRow> rows = new Dictionary<EditorTool, ToolRow>();
 
-        private static readonly (EditorTool tool, int key, string label)[] entries =
+        private static readonly (EditorTool tool, int key, string label, IconUsage icon)[] entries =
         {
-            (EditorTool.Selection, 1, "Select"),
-            (EditorTool.Circle, 2, "Circle"),
-            (EditorTool.Slider, 3, "Slider"),
-            (EditorTool.Spinner, 4, "Spinner"),  // placeable: click to start, scrub forward, click to end
+            (EditorTool.Selection, 1, "Select", FontAwesome.Solid.MousePointer),
+            (EditorTool.Circle, 2, "Circle", FontAwesome.Regular.Circle),
+            (EditorTool.Slider, 3, "Slider", FontAwesome.Solid.BezierCurve),
+            (EditorTool.Spinner, 4, "Spinner", FontAwesome.Solid.Asterisk),  // placeable: click to start, scrub forward, click to end
         };
 
         public ToolPanel()
@@ -49,9 +49,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Spacing = new Vector2(0, 6),
             };
 
-            foreach (var (tool, key, label) in entries)
+            foreach (var (tool, key, label, icon) in entries)
             {
-                var row = new ToolRow(key, label, disabled: false, () => ToolSelected?.Invoke(tool));
+                var row = new ToolRow(key, label, icon, disabled: false, () => ToolSelected?.Invoke(tool));
                 rows[tool] = row;
                 flow.Add(row);
             }
@@ -71,13 +71,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             private readonly bool disabled;
             private Box background = null!;
             private SpriteText label = null!;
+            private SpriteIcon iconSprite = null!;
             private readonly string text;
             private readonly int key;
+            private readonly IconUsage icon;
 
-            public ToolRow(int key, string label, bool disabled, Action onClick)
+            public ToolRow(int key, string label, IconUsage icon, bool disabled, Action onClick)
             {
                 this.key = key;
                 text = label;
+                this.icon = icon;
                 this.disabled = disabled;
                 Action = onClick;
 
@@ -98,11 +101,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Colour = EditorTheme.Colours.TextMuted,
                         Font = EditorTheme.Type.Label(numeric: true),
                     },
-                    this.label = new SpriteText
+                    iconSprite = new SpriteIcon
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
                         X = 32,
+                        Size = new Vector2(13),
+                        Icon = icon,
+                        Colour = disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.TextMuted,
+                    },
+                    this.label = new SpriteText
+                    {
+                        Anchor = Anchor.CentreLeft,
+                        Origin = Anchor.CentreLeft,
+                        X = 54,
                         Text = text,
                         Colour = disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text,
                         Font = EditorTheme.Type.BodyStrong(),
@@ -115,6 +127,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // Active tool = the sanctioned solid-accent case (a persistent selected state, dark-on-accent).
                 background.FadeColour(active ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
                 label.FadeColour(active ? EditorTheme.Colours.Sunken : (disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text), EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                iconSprite.FadeColour(active ? EditorTheme.Colours.Sunken : (disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.TextMuted), EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             }
         }
     }
