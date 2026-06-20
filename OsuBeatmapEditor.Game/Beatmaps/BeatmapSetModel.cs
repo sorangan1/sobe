@@ -23,6 +23,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         /// <summary>Maps a stored filename (lower-cased, e.g. the audio file) to its SHA-256 hash in the file store.</summary>
         public IReadOnlyDictionary<string, string> Files { get; init; } = new Dictionary<string, string>();
 
+        /// <summary>Stored files keyed by their <b>original-cased</b> filename → SHA-256 hash; used when re-packing
+        /// the set into an <c>.osz</c> on export (case matters for the .osu file references on import).</summary>
+        public IReadOnlyDictionary<string, string> OriginalFiles { get; init; } = new Dictionary<string, string>();
+
         /// <summary>Highest star rating among this set's difficulties (used for sorting/labels).</summary>
         public double MaxStarRating => Difficulties.Count == 0 ? 0 : Difficulties.Max(d => d.StarRating);
 

@@ -60,6 +60,8 @@ namespace OsuBeatmapEditor.Game
             deps.CacheAs(auth);
             // Local "git checkout HEAD" pointers for collab difficulties; no per-frame work, so not in the tree.
             deps.CacheAs(new Online.CollabSession(host.Storage));
+            // On-disk cache of the user's saved patterns, so the gallery doesn't re-hit the backend each open.
+            deps.CacheAs(new Online.PatternStore(host.Storage));
             return deps;
         }
 

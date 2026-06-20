@@ -116,6 +116,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Toggles the editor's Modding Mode (discussion bubbles + filters/messages panels).</summary>
         public readonly Bindable<Shortcut> ModdingModeKey = new Bindable<Shortcut>(new Shortcut(Key.M, Ctrl: true, Shift: true));
 
+        /// <summary>Toggles the Pattern Gallery (saved selections).</summary>
+        public readonly Bindable<Shortcut> PatternGalleryKey = new Bindable<Shortcut>(new Shortcut(Key.P, Ctrl: true, Shift: true));
+
         // Auto-preview cursor settings (persisted; the AU chip's mini-menu edits these).
         public readonly Bindable<Colour4> AutoCursorColour = new Bindable<Colour4>(Colour4.FromHex("ffdb33"));
         public readonly BindableFloat AutoTrailLength = new BindableFloat(10f) { MinValue = 0f, MaxValue = 120f, Precision = 1f };
@@ -172,6 +175,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["distancesnap"] = DistanceSnapKey,
                 ["convertstream"] = ConvertStreamKey,
                 ["moddingmode"] = ModdingModeKey,
+                ["patterngallery"] = PatternGalleryKey,
             };
 
             floats = new Dictionary<string, BindableFloat>

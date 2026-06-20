@@ -6,6 +6,7 @@ using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
+using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
 using osu.Framework.Localisation;
 using OsuBeatmapEditor.Game.Beatmaps;
@@ -43,6 +44,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container lineLayer = null!;
         private Container pieceLayer = null!;
         private SmoothPath preview = null!;
+        private Container? contextMenu;
+        private TailDragMarker? tailMarker;
+
+        // Multi-selection of control points (lazer-style): kept static so it survives the visualiser being
+        // recreated after an edit/part-selection, keyed by slider so switching sliders clears it.
+        private static int selSlider = -1;
+        private static readonly HashSet<int> selectedIndices = new HashSet<int>();
 
         public SliderControlPointVisualiser(HitObjectModel slider, float diameter, IEditorActions actions)
         {
@@ -72,8 +80,69 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 pieceLayer = new Container { RelativeSizeAxes = Axes.Both },
             };
 
+            // Switching to a different slider drops the previous selection; otherwise heal stale indices (a
+            // delete/insert may have shrunk the point list since the static selection was last set).
+            if (selSlider != sliderId)
+            {
+                selSlider = sliderId;
+                selectedIndices.Clear();
+            }
+            selectedIndices.RemoveWhere(i => i < 0 || i >= controlPoints.Count);
+
             rebuildPieces();
             rebuildPolygon();
+            rebuildTailMarker();
+            applySelectionVisual();
+        }
+
+        /// <summary>
+        /// Adds the tail end-cap drag handle at the rendered slider end (osu!lazer's EndDragMarker): dragging it
+        /// changes the slider's length, or with Shift its velocity. It sits just past the tail along the path so
+        /// it stays grabbable even when the tail coincides with the last control point.
+        /// </summary>
+        private void rebuildTailMarker()
+        {
+            var path = SliderGeometry.ComputePath(controlPoints, pixelLength);
+            if (path.Count < 1)
+                return;
+
+            float offset = diameter * 0.5f;
+            pieceLayer.Add(tailMarker = new TailDragMarker(diameter * 0.3f)
+            {
+                Position = endCapPosition(path, offset),
+                Begin = screen => actions.BeginSliderLengthDrag(sliderId, clamp(ToLocalSpace(screen))),
+                Drag = (screen, shift) =>
+                {
+                    var p = actions.PreviewSliderLength(clamp(ToLocalSpace(screen)), shift);
+                    if (p.Count < 2)
+                        return;
+
+                    preview.Alpha = 1;
+                    preview.Vertices = p;
+                    preview.Position = -preview.PositionInBoundingBox(Vector2.Zero);
+                    if (tailMarker != null)
+                        tailMarker.Position = endCapPosition(p, offset);
+                },
+                End = () =>
+                {
+                    preview.Alpha = 0;
+                    actions.EndSliderLengthDrag();
+                },
+            });
+        }
+
+        /// <summary>The end-cap position: the path end nudged outward along its final tangent by <paramref name="offset"/>.</summary>
+        private static Vector2 endCapPosition(IReadOnlyList<Vector2> path, float offset)
+        {
+            if (path.Count == 0)
+                return Vector2.Zero;
+            if (path.Count == 1)
+                return path[0];
+
+            Vector2 dir = path[^1] - path[^2];
+            if (dir.LengthSquared > 1e-6f)
+                dir = dir.Normalized();
+            return path[^1] + dir * offset;
         }
 
         /// <summary>(Re)creates a handle per control point.</summary>
@@ -88,13 +157,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     Position = controlPoints[i].Position,
                     Moved = handleMoved,
-                    Toggled = handleToggled,
-                    RightClicked = handleRightClicked,
+                    ContextRequested = showContextMenu,
+                    DragSelectRequested = ensureSelectedForDrag,
                     Clicked = pieceClicked,
                 };
                 pieces.Add(piece);
                 pieceLayer.Add(piece);
             }
+        }
+
+        /// <summary>Reflects the current multi-selection on the handles (a ring on the selected ones).</summary>
+        private void applySelectionVisual()
+        {
+            for (int i = 0; i < pieces.Count; i++)
+                pieces[i].SetSelected(selectedIndices.Contains(i));
         }
 
         /// <summary>Redraws the thin control-polygon lines connecting consecutive control points.</summary>
@@ -122,9 +198,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void handleMoved(int index, Vector2 screenPosition, bool finished)
         {
             Vector2 osu = clamp(ToLocalSpace(screenPosition));
-            controlPoints[index] = controlPoints[index] with { X = osu.X, Y = osu.Y };
 
-            pieces[index].Position = osu;
+            // Group move: if the dragged handle is part of a multi-selection, translate the whole selection by
+            // the same delta (lazer's DragInProgress). Otherwise just move the dragged handle.
+            if (selectedIndices.Count > 1 && selectedIndices.Contains(index))
+            {
+                Vector2 delta = osu - controlPoints[index].Position;
+                foreach (int i in selectedIndices)
+                {
+                    Vector2 p = clamp(controlPoints[i].Position + delta);
+                    controlPoints[i] = controlPoints[i] with { X = p.X, Y = p.Y };
+                    pieces[i].Position = p;
+                }
+            }
+            else
+            {
+                controlPoints[index] = controlPoints[index] with { X = osu.X, Y = osu.Y };
+                pieces[index].Position = osu;
+            }
+
             rebuildPolygon();
             showPreview();
 
@@ -140,62 +232,163 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
         }
 
-        /// <summary>Double-click a handle: toggle whether it starts a new segment (a sharp corner).</summary>
-        private void handleToggled(int index)
+        private static bool typesEqual(SliderPathType? a, SliderPathType? b)
         {
-            // The head always starts the first segment; it can't be un-typed.
-            if (index <= 0)
+            if (a is null && b is null) return true;
+            if (a is SliderPathType ta && b is SliderPathType tb) return ta.Type == tb.Type;
+            return false;
+        }
+
+        /// <summary>The control points a menu/edit targets: the whole multi-selection if the acted-on handle is part of it, else just that handle.</summary>
+        private List<int> targetsFor(int index) =>
+            selectedIndices.Count > 1 && selectedIndices.Contains(index)
+                ? selectedIndices.OrderBy(i => i).ToList()
+                : new List<int> { index };
+
+        /// <summary>Sets the segment curve type (or smooth = null) on the given control points and commits once.</summary>
+        private void setSegmentType(IReadOnlyList<int> indices, SliderPathType? type)
+        {
+            closeContextMenu();
+
+            bool changed = false;
+            foreach (int i in indices)
+            {
+                // The head must always start a segment, so it can't be smooth.
+                if (i <= 0 && type == null)
+                    continue;
+                if (typesEqual(controlPoints[i].Type, type))
+                    continue;
+
+                controlPoints[i] = controlPoints[i] with { Type = type };
+                changed = true;
+            }
+
+            if (changed)
+                actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
+        }
+
+        /// <summary>Deletes the given control points (keeping at least two), from the context menu, in one undo step.</summary>
+        private void deleteAnchors(IReadOnlyList<int> indices)
+        {
+            closeContextMenu();
+
+            var sorted = indices.Distinct().OrderByDescending(i => i).ToList();
+            if (controlPoints.Count - sorted.Count < 2)
+                return; // a slider needs at least two control points
+
+            foreach (int i in sorted)
+                controlPoints.RemoveAt(i);
+
+            // The new head must keep a definite type.
+            if (controlPoints[0].Type == null)
+                controlPoints[0] = controlPoints[0] with { Type = SliderPathType.Bezier };
+
+            selectedIndices.Clear();
+            actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
+        }
+
+        /// <summary>
+        /// Right-clicking a handle opens a small curve-type menu (Smooth / Linear / Perfect / Bezier + Delete),
+        /// like osu!lazer's path context menu. If the handle is part of a multi-selection the menu acts on all of it.
+        /// </summary>
+        private void showContextMenu(int index, Vector2 atOsuPos)
+        {
+            closeContextMenu();
+
+            var targets = targetsFor(index);
+            bool multi = targets.Count > 1;
+            string suffix = multi ? $" ({targets.Count})" : string.Empty;
+
+            var items = new FillFlowContainer
+            {
+                Direction = FillDirection.Vertical,
+                AutoSizeAxes = Axes.Both,
+            };
+
+            // "Smooth" only when none of the targets is the head (the head must start a segment).
+            if (!targets.Contains(0))
+                items.Add(new MenuButton("Smooth" + suffix, OsuColour.Yellow, () => setSegmentType(targets, null)));
+            items.Add(new MenuButton("Linear" + suffix, EditorTheme.Colours.Error, () => setSegmentType(targets, SliderPathType.Linear)));
+            items.Add(new MenuButton("Perfect curve" + suffix, OsuColour.Purple, () => setSegmentType(targets, SliderPathType.PerfectCurve)));
+            items.Add(new MenuButton("Bezier" + suffix, OsuColour.Pink, () => setSegmentType(targets, SliderPathType.Bezier)));
+            if (controlPoints.Count - targets.Count >= 2)
+                items.Add(new MenuButton("Delete" + suffix, EditorTheme.Colours.Error, () => deleteAnchors(targets), destructive: true));
+
+            var panel = new Container
+            {
+                Position = atOsuPos + new Vector2(diameter * 0.3f, 0),
+                AutoSizeAxes = Axes.Both,
+                Masking = true,
+                CornerRadius = 4f,
+                BorderThickness = 1f,
+                BorderColour = EditorTheme.Colours.Border,
+                EdgeEffect = new osu.Framework.Graphics.Effects.EdgeEffectParameters
+                {
+                    Type = osu.Framework.Graphics.Effects.EdgeEffectType.Shadow,
+                    Colour = new Color4(0, 0, 0, 0.4f),
+                    Radius = 6f,
+                },
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Overlay },
+                    items,
+                },
+            };
+
+            // A full-size catcher closes the menu on any click outside it.
+            contextMenu = new Container
+            {
+                RelativeSizeAxes = Axes.Both,
+                Children = new Drawable[]
+                {
+                    new ClickCatcher { Action = closeContextMenu },
+                    panel,
+                },
+            };
+            AddInternal(contextMenu);
+        }
+
+        private void closeContextMenu()
+        {
+            contextMenu?.Expire();
+            contextMenu = null;
+        }
+
+        /// <summary>
+        /// A click on a handle (lazer's selection model): Ctrl/Shift+click toggles it in the multi-selection; a
+        /// plain click selects just that handle, and on the head/tail also selects that edge node for the
+        /// two-stage part selection (our hitsound feature).
+        /// </summary>
+        private void pieceClicked(int index, bool additive)
+        {
+            if (additive)
+            {
+                if (!selectedIndices.Add(index))
+                    selectedIndices.Remove(index);
+                applySelectionVisual();
                 return;
-
-            controlPoints[index] = controlPoints[index].IsSegmentStart
-                ? controlPoints[index] with { Type = null }
-                : controlPoints[index] with { Type = segmentTypeAt(index) };
-
-            actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
-        }
-
-        /// <summary>Right-click a handle: un-corner a segment-start point, otherwise delete it (keeping at least two).</summary>
-        private void handleRightClicked(int index)
-        {
-            if (index > 0 && controlPoints[index].IsSegmentStart)
-            {
-                controlPoints[index] = controlPoints[index] with { Type = null };
-            }
-            else
-            {
-                if (controlPoints.Count <= 2)
-                    return;
-
-                controlPoints.RemoveAt(index);
-
-                // The new head must keep a definite type.
-                if (controlPoints[0].Type == null)
-                    controlPoints[0] = controlPoints[0] with { Type = SliderPathType.Bezier };
             }
 
-            actions.UpdateSliderAnchors(sliderId, controlPoints.ToArray());
-        }
+            selectedIndices.Clear();
+            selectedIndices.Add(index);
+            applySelectionVisual();
 
-        /// <summary>The spline type of the segment that control point <paramref name="index"/> belongs to.</summary>
-        private SliderPathType segmentTypeAt(int index)
-        {
-            for (int i = index; i >= 0; i--)
-            {
-                if (controlPoints[i].Type is SliderPathType t)
-                    return t;
-            }
-
-            return SliderPathType.Bezier;
-        }
-
-        /// <summary>A single click on a handle selects its edge node (head/tail) for the two-stage part selection.</summary>
-        private void pieceClicked(int index)
-        {
             if (index == 0)
                 PartNodeClicked?.Invoke(0);
             else if (index == controlPoints.Count - 1)
                 PartNodeClicked?.Invoke(tailNodeIndex);
-            // Intermediate anchors aren't edge nodes; a click just keeps the slider selected.
+            // Intermediate anchors aren't edge nodes; selecting one just highlights the handle.
+        }
+
+        /// <summary>When a drag starts on a handle that isn't already part of the selection, select just it.</summary>
+        private void ensureSelectedForDrag(int index)
+        {
+            if (selectedIndices.Contains(index))
+                return;
+
+            selectedIndices.Clear();
+            selectedIndices.Add(index);
+            applySelectionVisual();
         }
 
         /// <summary>
@@ -299,18 +492,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Math.Clamp(p.X, 0, ParsedBeatmap.PLAYFIELD_WIDTH),
             Math.Clamp(p.Y, 0, ParsedBeatmap.PLAYFIELD_HEIGHT));
 
-        /// <summary>A single draggable control-point handle; reports moves, double-click toggles and right-clicks upward.</summary>
+        /// <summary>A single draggable control-point handle; reports moves, clicks, drags and context-menu requests upward.</summary>
         private partial class ControlPointPiece : CircularContainer, IHasTooltip
         {
             public Action<int, Vector2, bool>? Moved;
-            public Action<int>? Toggled;
-            public Action<int>? RightClicked;
-            public Action<int>? Clicked;
+            public Action<int, Vector2>? ContextRequested;
+            public Action<int>? DragSelectRequested;
+            public Action<int, bool>? Clicked;
 
             private readonly int index;
             private readonly SliderPathType? segmentType;
             private readonly Box fill;
-            private double lastClickTime = double.MinValue;
 
             public ControlPointPiece(int index, SliderPathType? segmentType, float size)
             {
@@ -335,6 +527,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 };
             }
 
+            /// <summary>Highlights this handle when it is part of the multi-selection (a thicker yellow ring).</summary>
+            public void SetSelected(bool value)
+            {
+                BorderThickness = value ? 4f : 2f;
+                BorderColour = value ? EditorTheme.Colours.Selection : Color4.White;
+            }
+
             private static Color4 colourFor(SliderPathType? type)
             {
                 if (type is not SliderPathType t)
@@ -349,27 +548,32 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             public LocalisableString TooltipText => segmentType is not SliderPathType t
-                ? "Smooth point - the curve flows through it (double-click to make a corner)"
+                ? "Smooth point - the curve flows through it (right-click for curve type)"
                 : t.Type switch
                 {
-                    SliderSplineType.Linear => "Corner: straight segment",
-                    SliderSplineType.PerfectCurve => "Corner: circular arc",
-                    _ => "Corner: curved (bezier)",
+                    SliderSplineType.Linear => "Corner: straight segment (right-click for curve type)",
+                    SliderSplineType.PerfectCurve => "Corner: circular arc (right-click for curve type)",
+                    _ => "Corner: curved (bezier) (right-click for curve type)",
                 };
 
             protected override bool OnMouseDown(MouseDownEvent e)
             {
-                // Consume right-clicks (delete / un-corner) so the playfield doesn't delete the whole slider.
+                // Right-click opens the curve-type / delete context menu (like osu!lazer). Consuming it also keeps
+                // the playfield from deleting the whole slider.
                 if (e.Button == osuTK.Input.MouseButton.Right)
                 {
-                    RightClicked?.Invoke(index);
+                    ContextRequested?.Invoke(index, Position);
                     return true;
                 }
 
                 return base.OnMouseDown(e);
             }
 
-            protected override bool OnDragStart(DragStartEvent e) => true;
+            protected override bool OnDragStart(DragStartEvent e)
+            {
+                DragSelectRequested?.Invoke(index);
+                return true;
+            }
 
             protected override void OnDrag(DragEvent e) => Moved?.Invoke(index, e.ScreenSpaceMousePosition, false);
 
@@ -377,12 +581,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             protected override bool OnClick(ClickEvent e)
             {
-                double now = Time.Current;
-                if (now - lastClickTime < 250)
-                    Toggled?.Invoke(index);
-                else
-                    Clicked?.Invoke(index);
-                lastClickTime = now;
+                Clicked?.Invoke(index, Shortcut.CommandPressed(e) || e.ShiftPressed);
                 return true; // swallow so the playfield doesn't treat it as an empty-space click
             }
 
@@ -396,6 +595,146 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 fill.Alpha = 0.85f;
                 base.OnHoverLost(e);
+            }
+        }
+
+        /// <summary>
+        /// The tail end-cap handle (osu!lazer's EndDragMarker): a diamond at the slider's end that only handles
+        /// dragging (clicks fall through so the tail edge-node selection still works). Reports the screen-space
+        /// cursor + Shift state so the editor can change the slider's length (or, with Shift, its velocity).
+        /// </summary>
+        private partial class TailDragMarker : Container, IHasTooltip
+        {
+            public Action<Vector2>? Begin;       // grab: screen-space cursor
+            public Action<Vector2, bool>? Drag;  // move: screen-space cursor, Shift held
+            public Action? End;
+
+            private readonly Box fill;
+
+            public TailDragMarker(float size)
+            {
+                Origin = Anchor.Centre;
+                Size = new Vector2(size);
+                // A 45-degree rotated square reads as a diamond, distinct from the round control-point handles.
+                Rotation = 45f;
+                Masking = true;
+                BorderThickness = 2f;
+                BorderColour = Color4.White;
+                Child = fill = new Box
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Colour = EditorTheme.Colours.Selection,
+                    Alpha = 0.9f,
+                };
+            }
+
+            public LocalisableString TooltipText => "Drag to change length (hold Shift for velocity)";
+
+            protected override bool OnDragStart(DragStartEvent e)
+            {
+                Begin?.Invoke(e.ScreenSpaceMousePosition);
+                return true;
+            }
+
+            protected override void OnDrag(DragEvent e) => Drag?.Invoke(e.ScreenSpaceMousePosition, e.ShiftPressed);
+
+            protected override void OnDragEnd(DragEndEvent e) => End?.Invoke();
+
+            protected override bool OnHover(HoverEvent e)
+            {
+                fill.Alpha = 1f;
+                return base.OnHover(e);
+            }
+
+            protected override void OnHoverLost(HoverLostEvent e)
+            {
+                fill.Alpha = 0.9f;
+                base.OnHoverLost(e);
+            }
+        }
+
+        /// <summary>One row in the shift+right-click curve-type menu: a coloured dot + label, highlighting on hover.</summary>
+        private partial class MenuButton : CompositeDrawable
+        {
+            private readonly Action onClick;
+            private readonly Box background;
+
+            public MenuButton(string label, Color4 dot, Action onClick, bool destructive = false)
+            {
+                this.onClick = onClick;
+
+                AutoSizeAxes = Axes.Y;
+                Width = 132;
+                InternalChildren = new Drawable[]
+                {
+                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Overlay, Alpha = 0 },
+                    new FillFlowContainer
+                    {
+                        Direction = FillDirection.Horizontal,
+                        AutoSizeAxes = Axes.Both,
+                        Spacing = new Vector2(7, 0),
+                        Margin = new MarginPadding { Horizontal = 9, Vertical = 5 },
+                        Children = new Drawable[]
+                        {
+                            new Circle
+                            {
+                                Size = new Vector2(8),
+                                Colour = dot,
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                            },
+                            new SpriteText
+                            {
+                                Text = label,
+                                Font = FontUsage.Default.With(size: 13),
+                                Colour = destructive ? EditorTheme.Colours.Error : EditorTheme.Colours.Text,
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                            },
+                        },
+                    },
+                };
+            }
+
+            protected override bool OnHover(HoverEvent e)
+            {
+                background.Alpha = 1f;
+                return true;
+            }
+
+            protected override void OnHoverLost(HoverLostEvent e) => background.Alpha = 0f;
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                onClick();
+                return true;
+            }
+        }
+
+        /// <summary>A transparent full-area layer behind the menu that closes it when clicked.</summary>
+        private partial class ClickCatcher : Drawable
+        {
+            public Action? Action;
+
+            public ClickCatcher()
+            {
+                RelativeSizeAxes = Axes.Both;
+            }
+
+            // AlwaysPresent so it receives input even though it's fully transparent.
+            public override bool IsPresent => true;
+
+            protected override bool OnClick(ClickEvent e)
+            {
+                Action?.Invoke();
+                return true;
+            }
+
+            protected override bool OnMouseDown(MouseDownEvent e)
+            {
+                // Also dismiss on right-click so a second shift+right-click elsewhere doesn't stack menus.
+                Action?.Invoke();
+                return false;
             }
         }
     }

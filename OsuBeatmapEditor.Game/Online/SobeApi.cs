@@ -106,6 +106,28 @@ namespace OsuBeatmapEditor.Game.Online
             resp.EnsureSuccessStatusCode();
         }
 
+        /// <summary>
+        /// Searches osu!'s beatmap listing via the backend proxy. Returns matching sets (empty on any failure).
+        /// Public endpoint — no token required.
+        /// </summary>
+        public static async Task<List<BeatmapSetSearchResult>> SearchBeatmapsetsAsync(string query)
+        {
+            try
+            {
+                string url = $"{BaseUrl}/api/beatmaps/search?q={Uri.EscapeDataString(query ?? string.Empty)}";
+                using var resp = await http.GetAsync(url).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new List<BeatmapSetSearchResult>();
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<List<BeatmapSetSearchResult>>(body, json) ?? new List<BeatmapSetSearchResult>();
+            }
+            catch
+            {
+                return new List<BeatmapSetSearchResult>();
+            }
+        }
+
         // ---- Collab ("git for maps") -------------------------------------------------
 
         private static HttpRequestMessage Authed(HttpMethod method, string path, string token)
@@ -283,6 +305,129 @@ namespace OsuBeatmapEditor.Game.Online
             req.Content = new ByteArrayContent(data);
             req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            return resp.IsSuccessStatusCode;
+        }
+
+        // ---- Pattern Gallery: the user's saved hit-object selections + folders ----
+
+        /// <summary>Saves a new pattern; returns its server handle, or null on failure.</summary>
+        public static async Task<Guid?> CreatePatternAsync(string token, string name, Guid? collectionId, string content, int objectCount)
+        {
+            using var req = Authed(HttpMethod.Post, "/api/patterns", token);
+            req.Content = JsonBody(new { name, collectionId, content, objectCount });
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync().ConfigureAwait(false));
+            return doc.RootElement.TryGetProperty("id", out var idEl) && idEl.TryGetGuid(out var id) ? id : (Guid?)null;
+        }
+
+        /// <summary>Lists the current user's saved patterns (summaries, newest first). Empty on failure.</summary>
+        public static async Task<List<PatternSummary>> GetMyPatternsAsync(string token)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Get, "/api/patterns/mine", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new List<PatternSummary>();
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<List<PatternSummary>>(body, json) ?? new List<PatternSummary>();
+            }
+            catch
+            {
+                return new List<PatternSummary>();
+            }
+        }
+
+        /// <summary>Fetches a single pattern with its full content (for preview/paste). Null on failure.</summary>
+        public static async Task<PatternContent?> GetPatternAsync(string token, Guid id)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Get, $"/api/patterns/{id}", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return null;
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<PatternContent>(body, json);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Renames a pattern. False on failure.</summary>
+        public static async Task<bool> RenamePatternAsync(string token, Guid id, string name)
+        {
+            using var req = Authed(HttpMethod.Put, $"/api/patterns/{id}", token);
+            req.Content = JsonBody(new { name, moveCollection = false, collectionId = (Guid?)null, content = (string?)null, objectCount = (int?)null });
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            return resp.IsSuccessStatusCode;
+        }
+
+        /// <summary>Moves a pattern into a collection (null = ungrouped). False on failure.</summary>
+        public static async Task<bool> MovePatternAsync(string token, Guid id, Guid? collectionId)
+        {
+            using var req = Authed(HttpMethod.Put, $"/api/patterns/{id}", token);
+            req.Content = JsonBody(new { name = (string?)null, moveCollection = true, collectionId, content = (string?)null, objectCount = (int?)null });
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            return resp.IsSuccessStatusCode;
+        }
+
+        /// <summary>Deletes a pattern. False on failure.</summary>
+        public static async Task<bool> DeletePatternAsync(string token, Guid id)
+        {
+            using var req = Authed(HttpMethod.Delete, $"/api/patterns/{id}", token);
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            return resp.IsSuccessStatusCode;
+        }
+
+        /// <summary>Lists the current user's collections. Empty on failure.</summary>
+        public static async Task<List<PatternCollectionInfo>> GetMyCollectionsAsync(string token)
+        {
+            try
+            {
+                using var req = Authed(HttpMethod.Get, "/api/pattern-collections/mine", token);
+                using var resp = await http.SendAsync(req).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new List<PatternCollectionInfo>();
+
+                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return JsonSerializer.Deserialize<List<PatternCollectionInfo>>(body, json) ?? new List<PatternCollectionInfo>();
+            }
+            catch
+            {
+                return new List<PatternCollectionInfo>();
+            }
+        }
+
+        /// <summary>Creates a collection (folder); returns its handle, or null on failure.</summary>
+        public static async Task<Guid?> CreateCollectionAsync(string token, string name)
+        {
+            using var req = Authed(HttpMethod.Post, "/api/pattern-collections", token);
+            req.Content = JsonBody(new { name });
+
+            using var resp = await http.SendAsync(req).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync().ConfigureAwait(false));
+            return doc.RootElement.TryGetProperty("id", out var idEl) && idEl.TryGetGuid(out var id) ? id : (Guid?)null;
+        }
+
+        /// <summary>Deletes a collection (its patterns fall back to ungrouped). False on failure.</summary>
+        public static async Task<bool> DeleteCollectionAsync(string token, Guid id)
+        {
+            using var req = Authed(HttpMethod.Delete, $"/api/pattern-collections/{id}", token);
             using var resp = await http.SendAsync(req).ConfigureAwait(false);
             return resp.IsSuccessStatusCode;
         }

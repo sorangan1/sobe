@@ -73,6 +73,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private Online.CollabSession? collabs { get; set; }
 
+        // Local cache of the user's saved patterns; lets a "save pattern" land instantly before the upload finishes.
+        [Resolved(CanBeNull = true)]
+        private Online.PatternStore? patternStore { get; set; }
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
@@ -86,6 +90,38 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private HitObjectModel repeatDragOriginal;
         private Snapshot? repeatDragSnapshot;
         private bool repeatDragChanged;
+
+        // Slider length / velocity drag (dragging a slider's tail end-cap on the playfield, like osu!lazer's
+        // EndDragMarker). State captured at Begin and reused by the preview/commit calls so the live drag can
+        // recompute without mutating the map (which would recreate the control-point visualiser mid-drag).
+        private int lengthDragId = -1;
+        private HitObjectModel lengthDragOriginal;
+        private Snapshot? lengthDragSnapshot;
+        private bool lengthDragChanged;
+        private List<Vector2> lengthDragFullPath = new List<Vector2>();
+        private double lengthDragCalculatedDistance;
+        private double lengthDragOldExpected;
+        private double lengthDragOldVelocity;     // effective green-line SV at the slider's start when the drag began
+        private double lengthDragOldSpanDuration; // ms for one head-to-tail span at the start, kept fixed in velocity mode
+        private double lengthDragResetSv;         // SV in force going into the slider, restored in a reset line at its tail
+        private int lengthDragOldEnd;             // the slider's tail time at drag start (to relocate a stale reset line)
+        private Vector2 lengthDragGrabOffset;
+        private bool lengthDragVelocityMode;
+        private double lengthDragPendingExpected;
+        private double lengthDragPendingDuration;
+        private double lengthDragPendingSv;
+
+        // Timeline velocity drag (Shift + dragging a slider's tail on the top timeline): changes its speed by
+        // changing its duration while keeping the path length, instead of adding reverses.
+        private int velocityDragId = -1;
+        private HitObjectModel velocityDragOriginal;
+        private Snapshot? velocityDragSnapshot;
+        private bool velocityDragChanged;
+        private double velocityDragPixelLength;
+        private double velocityDragResetSv;
+        private int velocityDragOldEnd;
+        private double velocityDragPendingSv;
+        private double velocityDragPendingDuration;
 
         // Spinner duration drag (dragging a spinner's tail on the top timeline to change its end time).
         private int spinnerDragId = -1;
@@ -184,6 +220,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private PlaybackControl playbackControl = null!;
 
         private CollabOverlay collabOverlay = null!;
+        private UI.PatternGalleryOverlay patternGallery = null!;
+        private SavePatternButton savePatternButton = null!;
 
         /// <summary>True while the open difficulty is linked to a server collab; lights the COLLAB chip.</summary>
         private readonly BindableBool collabLinked = new BindableBool();
@@ -482,6 +520,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                             SetNormalBank = SetNormalBank,
                             SetAdditionBank = SetAdditionBank,
                         },
+                        // Appears only while holding Shift over a selection: a quick "save this selection as a pattern".
+                        savePatternButton = new SavePatternButton
+                        {
+                            ShouldShow = () => selection.Selected.Count > 0,
+                            OnSave = saveSelectionAsPattern,
+                        },
                     },
                 },
                 hitsoundBankBar = new HitsoundBankBar
@@ -516,6 +560,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     CurrentLink = () => collabs?.Get(statisticsKey),
                     StartCollab = startCollabAsync,
                     AddMember = addCollabMemberAsync,
+                },
+                patternGallery = new UI.PatternGalleryOverlay
+                {
+                    AddToMap = d => pasteObjects(d.Objects, d.SourceVelocities, d.SourceBeatLength),
                 },
                 // Frontmost so the beta notice sits above all editor chrome when shown on open.
                 betaOverlay = new BetaNoticeOverlay(),
@@ -1128,16 +1176,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>Inserts a new slider through the given control points (head first) on the current snapped time.</summary>
+        // The slider's start time is locked in when the head is placed (BeginSliderPlacement), so scrubbing the
+        // timeline while still adding anchors doesn't re-snap the length or move the slider.
+        private double? sliderPlaceTime;
+
+        public void BeginSliderPlacement() => sliderPlaceTime = Math.Round(snapTime(CurrentTime));
+
+        public void EndSliderPlacement() => sliderPlaceTime = null;
+
+        /// <summary>The locked-in slider start time during a build, or the live snapped time if none is set.</summary>
+        private int placementTime() => (int)(sliderPlaceTime ?? Math.Round(snapTime(CurrentTime)));
+
+        /// <summary>
+        /// The minimum drawn length (osu!px) for a slider to be placeable: one beat-snap division of travel
+        /// (= lazer's beat-snap distance). lazer rounds the placed length DOWN to a multiple of this, so a slider
+        /// shorter than the first tick snaps to zero length and renders nothing - we mirror that by refusing to
+        /// build/commit until the drawn curve reaches the first tick.
+        /// </summary>
+        private double placementMinLength(double time) => 100.0 * parsed.SliderMultiplier * velocityAt(time) / beatDivisor.Value.Value;
+
         public void PlaceSlider(IReadOnlyList<SliderControlPoint> points)
         {
             var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
             if (cps.Count < 2)
                 return;
 
-            int time = (int)Math.Round(snapTime(CurrentTime));
+            int time = placementTime();
 
             // The freshly-traced slider spans its full control polygon; snap that length so the tail lands on a tick.
-            double pixelLength = snapSliderLength(time, SliderGeometry.PathLength(SliderGeometry.ComputePath(cps)));
+            double drawn = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+            if (drawn < placementMinLength(time))
+                return; // shorter than the first tick - lazer treats this as invalid for placement
+
+            double pixelLength = snapSliderLength(time, drawn);
             var fullPath = SliderGeometry.ComputePath(cps, pixelLength);
             if (pixelLength < 1 || fullPath.Count < 2)
                 return;
@@ -1173,6 +1244,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             afterEdit();
             // Leave the new slider unselected (see PlaceCircle) so Q keeps arming the next placement.
             selection.Clear();
+            sliderPlaceTime = null;
         }
 
         // --- Spinner placement (osu!lazer model): click sets the start, the end follows the playhead. ---
@@ -1304,11 +1376,48 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return SliderGeometry.ComputePath(cps, pixelLength);
         }
 
+        /// <summary>The finalized path a freshly-placed slider would take (same type-inference + tick snap as <see cref="PlaceSlider"/>), so the live placement preview renders the actual slider body that will be committed.</summary>
+        public IReadOnlyList<Vector2> PlacementSliderPath(IReadOnlyList<SliderControlPoint> points)
+        {
+            var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
+            if (cps.Count < 2)
+                return System.Array.Empty<Vector2>();
+
+            int time = placementTime();
+            double drawn = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+            if (drawn < placementMinLength(time))
+                return System.Array.Empty<Vector2>(); // not yet a tick long - render nothing (lazer)
+
+            double pixelLength = snapSliderLength(time, drawn);
+            if (pixelLength < 1)
+                return System.Array.Empty<Vector2>();
+
+            return SliderGeometry.ComputePath(cps, pixelLength);
+        }
+
+        /// <summary>The duration a freshly-placed slider would have (same snap as <see cref="PlaceSlider"/>), for the live placement follow points.</summary>
+        public double PlacementSliderDuration(IReadOnlyList<SliderControlPoint> points)
+        {
+            var cps = SliderGeometry.InferSegmentTypes(clampControlPoints(points));
+            if (cps.Count < 2)
+                return 0;
+
+            int time = placementTime();
+            double drawn = SliderGeometry.PathLength(SliderGeometry.ComputePath(cps));
+            if (drawn < placementMinLength(time))
+                return 0;
+
+            double pixelLength = snapSliderLength(time, drawn);
+            if (pixelLength < 1)
+                return 0;
+
+            return sliderDuration(time, pixelLength, 1);
+        }
+
 
         public void PreviewSliderPlacement(IReadOnlyList<SliderControlPoint> points)
         {
-            int time = (int)Math.Round(snapTime(CurrentTime));
-            previewSliderTimeline(time, points, snap: true);
+            previewSliderTimeline(placementTime(), points, snap: true);
         }
 
         public void PreviewSliderResize(int id, IReadOnlyList<SliderControlPoint> points)
@@ -1362,13 +1471,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             double duration = pixelLength / velocity;
             double snapped = Math.Round(duration / tickMs) * tickMs;
 
-            // Never snap PAST the drawn curve: extending the expected distance beyond the path length makes the
-            // tail shoot off in a straight line (lazer's calculateLength extends linearly). Step down a tick so
-            // the slider always ends on the curve, at a tick. (A sub-one-tick curve is the only unavoidable case.)
+            // Never snap PAST the drawn curve. Extending the expected distance beyond the path length makes the
+            // tail shoot off in a straight line (lazer's calculateLength extends linearly). Lazer's
+            // FindSnappedDistance *always rounds down* for exactly this reason, so step down a tick whenever the
+            // nearest tick would overshoot the drawn curve.
             if (velocity * snapped > pixelLength)
                 snapped -= tickMs;
 
-            return velocity * Math.Max(tickMs, snapped);
+            // If even a single division still overshoots (the drawn curve is shorter than one tick of travel),
+            // keep the raw drawn length rather than extending it into a straight stub.
+            if (snapped < tickMs)
+                return pixelLength;
+
+            return velocity * snapped;
         }
 
         /// <summary>Clamps each control point to the playfield in integer osu!pixels (preserving its segment type).</summary>
@@ -1429,6 +1544,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
             return sv;
         }
+
+        /// <summary>
+        /// The SV in force <b>strictly before</b> the given time, ignoring any green line exactly at it - i.e. the
+        /// speed the map runs at going into a slider, which a velocity edit restores in a reset line just past it.
+        /// </summary>
+        private double velocityBefore(double time)
+        {
+            double sv = 1;
+            int t = (int)Math.Round(time);
+            foreach (var p in parsed.VelocityPoints)
+            {
+                if ((int)Math.Round(p.Time) < t)
+                    sv = p.Multiplier;
+                else
+                    break;
+            }
+            return sv;
+        }
+
+        /// <summary>The latest tail time among the objects keyed in <paramref name="velocityById"/> (a pasted pattern).</summary>
+        private double patternEnd(IReadOnlyDictionary<int, double> velocityById)
+            => parsed.HitObjects.Where(o => velocityById.ContainsKey(o.Id)).Max(o => o.StartTime + o.Duration);
 
         /// <summary>
         /// The hitsound volume (0..1) active at the given time, from the timing model's sample points (both red
@@ -2337,6 +2474,351 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             repeatDragSnapshot = null;
         }
 
+        // --- Slider velocity drag on the timeline (Shift + dragging the tail): change speed, not reverses ---
+
+        public void BeginSliderVelocityDrag(int id)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider)
+            {
+                velocityDragId = -1;
+                return;
+            }
+
+            var o = parsed.HitObjects[idx];
+            velocityDragId = id;
+            velocityDragOriginal = o;
+            velocityDragSnapshot = takeSnapshot();
+            velocityDragChanged = false;
+            velocityDragPixelLength = originalPixelLength(o);
+            velocityDragResetSv = velocityBefore(o.StartTime);
+            velocityDragOldEnd = (int)Math.Round(o.StartTime + o.Duration);
+            velocityDragPendingSv = velocityAt(o.StartTime);
+            velocityDragPendingDuration = o.Duration;
+        }
+
+        public void DragSliderVelocityTo(double endTime)
+        {
+            if (velocityDragId < 0)
+                return;
+
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == velocityDragId);
+            if (idx < 0)
+                return;
+
+            var orig = velocityDragOriginal;
+            int slides = Math.Max(1, orig.Slides);
+            double beatLength = beatLengthAt(orig.StartTime);
+            double mult = parsed.SliderMultiplier;
+            if (velocityDragPixelLength <= 0 || beatLength <= 0 || mult <= 0)
+                return;
+
+            // Drag the tail to a snapped time: with the path length fixed, the duration sets the speed (SV is
+            // inversely proportional to duration). Derive SV, clamp it, then re-derive the duration it really yields.
+            double rawDuration = snapTime(endTime) - orig.StartTime;
+            double sv = rawDuration > 0
+                ? Math.Clamp(velocityDragPixelLength * beatLength * slides / (mult * 100 * rawDuration), 0.1, 10)
+                : 10;
+            double newDuration = velocityDragPixelLength * beatLength * slides / (mult * 100 * sv);
+
+            velocityDragPendingSv = sv;
+            velocityDragPendingDuration = newDuration;
+
+            var cur = parsed.HitObjects[idx];
+            if (Math.Abs(cur.Duration - newDuration) < 1e-3)
+                return;
+
+            // Live preview: nudge the duration directly (the real green lines are written on drag end).
+            parsed.HitObjects[idx] = cur with { Duration = newDuration };
+            velocityDragChanged = true;
+            rebuildHitObjects();
+            topTimeline.Rebuild();
+        }
+
+        public void EndSliderVelocityDrag()
+        {
+            if (velocityDragId < 0)
+                return;
+
+            if (velocityDragChanged && velocityDragSnapshot != null)
+            {
+                int idx = parsed.HitObjects.FindIndex(o => o.Id == velocityDragId);
+                if (idx >= 0)
+                {
+                    applySliderVelocityLine(parsed.HitObjects[idx].StartTime, velocityDragPendingSv);
+                    parsed.RebuildTimingDerived();
+                    recomputeSliderDurationsData();
+                    applyVelocityResetLine(velocityDragId, velocityDragOldEnd, velocityDragResetSv, velocityDragPendingSv);
+
+                    undoStack.Push(velocityDragSnapshot);
+                    redoStack.Clear();
+                    afterEdit();
+                    selection.SetSingle(velocityDragId);
+                }
+            }
+
+            velocityDragId = -1;
+            velocityDragSnapshot = null;
+        }
+
+        // --- Slider length / velocity drag (dragging the tail end-cap on the playfield, like osu!lazer) ---
+
+        public void BeginSliderLengthDrag(int id, Vector2 osuCursor)
+        {
+            int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
+            if (idx < 0 || parsed.HitObjects[idx].Kind != HitObjectKind.Slider
+                || parsed.HitObjects[idx].ControlPoints is not { Count: >= 2 })
+            {
+                lengthDragId = -1;
+                return;
+            }
+
+            var o = parsed.HitObjects[idx];
+            lengthDragId = id;
+            lengthDragOriginal = o;
+            lengthDragSnapshot = takeSnapshot();
+            lengthDragChanged = false;
+            lengthDragVelocityMode = false;
+
+            // The full control-polygon curve (no expected distance applied) bounds how far the tail can extend.
+            lengthDragFullPath = new List<Vector2>(SliderGeometry.ComputePath(o.ControlPoints!));
+            lengthDragCalculatedDistance = SliderGeometry.PathLength(lengthDragFullPath);
+            lengthDragOldExpected = SliderGeometry.PathLength(o.Path ?? System.Array.Empty<Vector2>());
+            lengthDragOldVelocity = velocityAt(o.StartTime);
+            lengthDragOldSpanDuration = sliderDuration(o.StartTime, lengthDragOldExpected, 1);
+            lengthDragResetSv = velocityBefore(o.StartTime);
+            lengthDragOldEnd = (int)Math.Round(o.StartTime + o.Duration);
+
+            Vector2 tail = positionAtDistance(lengthDragFullPath, lengthDragOldExpected);
+            lengthDragGrabOffset = osuCursor - tail;
+            lengthDragPendingExpected = lengthDragOldExpected;
+            lengthDragPendingDuration = o.Duration;
+            lengthDragPendingSv = lengthDragOldVelocity;
+        }
+
+        public IReadOnlyList<Vector2> PreviewSliderLength(Vector2 osuCursor, bool adjustVelocity)
+        {
+            if (lengthDragId < 0)
+                return System.Array.Empty<Vector2>();
+
+            var orig = lengthDragOriginal;
+            Vector2 desired = osuCursor - lengthDragGrabOffset;
+            double proposed = findClosestPathDistance(lengthDragFullPath, lengthDragCalculatedDistance, desired);
+
+            double newExpected;
+            double newDuration;
+            double newSv = lengthDragOldVelocity;
+
+            if (adjustVelocity && lengthDragOldExpected > 0 && lengthDragOldVelocity > 0)
+            {
+                // Shift: keep the span duration fixed and let the velocity absorb the length change (lazer's mode).
+                // For a fixed duration, velocity is proportional to distance, so newSv = oldSv * proposed/oldExpected.
+                double ratio = proposed / lengthDragOldExpected;
+                newSv = Math.Clamp(lengthDragOldVelocity * ratio, 0.1, 10);
+                // Re-derive the achievable distance from the clamped velocity so the body matches what persists.
+                newExpected = Math.Clamp(lengthDragOldExpected * (newSv / lengthDragOldVelocity), 1, lengthDragCalculatedDistance);
+                newDuration = lengthDragOldSpanDuration * Math.Max(1, orig.Slides);
+                lengthDragVelocityMode = true;
+            }
+            else
+            {
+                // Default: change the expected distance, tick-snapped (round down) and capped at the drawn curve.
+                double minTick = Math.Min(placementMinLength(orig.StartTime), lengthDragCalculatedDistance);
+                proposed = Math.Clamp(proposed, minTick, lengthDragCalculatedDistance);
+                newExpected = Math.Clamp(snapSliderLength(orig.StartTime, proposed), minTick, lengthDragCalculatedDistance);
+                newDuration = sliderDuration(orig.StartTime, newExpected, orig.Slides);
+                lengthDragVelocityMode = false;
+            }
+
+            var path = SliderGeometry.ComputePath(orig.ControlPoints!, newExpected);
+            if (path.Count < 2)
+                return System.Array.Empty<Vector2>();
+
+            lengthDragPendingExpected = newExpected;
+            lengthDragPendingDuration = newDuration;
+            lengthDragPendingSv = newSv;
+            lengthDragChanged = Math.Abs(newExpected - lengthDragOldExpected) > 1e-3
+                || (lengthDragVelocityMode && Math.Abs(newSv - lengthDragOldVelocity) > 1e-4);
+
+            // Live timeline readout of the new extent.
+            topTimeline.ShowSliderPreview(orig.StartTime, newDuration, beatLengthAt(orig.StartTime));
+            return path;
+        }
+
+        public void EndSliderLengthDrag()
+        {
+            if (lengthDragId < 0)
+                return;
+
+            topTimeline.ClearSliderPreview();
+
+            if (lengthDragChanged && lengthDragSnapshot != null)
+            {
+                int idx = parsed.HitObjects.FindIndex(o => o.Id == lengthDragId);
+                if (idx >= 0)
+                {
+                    var o = parsed.HitObjects[idx];
+                    var newPath = SliderGeometry.ComputePath(o.ControlPoints!, lengthDragPendingExpected);
+                    if (newPath.Count >= 2)
+                    {
+                        parsed.HitObjects[idx] = o with
+                        {
+                            Path = newPath,
+                            Duration = lengthDragPendingDuration,
+                            RawLine = HitObjectLineEditor.SetSliderCurve(o.RawLine, o.ControlPoints!, lengthDragPendingExpected),
+                        };
+
+                        // Velocity mode persists as a green (inherited) SV line at the slider's start, the only
+                        // place the stable .osu format can carry a per-slider speed; a matching reset line at the
+                        // tail restores the speed the section ran at (e.g. 1.5 -> 2.94 -> 1.5).
+                        if (lengthDragVelocityMode)
+                        {
+                            applySliderVelocityLine(o.StartTime, lengthDragPendingSv);
+                            parsed.RebuildTimingDerived();
+                            recomputeSliderDurationsData();
+                            applyVelocityResetLine(lengthDragId, lengthDragOldEnd, lengthDragResetSv, lengthDragPendingSv);
+                        }
+
+                        undoStack.Push(lengthDragSnapshot);
+                        redoStack.Clear();
+                        afterEdit();
+                        selection.SetSingle(lengthDragId);
+                    }
+                }
+            }
+
+            lengthDragId = -1;
+            lengthDragSnapshot = null;
+            lengthDragVelocityMode = false;
+        }
+
+        /// <summary>Position along a piecewise path at the given travel distance (clamped to its ends).</summary>
+        private static Vector2 positionAtDistance(IReadOnlyList<Vector2> path, double distance)
+        {
+            if (path.Count == 0)
+                return Vector2.Zero;
+            if (path.Count == 1 || distance <= 0)
+                return path[0];
+
+            double acc = 0;
+            for (int i = 1; i < path.Count; i++)
+            {
+                double seg = (path[i] - path[i - 1]).Length;
+                if (acc + seg >= distance)
+                {
+                    double t = seg > 0 ? (distance - acc) / seg : 0;
+                    return path[i - 1] + (path[i] - path[i - 1]) * (float)t;
+                }
+                acc += seg;
+            }
+            return path[^1];
+        }
+
+        /// <summary>
+        /// The travel distance along the curve whose point is closest to <paramref name="desired"/> (osu!lazer's
+        /// coarse-then-fine search, with a small bias toward longer distances so the full length is easy to reach).
+        /// </summary>
+        private static double findClosestPathDistance(IReadOnlyList<Vector2> path, double calculatedDistance, Vector2 desired)
+        {
+            if (path.Count < 2 || calculatedDistance <= 0)
+                return 0;
+
+            const double step1 = 10, step2 = 0.1, bias = 0.01;
+            double best = 0, min = double.MaxValue;
+
+            for (double d = 0; d <= calculatedDistance; d += step1)
+            {
+                double dist = Vector2.Distance(positionAtDistance(path, d), desired) - d * bias;
+                if (dist < min) { min = dist; best = d; }
+            }
+
+            double maxV = Math.Min(best + step1, calculatedDistance);
+            for (double d = Math.Max(0, best - step1); d <= maxV; d += step2)
+            {
+                double dist = Vector2.Distance(positionAtDistance(path, d), desired) - d * bias;
+                if (dist < min) { min = dist; best = d; }
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// Sets the slider-velocity in force at <paramref name="time"/> to <paramref name="sv"/> by updating the
+        /// inherited (green) line exactly there, or creating one that inherits the surrounding sample context.
+        /// Data only - the caller re-derives timing. Used to persist a per-slider velocity change (stable model).
+        /// </summary>
+        private void applySliderVelocityLine(double time, double sv)
+        {
+            sv = Math.Clamp(sv, 0.1, 10);
+            double beatLength = TimingPointLineEditor.BeatLengthFromSv(sv);
+            int t = (int)Math.Round(time);
+
+            int idx = parsed.TimingPointModels.FindIndex(tp => !tp.Uninherited && (int)Math.Round(tp.Time) == t);
+            if (idx >= 0)
+            {
+                parsed.TimingPointModels[idx] = parsed.TimingPointModels[idx] with { BeatLength = beatLength };
+                return;
+            }
+
+            // Inherit the active context so the new line changes only the SV, not the hitsound volume/bank/kiai.
+            TimingPointModel? ctx = null;
+            double bestTime = double.NegativeInfinity;
+            foreach (var tp in parsed.TimingPointModels)
+                if (tp.Time <= t && tp.Time >= bestTime) { bestTime = tp.Time; ctx = tp; }
+
+            parsed.TimingPointModels.Add(new TimingPointModel(
+                Id: nextTimingPointId(),
+                Time: t,
+                BeatLength: beatLength,
+                Meter: ctx?.Meter ?? 4,
+                SampleSet: ctx?.SampleSet ?? 0,
+                SampleIndex: ctx?.SampleIndex ?? 0,
+                Volume: ctx?.Volume ?? 100,
+                Uninherited: false,
+                Effects: TimingPointLineEditor.WithKiai(0, ctx?.Kiai ?? false)));
+
+            // Keep the list ordered (red before green on a tie) so the encoded .osu stays valid.
+            parsed.TimingPointModels.Sort((a, b) =>
+                a.Time != b.Time ? a.Time.CompareTo(b.Time) : b.Uninherited.CompareTo(a.Uninherited));
+        }
+
+        /// <summary>
+        /// Removes the auto-added "reset" green line at <paramref name="time"/> whose SV matches <paramref name="sv"/>
+        /// (the one a velocity edit drops past a slider). Used to relocate it when the slider is re-modified, so the
+        /// reset point follows the slider's tail instead of leaving a stale line at the old end.
+        /// </summary>
+        private void removeVelocityResetLine(int time, double sv)
+        {
+            double beat = TimingPointLineEditor.BeatLengthFromSv(Math.Clamp(sv, 0.1, 10));
+            parsed.TimingPointModels.RemoveAll(tp => !tp.Uninherited
+                && (int)Math.Round(tp.Time) == time
+                && Math.Abs(tp.BeatLength - beat) < 1e-3);
+        }
+
+        /// <summary>
+        /// Places (or relocates) the reset green line at a velocity-edited slider's tail. Removes any stale reset
+        /// line left at the previous tail (so it follows the slider when re-modified), then writes one at the new
+        /// tail restoring <paramref name="resetSv"/> - unless the edit returned the slider to that base speed, in
+        /// which case no reset line is needed. Assumes slider durations are already recomputed.
+        /// </summary>
+        private void applyVelocityResetLine(int sliderId, int oldEnd, double resetSv, double appliedSv)
+        {
+            var slider = parsed.HitObjects.First(h => h.Id == sliderId);
+            int newEnd = (int)Math.Round(slider.StartTime + slider.Duration);
+
+            if (oldEnd != newEnd)
+                removeVelocityResetLine(oldEnd, resetSv);
+
+            if (Math.Abs(appliedSv - resetSv) > 1e-4)
+            {
+                applySliderVelocityLine(newEnd, resetSv);
+                parsed.RebuildTimingDerived();
+                recomputeSliderDurationsData();
+            }
+            else
+                removeVelocityResetLine(newEnd, resetSv);
+        }
+
         public void BeginSpinnerDurationDrag(int id)
         {
             int idx = parsed.HitObjects.FindIndex(o => o.Id == id);
@@ -2956,32 +3438,169 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!HitObjectClipboard.HasContent)
                 return;
 
-            var clip = HitObjectClipboard.Objects;
+            pasteObjects(HitObjectClipboard.Objects);
+        }
+
+        /// <summary>
+        /// Inserts the given objects (a clipboard paste or a saved Pattern Gallery pattern) at the current
+        /// snapped playhead: shifts their times so the earliest lands on the playhead, gives them fresh ids,
+        /// re-times sliders to this map's BPM/SV, renumbers combos, and selects the result. When
+        /// <paramref name="sourceVelocities"/> is supplied (a pattern import), each slider's source velocity
+        /// (SliderMultiplier·SV) is reproduced with green lines so it keeps the same rhythmic length + shape.
+        /// </summary>
+        public void pasteObjects(IReadOnlyList<HitObjectModel> clip, IReadOnlyList<double?>? sourceVelocities = null, double? sourceBeatLength = null)
+        {
+            if (clip == null || clip.Count == 0)
+                return;
+
             double target = Math.Round(snapTime(CurrentTime));
             double baseTime = clip.Min(o => o.StartTime);
-            double offset = target - baseTime;
+
+            // Rescale inter-note spacing by the tempo ratio so a pattern keeps its rhythm (and stays on the beat
+            // grid) when pasted into a map with a different BPM. A note k ticks into the pattern lands k ticks
+            // into the target tempo from the (snapped) playhead. Falls back to a plain shift for v1 patterns.
+            double targetBeatLength = beatLengthAt(target);
+            double ratio = sourceBeatLength is double sbl && sbl > 0 && targetBeatLength > 0
+                ? targetBeatLength / sbl
+                : 1.0;
 
             pushUndo();
 
             int id = nextId();
             var newIds = new List<int>(clip.Count);
-            foreach (var o in clip)
+            var velocityById = new Dictionary<int, double>();
+            for (int i = 0; i < clip.Count; i++)
             {
+                var o = clip[i];
+                double newTime = Math.Round(target + (o.StartTime - baseTime) * ratio);
                 newIds.Add(id);
                 parsed.HitObjects.Add(o with
                 {
-                    StartTime = o.StartTime + offset,
-                    RawLine = HitObjectLineEditor.ShiftTime(o.RawLine, offset),
+                    StartTime = newTime,
+                    RawLine = HitObjectLineEditor.ShiftTime(o.RawLine, newTime - o.StartTime),
                     Id = id,
                 });
+
+                if (o.Kind == HitObjectKind.Slider && sourceVelocities != null && i < sourceVelocities.Count
+                    && sourceVelocities[i] is double v && v > 0)
+                    velocityById[id] = v;
+
                 id++;
             }
 
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
-            // Pasted sliders carry their source map's duration; re-time them for this map's SV/BPM.
+            // Re-time sliders to this map's ambient SV/BPM first, so their durations (and the reset-line position)
+            // are sane before we add per-slider green lines, then re-time again with those lines applied.
+            recomputeSliderDurationsData();
+            applyPatternVelocities(velocityById);
             recomputeSliderDurationsData();
             afterEdit();
             selection.SetRange(newIds);
+        }
+
+        /// <summary>
+        /// For each just-pasted slider that carried a source velocity, writes/updates a green line at its start so
+        /// the target effective SV equals <c>sourceVelocity / SliderMultiplier_target</c> - which (with the slider's
+        /// pixel length kept) makes it span the same number of beats as in the source map. Processes sliders in
+        /// time order so each added line only affects the slider it's for (and later ones reading the same value).
+        /// </summary>
+        private void applyPatternVelocities(IReadOnlyDictionary<int, double> velocityById)
+        {
+            double smTarget = parsed.SliderMultiplier;
+            if (velocityById.Count == 0 || smTarget <= 0)
+                return;
+
+            var ids = parsed.HitObjects
+                .Where(o => velocityById.ContainsKey(o.Id))
+                .OrderBy(o => o.StartTime)
+                .Select(o => o.Id)
+                .ToList();
+            if (ids.Count == 0)
+                return;
+
+            // The SV the map originally runs at just past the pattern; restored afterwards so the green lines we
+            // add affect only the pattern, not the rest of the map (a green line otherwise carries forward).
+            double restoreSv = velocityBefore(patternEnd(velocityById) + 1);
+
+            bool any = false;
+            foreach (int id in ids)
+            {
+                var o = parsed.HitObjects.First(h => h.Id == id);
+                double desired = Math.Clamp(velocityById[id] / smTarget, 0.1, 10);
+                if (Math.Abs(desired - velocityAt(o.StartTime)) < 1e-4)
+                    continue; // the map already runs at the right SV here - no green line needed
+
+                applySliderVelocityLine(o.StartTime, desired);
+                parsed.RebuildTimingDerived(); // so the next slider's velocityAt sees this line
+                recomputeSliderDurationsData(); // durations under the new SV, so the end position below is accurate
+                any = true;
+            }
+
+            // Drop a reset line at the *true* pattern end - measured after the green lines above changed the slider
+            // durations (a faster SV shortens the slider, moving its tail earlier), so it lands on the real tail.
+            int resetTime = (int)Math.Round(patternEnd(velocityById));
+            if (any && Math.Abs(velocityAt(resetTime) - restoreSv) > 1e-4)
+            {
+                applySliderVelocityLine(resetTime, restoreSv);
+                parsed.RebuildTimingDerived();
+                recomputeSliderDurationsData();
+            }
+        }
+
+        /// <summary>The currently-selected objects (time-ordered) - the source for saving a Pattern Gallery pattern.</summary>
+        private IReadOnlyList<HitObjectModel> CapturePattern()
+        {
+            var ids = new HashSet<int>(selection.Selected);
+            return parsed.HitObjects.Where(o => ids.Contains(o.Id)).OrderBy(o => o.StartTime).ToList();
+        }
+
+        /// <summary>Saves the current selection to the user's Pattern Gallery (server-side), then refreshes it.</summary>
+        private void saveSelectionAsPattern()
+        {
+            var objs = CapturePattern();
+            if (objs.Count == 0)
+                return;
+
+            string? token = auth?.Token;
+            if (token == null)
+            {
+                // Not logged in: tell the user and open the gallery, which shows the log-in prompt.
+                toasts?.Push("Log in to save patterns", EditorTheme.Colours.Warning);
+                patternGallery.Show();
+                return;
+            }
+
+            // Capture each slider's source velocity (SliderMultiplier · effective SV at its time) so a paste into a
+            // map with a different tempo / slider multiplier can reproduce the same rhythmic length via green lines.
+            double smSource = parsed.SliderMultiplier;
+            double? sliderVelocity(HitObjectModel o) =>
+                o.Kind == HitObjectKind.Slider ? smSource * velocityAt(o.StartTime) : (double?)null;
+
+            // The source tempo at the pattern start, so a paste into a different-BPM map can rescale the spacing.
+            double sourceBeatLength = beatLengthAt(objs.Min(o => o.StartTime));
+
+            string content = PatternSerializer.Serialize(objs, sliderVelocity, sourceBeatLength);
+            int count = objs.Count;
+
+            // Save locally first so the pattern shows up instantly, then upload in the background and reconcile its id.
+            if (auth?.User.Value?.Id is long uid)
+                patternStore?.EnsureUser(uid);
+            var local = patternStore?.AddLocal("Pattern", null, content, count);
+            patternGallery.RefreshFromCache();
+            toasts?.Push("Pattern saved", EditorTheme.Colours.Velocity);
+
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                var saved = await Online.SobeApi.CreatePatternAsync(token, "Pattern", null, content, count).ConfigureAwait(false);
+                Schedule(() =>
+                {
+                    if (saved is { } serverId && local != null)
+                        patternStore?.ConfirmUpload(local.Id, serverId);
+                    else if (saved == null)
+                        toasts?.Push("Pattern saved locally (couldn't reach server)", EditorTheme.Colours.Warning);
+                    patternGallery.RefreshFromCache();
+                });
+            });
         }
 
         // --- Undo / redo: snapshots of the hit-object list ---
@@ -3182,6 +3801,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Spacing = new Vector2(6, 0),
             Children = new Drawable[]
             {
+                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.Cog, "Settings",
+                    () => settingsOverlay.ToggleVisibility()),
+                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport, "Export .osz (saved state)",
+                    exportMap),
                 new OsuButton("Song Setup", OsuColour.Surface)
                 {
                     Size = new Vector2(84, 24),
@@ -3189,15 +3812,41 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     CornerRadius = 5,
                     Action = () => songSettingsOverlay.ToggleVisibility(),
                 },
-                new OsuButton("Settings", OsuColour.Surface)
+                new OsuButton("Patterns", OsuColour.Surface)
                 {
-                    Size = new Vector2(68, 24),
+                    Size = new Vector2(74, 24),
                     FontSize = 13,
                     CornerRadius = 5,
-                    Action = () => settingsOverlay.ToggleVisibility(),
+                    Action = () => patternGallery.ToggleVisibility(),
                 },
             },
         };
+
+        /// <summary>Exports the open map's set to a <c>.osz</c> off-thread, then toasts + reveals it. Reflects the
+        /// last saved state of the set's files (unsaved edits aren't included until you save).</summary>
+        private void exportMap()
+        {
+            toasts?.Push($"Exporting {set.Artist} - {set.Title}...");
+            string exportsDir = host.Storage.GetFullPath("exports");
+            var exportSet = set;
+
+            Task.Run(() =>
+            {
+                string? error = BeatmapArchiveExporter.Export(exportSet, exportsDir, out string outputPath);
+                Schedule(() =>
+                {
+                    if (error == null)
+                    {
+                        toasts?.Push($"Exported to {Path.GetFileName(outputPath)}", EditorTheme.Colours.Success);
+                        host.PresentFileExternally(outputPath);
+                    }
+                    else
+                    {
+                        toasts?.Push(error, EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
 
         protected override void LoadComplete()
         {
@@ -3238,6 +3887,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (settings.SettingsKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
             {
                 toggleEditorOverlay(settingsOverlay);
+                return true;
+            }
+
+            if (settings.PatternGalleryKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                patternGallery.ToggleVisibility();
                 return true;
             }
 

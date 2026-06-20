@@ -79,6 +79,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Slider repeat-drag state (dragging a slider's tail changes its reverse count, like osu!lazer).
         private bool repeatDragging;
 
+        // Slider velocity-drag state (Shift + dragging the tail changes its speed instead of adding reverses).
+        private bool velocityDragging;
+
         // Spinner resize state (dragging a spinner's tail changes its end time / duration).
         private bool spinnerResizing;
 
@@ -1653,14 +1656,23 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             double startTime = timeAt(e.ScreenSpaceMouseDownPosition);
             int id = objectAt(startTime, ToLocalSpace(e.ScreenSpaceMouseDownPosition).Y);
 
-            // Grabbing a slider's tail drags its reverse (repeat) count instead of moving it, like lazer.
+            // Grabbing a slider's tail drags its reverse (repeat) count instead of moving it, like lazer - but with
+            // Shift held it instead changes the slider's velocity (its duration), so Shift+drag never adds reverses.
             if (e.Button == MouseButton.Left && id >= 0 && isSliderTailGrab(id, startTime))
             {
                 if (!selection.Contains(id))
                     selection.SetSingle(id);
 
-                repeatDragging = true;
-                actions.BeginSliderRepeatDrag(id);
+                if (e.ShiftPressed)
+                {
+                    velocityDragging = true;
+                    actions.BeginSliderVelocityDrag(id);
+                }
+                else
+                {
+                    repeatDragging = true;
+                    actions.BeginSliderRepeatDrag(id);
+                }
                 return true;
             }
 
@@ -1711,6 +1723,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 paintCellAt(timeAt(e.ScreenSpaceMousePosition), paintLaneIndex);
             else if (moving)
                 actions.MoveSelectionTime(timeAt(e.ScreenSpaceMousePosition) - moveStartTime, moveGrabbedId);
+            else if (velocityDragging)
+                actions.DragSliderVelocityTo(timeAt(e.ScreenSpaceMousePosition));
             else if (repeatDragging)
                 actions.DragSliderRepeatTo(timeAt(e.ScreenSpaceMousePosition));
             else if (spinnerResizing)
@@ -1735,6 +1749,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 moving = false;
                 actions.EndMove();
+                return;
+            }
+
+            if (velocityDragging)
+            {
+                velocityDragging = false;
+                actions.EndSliderVelocityDrag();
                 return;
             }
 

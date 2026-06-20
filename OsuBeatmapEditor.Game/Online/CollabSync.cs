@@ -36,7 +36,22 @@ namespace OsuBeatmapEditor.Game.Online
             if (audioBytes == null)
                 return (false, "Couldn't download the audio.");
 
+            // Untrusted, shared content: reject oversized / non-audio bytes and a hash that doesn't match the
+            // server's manifest before anything touches disk or a decoder. Audio is required, so this fails hard.
+            string? audioError = CollabAssetValidator.ValidateAudio(audioBytes, audio.Filename);
+            if (audioError != null)
+                return (false, audioError);
+            if (!hashMatches(audio.Hash, audioBytes))
+                return (false, "The audio asset failed its integrity check.");
+
             byte[]? bgBytes = background == null ? null : await SobeApi.DownloadAssetAsync(token, collab.Id, "background").ConfigureAwait(false);
+
+            // The background is optional, so a bad one is dropped (map still opens) rather than failing the download.
+            if (bgBytes != null && (CollabAssetValidator.ValidateImage(bgBytes, background!.Filename) != null || !hashMatches(background.Hash, bgBytes)))
+            {
+                bgBytes = null;
+                background = null;
+            }
 
             string? error = BeatmapRealmCreator.BootstrapCollab(rev.OsuText, audioBytes, audio.Filename, bgBytes, background?.Filename);
             if (error != null)
@@ -87,5 +102,13 @@ namespace OsuBeatmapEditor.Game.Online
             await SobeApi.MarkSeenAsync(token, collab.Id, rev.Number).ConfigureAwait(false);
             return (true, $"Pulled revision {rev.Number}.");
         }
+
+        /// <summary>
+        /// True when downloaded bytes match the hash the server advertised for an asset (defends against tampering /
+        /// a corrupt transfer). An empty/absent declared hash is treated as a pass, so older manifests still work.
+        /// </summary>
+        private static bool hashMatches(string? declaredHash, byte[] bytes)
+            => string.IsNullOrEmpty(declaredHash)
+               || string.Equals(declaredHash, LazerRealmFiles.Sha256Hex(bytes), StringComparison.OrdinalIgnoreCase);
     }
 }

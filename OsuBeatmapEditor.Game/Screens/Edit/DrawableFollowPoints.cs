@@ -52,6 +52,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             RelativeSizeAxes = Axes.Both;
 
+            // No forward time gap (the target object starts at or before the source ends - e.g. a slider resized
+            // long enough to overlap the next note). lazer draws no follow points across such a link, and the
+            // band animation would otherwise compute negative transform durations and crash.
+            if (endTime <= startTime)
+            {
+                LifetimeEnd = LifetimeStart;
+                return;
+            }
+
             Vector2 delta = end - start;
             float distance = delta.Length;
             if (distance < min_distance)

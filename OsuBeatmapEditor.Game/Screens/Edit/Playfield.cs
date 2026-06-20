@@ -133,9 +133,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Slider-build state: anchors committed by successive clicks (double-click = sharp corner),
         // right-click finishes (the cursor becomes the tail), Esc cancels.
         private bool buildingSlider;
+        // The playhead time when the head was placed. Locked in so scrubbing the timeline while adding anchors
+        // doesn't move/re-snap the slider (its start is already established).
+        private double sliderBuildStartTime;
         private readonly List<SliderControlPoint> sliderAnchors = new List<SliderControlPoint>();
         private double lastAnchorClickTime = double.MinValue;
-        private SmoothPath? sliderPreview;
+        // The live placement preview renders the *actual* slider body (same SliderBodyPath as a committed
+        // slider) plus a ghost tail circle, so you see the finished slider while drawing it (lazer-style).
+        private SliderBodyPath? sliderPreview;
+        private CircularContainer? sliderTailPreview;
         // Node markers shown on each anchor (and the cursor) while a slider is being drawn.
         private Container? sliderNodes;
 
@@ -642,12 +648,23 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!buildingSlider)
             {
                 buildingSlider = true;
+                sliderBuildStartTime = snappedNow();
+                actions.BeginSliderPlacement();
                 sliderAnchors.Clear();
-                overlayLayer.Add(sliderPreview = new SmoothPath
+
+                // The body uses the same SliderBodyPath + appearance settings as a committed slider, so the
+                // preview is the finished slider rather than a flat trace.
+                Color4 combo = previewCombo().colour;
+                overlayLayer.Add(sliderPreview = new SliderBodyPath
                 {
-                    PathRadius = Math.Max(2f, currentDiameter / 2f - 2f),
-                    Colour = new Color4(OsuColour.Pink.R, OsuColour.Pink.G, OsuColour.Pink.B, 0.55f),
+                    PathRadius = currentDiameter / 2f,
+                    BorderColour = Color4.White,
+                    AccentColour = combo,
+                    BodyOpacity = settings.ObjectBackgroundOpacity.Value,
+                    BorderPortion = Math.Clamp(2f * settings.ObjectBorderThickness.Value, 0.02f, 0.9f),
                 });
+                // A ghost tail ring (matching the head ghost) sits at the slider's finalized end.
+                overlayLayer.Add(sliderTailPreview = ghostRing(combo));
                 // Node markers sit on top of the trace so the anchors stay visible as the slider is drawn.
                 overlayLayer.Add(sliderNodes = new Container { RelativeSizeAxes = Axes.Both });
             }
@@ -674,10 +691,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             var anchors = new List<SliderControlPoint>(sliderAnchors);
-            cancelSliderBuild();
 
+            // Commit BEFORE tearing down the build state: PlaceSlider reads the locked-in start time, which
+            // cancelSliderBuild clears via EndSliderPlacement.
             if (anchors.Count >= 2)
                 actions.PlaceSlider(anchors);
+
+            cancelSliderBuild();
         }
 
         /// <summary>Discards the in-progress slider trace and its preview.</summary>
@@ -689,9 +709,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             sliderAnchors.Clear();
             sliderPreview?.Expire();
             sliderPreview = null;
+            sliderTailPreview?.Expire();
+            sliderTailPreview = null;
             sliderNodes?.Expire();
             sliderNodes = null;
+            clearPreviewFollowPoints();
             actions.ClearSliderPreview();
+            actions.EndSliderPlacement();
         }
 
         private static Vector2 clampToPlayfield(Vector2 p) => new Vector2(
@@ -1172,6 +1196,63 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
         }
 
+        // Live follow-point connections from/to the object currently being placed (the ghost preview). Rebuilt
+        // each frame in updatePlacementPreview, cleared when no placement tool is active. Lets the mapper see the
+        // flow into (and out of) the pending object in real time, exactly like osu!lazer (which inserts the
+        // pending object into the beatmap during placement, so its follow points update naturally).
+        private readonly List<Drawable> previewFollowDrawables = new List<Drawable>();
+
+        private void clearPreviewFollowPoints()
+        {
+            if (previewFollowDrawables.Count == 0)
+                return;
+
+            foreach (var d in previewFollowDrawables)
+                followPointContainer.Remove(d);
+            previewFollowDrawables.Clear();
+        }
+
+        /// <summary>Whether an object's raw line carries the new-combo type bit (bit 2), i.e. it starts its own combo.</summary>
+        private static bool startsNewCombo(HitObjectModel o)
+        {
+            string[] parts = o.RawLine.Split(',');
+            return parts.Length > 3 && int.TryParse(parts[3], out int type) && (type & 4) != 0;
+        }
+
+        /// <summary>
+        /// Rebuilds the follow points touching the pending placement object: one from the previous in-combo
+        /// object into the pending start, and one from the pending end out to the next in-combo object. Spinners
+        /// and new-combo boundaries break the chain (as in <see cref="buildFollowPoints"/>).
+        /// </summary>
+        private void updatePreviewFollowPoints(Vector2 startPos, Vector2 endPos, double startTime, double endTimeMs, bool isNewCombo)
+        {
+            clearPreviewFollowPoints();
+
+            // Immediate neighbours by time (currentHitObjects is time-sorted). Objects sharing the exact start
+            // time are ignored - placing would replace them (removeObjectsAt).
+            HitObjectModel? prev = null, next = null;
+            foreach (var o in currentHitObjects)
+            {
+                if (o.StartTime < startTime) prev = o;
+                else if (o.StartTime > startTime && next == null) next = o;
+            }
+
+            // Incoming: previous -> pending (unless the pending object starts a new combo, or the previous is a spinner).
+            if (!isNewCombo && prev is HitObjectModel p && p.Kind != HitObjectKind.Spinner)
+                addPreviewFollow(endPosition(p), startPos, endTime(p), startTime);
+
+            // Outgoing: pending -> next (unless the next object starts its own new combo, or is a spinner).
+            if (next is HitObjectModel n && n.Kind != HitObjectKind.Spinner && !startsNewCombo(n))
+                addPreviewFollow(endPos, startPosition(n), endTimeMs, n.StartTime);
+        }
+
+        private void addPreviewFollow(Vector2 start, Vector2 end, double startTime, double endTimeMs)
+        {
+            var d = new DrawableFollowPoints(start, end, startTime, endTimeMs);
+            followPointContainer.Add(d);
+            previewFollowDrawables.Add(d);
+        }
+
         private static Vector2 startPosition(HitObjectModel o) =>
             o.Path is { Count: > 0 } path ? path[0] : new Vector2(o.X, o.Y);
 
@@ -1287,7 +1368,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 placementPreview.Alpha = 0;
                 if (!SliderPlacementActive)
+                {
                     sliderPreview?.Hide();
+                    if (sliderTailPreview != null) sliderTailPreview.Alpha = 0;
+                }
+                clearPreviewFollowPoints();
                 return;
             }
 
@@ -1309,11 +1394,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Counter-flip the ghost's number so it stays upright while HardRock flips the play area.
             placementNumber.Scale = new Vector2(1, modHardRock ? -1 : 1);
 
+            // Live follow points for the pending object. While a slider body is being traced this is driven by
+            // updateSliderTrace (which knows the tail position/time); otherwise the pending object is a single
+            // point (a circle, or a slider head not yet committed), so it connects like a circle.
+            if (!buildingSlider)
+            {
+                double startTime = snappedNow();
+                updatePreviewFollowPoints(ghost, ghost, startTime, startTime, number == 1);
+            }
+
             if (SliderPlacementActive)
                 updateSliderTrace(pos);
         }
 
-        /// <summary>Redraws the live slider trace through the committed anchors plus the current cursor.</summary>
+        /// <summary>Redraws the live slider preview (the finished body + tail) through the committed anchors plus the current cursor.</summary>
         private void updateSliderTrace(Vector2 cursor)
         {
             if (sliderPreview == null || !buildingSlider)
@@ -1322,11 +1416,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             var pts = new List<SliderControlPoint>(sliderAnchors) { new SliderControlPoint(clampToPlayfield(cursor)) };
             updateSliderNodes(pts);
 
-            var path = SliderGeometry.ComputePath(SliderGeometry.InferSegmentTypes(pts));
+            // Render exactly the slider that PlaceSlider will commit: same type-inference + tick snap, so the
+            // preview shows the finalized (trimmed) body rather than the raw drawn polyline.
+            var path = actions.PlacementSliderPath(pts);
 
             if (path.Count < 2)
             {
                 sliderPreview.Hide();
+                if (sliderTailPreview != null) sliderTailPreview.Alpha = 0;
+                clearPreviewFollowPoints();
                 actions.ClearSliderPreview();
                 return;
             }
@@ -1335,17 +1433,63 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             sliderPreview.Vertices = path;
             sliderPreview.Position = -sliderPreview.PositionInBoundingBox(Vector2.Zero);
 
+            if (sliderTailPreview != null)
+            {
+                sliderTailPreview.Alpha = 0.85f;
+                sliderTailPreview.Position = path[^1];
+            }
+
+            // Live follow points: previous object -> slider head, and slider tail -> next object. The start time
+            // is the locked-in build time (not the live playhead), so scrubbing doesn't shift them.
+            double startTime = sliderBuildStartTime;
+            double duration = actions.PlacementSliderDuration(pts);
+            updatePreviewFollowPoints(sliderAnchors[0].Position, path[^1], startTime, startTime + duration, previewCombo().number == 1);
+
             // Show, in real time, how long the slider will occupy on the top timeline.
             actions.PreviewSliderPlacement(pts);
         }
 
-        /// <summary>Redraws a small handle on each committed anchor (and the cursor) of the slider being drawn.</summary>
+        /// <summary>A translucent combo-coloured ring matching the head placement ghost, used for the slider tail preview.</summary>
+        private CircularContainer ghostRing(Color4 colour) => new CircularContainer
+        {
+            Origin = Anchor.Centre,
+            Size = new Vector2(currentDiameter),
+            Masking = true,
+            BorderThickness = currentDiameter * 0.08f,
+            BorderColour = Color4.White,
+            Alpha = 0,
+            Child = new Box
+            {
+                RelativeSizeAxes = Axes.Both,
+                Colour = colour,
+                Alpha = 0.35f,
+            },
+        };
+
+        /// <summary>Redraws the control polygon (connection lines) plus a small handle on each committed anchor (and the cursor) of the slider being drawn.</summary>
         private void updateSliderNodes(IReadOnlyList<SliderControlPoint> pts)
         {
             if (sliderNodes == null)
                 return;
 
             sliderNodes.Clear();
+
+            // The thin control-polygon lines connecting consecutive anchors, drawn first so the handles sit on
+            // top (mirrors the post-placement SliderControlPointVisualiser polygon).
+            for (int i = 1; i < pts.Count; i++)
+            {
+                Vector2 a = pts[i - 1].Position;
+                Vector2 d = pts[i].Position - a;
+                sliderNodes.Add(new Box
+                {
+                    Position = a,
+                    Origin = Anchor.CentreLeft,
+                    Width = d.Length,
+                    Height = 1.5f,
+                    Rotation = MathHelper.RadiansToDegrees((float)Math.Atan2(d.Y, d.X)),
+                    Colour = new Color4(1f, 1f, 1f, 0.35f),
+                });
+            }
 
             float size = Math.Max(6f, currentDiameter * 0.26f);
             for (int i = 0; i < pts.Count; i++)
@@ -1368,6 +1512,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 });
             }
         }
+
+        /// <summary>The beat-snapped current time (the time a placed object would receive).</summary>
+        private double snappedNow() => SnappedTimeSource?.Invoke() ?? TimeSource?.Invoke() ?? 0;
 
         /// <summary>The combo colour and number a circle placed at the current time would receive.</summary>
         private (Color4 colour, int number) previewCombo()

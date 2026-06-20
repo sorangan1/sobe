@@ -106,14 +106,19 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     if (difficulties.Count == 0)
                         continue;
 
-                    // Map each stored filename to its content hash (so we can locate audio, etc.).
+                    // Map each stored filename to its content hash (so we can locate audio, etc.). The lower-cased
+                    // map is for case-insensitive lookups; the original-cased map is for re-packing on export.
                     var files = new Dictionary<string, string>();
+                    var originalFiles = new Dictionary<string, string>();
                     foreach (dynamic usage in set.Files)
                     {
                         string filename = usage.Filename ?? string.Empty;
                         string hash = usage.File?.Hash ?? string.Empty;
                         if (filename.Length > 0 && hash.Length > 0)
+                        {
                             files[filename.ToLowerInvariant()] = hash;
+                            originalFiles[filename] = hash;
+                        }
                     }
 
                     DateTimeOffset dateAdded = tryDate(() => set.DateAdded) ?? DateTimeOffset.MinValue;
@@ -129,6 +134,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         Difficulties = difficulties,
                         DataDirectory = dataDir,
                         Files = files,
+                        OriginalFiles = originalFiles,
                         SearchText = $"{artist} {title} {author} {string.Join(" ", difficulties.Select(d => d.DifficultyName))}".ToLowerInvariant(),
                         DateAdded = dateAdded,
                         DateModified = dateModified,

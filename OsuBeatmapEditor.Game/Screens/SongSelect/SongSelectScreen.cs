@@ -51,6 +51,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private ConfirmOverlay confirmOverlay = null!;
         private EditorSettingsOverlay settingsOverlay = null!;
         private CollabsListOverlay collabsOverlay = null!;
+        private DownloadMapsOverlay downloadOverlay = null!;
         private UpdateBanner updateBanner = null!;
         private UpdatePromptOverlay updatePrompt = null!;
 
@@ -83,6 +84,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private Online.CollabSession? collabs { get; set; }
 
         private Storage storage = null!;
+        private GameHost gameHost = null!;
 
         // The set/difficulty a pending "Create new Difficulty" action is templating from.
         private BeatmapSetModel? pendingDifficultySet;
@@ -115,6 +117,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private void load(GameHost host, AudioManager audio, Storage storage)
         {
             this.storage = storage;
+            gameHost = host;
             prefs = new SongSelectPreferences(storage);
 
             sets = BeatmapStore.LoadAll();
@@ -203,6 +206,14 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Margin = new MarginPadding { Left = 30 + 220 + 12 + 140 + 12, Bottom = 30 },
                         Action = () => collabsOverlay.ToggleVisibility(),
                     },
+                    new OsuButton("Download", OsuColour.Surface)
+                    {
+                        Anchor = Anchor.BottomLeft,
+                        Origin = Anchor.BottomLeft,
+                        Size = new Vector2(140, 56),
+                        Margin = new MarginPadding { Left = 30 + 220 + 12 + 140 + 12 + 140 + 12, Bottom = 30 },
+                        Action = () => downloadOverlay.ToggleVisibility(),
+                    },
                     // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
                     // and the search box stay interactive.
                     rightArea = new Container
@@ -284,6 +295,10 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             : Task.FromResult((false, "Not logged in.")),
                         OnLibraryChanged = () => reloadBeatmaps(),
                     },
+                    downloadOverlay = new DownloadMapsOverlay
+                    {
+                        OpenUrl = url => gameHost.OpenUrlExternally(url),
+                    },
                     // Update notice, bottom-left just above the New Beatmap button.
                     updateBanner = new UpdateBanner
                     {
@@ -302,6 +317,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             carousel.CreateSetRequested = onCreateSet;
             carousel.DeleteSetRequested = onDeleteSet;
             carousel.DeleteDifficultyRequested = onDeleteDifficulty;
+            carousel.ExportSetRequested = exportSet;
             carousel.Textures = textures;
 
             sortDropdown.Items = Enum.GetValues<SortMode>();
@@ -335,23 +351,80 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             }
         }
 
-        /// <summary>Handles an OS file drop: if it is a supported audio file and we're the active screen, open New Beatmap.</summary>
+        /// <summary>
+        /// Handles an OS file drop while this is the active screen: a <c>.osz</c> is imported straight into the
+        /// library; a supported audio file opens the New Beatmap dialog. Anything else hints what's accepted.
+        /// </summary>
         private void onFileDropped(string path)
         {
             if (!this.IsCurrentScreen())
                 return;
 
-            string ext = Path.GetExtension(path).ToLowerInvariant();
-            if (!NewBeatmapOverlay.AudioExtensions.Contains(ext))
-            {
-                toasts?.Push("Drop an mp3, ogg or wav to start a new beatmap", EditorTheme.Colours.Warning);
-                return;
-            }
-
             if (!File.Exists(path))
                 return;
 
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+
+            if (ext == ".osz")
+            {
+                importOsz(path);
+                return;
+            }
+
+            if (!NewBeatmapOverlay.AudioExtensions.Contains(ext))
+            {
+                toasts?.Push("Drop an .osz to import, or an mp3/ogg/wav to start a new beatmap", EditorTheme.Colours.Warning);
+                return;
+            }
+
             newBeatmapOverlay.ShowForDroppedAudio(path);
+        }
+
+        /// <summary>Exports a set to a <c>.osz</c> off-thread, then toasts the result and reveals the file.</summary>
+        private void exportSet(BeatmapSetModel set)
+        {
+            toasts?.Push($"Exporting {set.Artist} - {set.Title}...");
+            string exportsDir = storage.GetFullPath("exports");
+
+            Task.Run(() =>
+            {
+                string? error = BeatmapArchiveExporter.Export(set, exportsDir, out string outputPath);
+                Schedule(() =>
+                {
+                    if (error == null)
+                    {
+                        toasts?.Push($"Exported to {Path.GetFileName(outputPath)}", EditorTheme.Colours.Success);
+                        gameHost.PresentFileExternally(outputPath);
+                    }
+                    else
+                    {
+                        toasts?.Push(error, EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        /// <summary>Imports a dropped <c>.osz</c> into osu!lazer's realm off-thread, then toasts + refreshes.</summary>
+        private void importOsz(string oszPath)
+        {
+            toasts?.Push($"Importing {Path.GetFileName(oszPath)}...");
+
+            Task.Run(() =>
+            {
+                var result = BeatmapArchiveImporter.ImportOsz(oszPath);
+                Schedule(() =>
+                {
+                    if (result.Success)
+                    {
+                        toasts?.Push($"Imported {result.Message}", EditorTheme.Colours.Success);
+                        reloadBeatmaps();
+                    }
+                    else
+                    {
+                        toasts?.Push(result.Message, EditorTheme.Colours.Error);
+                    }
+                });
+            });
         }
 
         public override void OnEntering(ScreenTransitionEvent e)

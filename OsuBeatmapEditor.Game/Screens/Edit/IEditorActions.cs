@@ -18,6 +18,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Places a new slider through the given control points (head first) at the current snapped time.</summary>
         void PlaceSlider(IReadOnlyList<SliderControlPoint> controlPoints);
 
+        /// <summary>Records the slider's fixed start time when its head is placed, so scrubbing the timeline mid-build doesn't re-snap/move it.</summary>
+        void BeginSliderPlacement();
+
+        /// <summary>Clears the recorded slider start time (build cancelled or committed).</summary>
+        void EndSliderPlacement();
+
         /// <summary>Begins a spinner placement: records its start at the current snapped time (osu!lazer model).</summary>
         void BeginSpinnerPlacement();
 
@@ -32,6 +38,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>The exact path a slider would take for the given anchors after tick-snapping - for the live reshape preview.</summary>
         IReadOnlyList<Vector2> SnappedSliderPath(int id, IReadOnlyList<SliderControlPoint> controlPoints);
+
+        /// <summary>The finalized (type-inferred, tick-snapped) path a slider placed now would take - for the live placement preview.</summary>
+        IReadOnlyList<Vector2> PlacementSliderPath(IReadOnlyList<SliderControlPoint> controlPoints);
+
+        /// <summary>The duration (ms) a slider placed now would have (matching <see cref="PlaceSlider"/>) - for the live placement follow points.</summary>
+        double PlacementSliderDuration(IReadOnlyList<SliderControlPoint> controlPoints);
 
         /// <summary>Live-previews on the top timeline how long a slider being placed (at the current time) will occupy.</summary>
         void PreviewSliderPlacement(IReadOnlyList<SliderControlPoint> controlPoints);
@@ -70,6 +82,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Finalises a slider repeat drag (commits the undo step if the count changed).</summary>
         void EndSliderRepeatDrag();
+
+        // --- Slider velocity drag on the timeline (Shift + dragging the tail: change speed, not reverses) ---
+
+        /// <summary>Snapshots a slider before Shift+dragging its tail changes its velocity (via its duration).</summary>
+        void BeginSliderVelocityDrag(int id);
+
+        /// <summary>Live-updates the dragged slider's speed so its tail reaches the given (raw) time, path length fixed.</summary>
+        void DragSliderVelocityTo(double endTime);
+
+        /// <summary>Finalises a timeline velocity drag (writes the start + tail-reset green lines, commits undo).</summary>
+        void EndSliderVelocityDrag();
+
+        // --- Slider length / velocity drag (dragging a slider's tail end-cap on the playfield, like osu!lazer) ---
+
+        /// <summary>Snapshots a slider before its tail end-cap is dragged, recording the grab point (osu!pixels).</summary>
+        void BeginSliderLengthDrag(int id, Vector2 osuCursor);
+
+        /// <summary>
+        /// Computes (without committing) the slider's body for the cursor at <paramref name="osuCursor"/>: by
+        /// default it changes the slider's length (expected distance, tick-snapped, capped at the drawn curve);
+        /// with <paramref name="adjustVelocity"/> (Shift) it keeps the duration fixed and changes the slider's
+        /// velocity instead. Returns the previewed path and updates the top-timeline length readout.
+        /// </summary>
+        IReadOnlyList<Vector2> PreviewSliderLength(Vector2 osuCursor, bool adjustVelocity);
+
+        /// <summary>Finalises a slider length/velocity drag (commits the undo step, and a green SV line if velocity changed).</summary>
+        void EndSliderLengthDrag();
 
         // --- Spinner duration drag (dragging a spinner's tail on the top timeline to change its length) ---
 

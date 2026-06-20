@@ -44,6 +44,9 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         /// <summary>Invoked when "Delete difficulty" is chosen on a difficulty card.</summary>
         public Action<BeatmapSetModel, BeatmapDifficultyModel>? DeleteDifficultyRequested;
 
+        /// <summary>Invoked when "Export .osz" is chosen, with the set to pack into an archive.</summary>
+        public Action<BeatmapSetModel>? ExportSetRequested;
+
         /// <summary>Texture store used to load card background images. Set before <see cref="SetBeatmaps"/>.</summary>
         public LargeTextureStore? Textures { get; set; }
 
@@ -491,6 +494,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
 
             items.Add(new MenuItem("Create new Difficulty", () => CreateDifficultyRequested?.Invoke(set, diff)));
             items.Add(new MenuItem("Create new Set", () => CreateSetRequested?.Invoke(set, diff)));
+            items.Add(new MenuItem("Export .osz", () => ExportSetRequested?.Invoke(set)));
 
             if (setLevel)
                 items.Add(new MenuItem("Delete set", () => DeleteSetRequested?.Invoke(set)));
