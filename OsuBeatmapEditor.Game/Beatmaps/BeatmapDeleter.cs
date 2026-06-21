@@ -112,6 +112,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 {
                     action(realm, match);
                 });
+                BeatmapStore.InvalidateCache();
                 return null;
             }
             catch (Exception ex)

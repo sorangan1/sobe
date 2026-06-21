@@ -373,7 +373,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 var config = new RealmConfiguration(realmFile) { IsDynamic = true };
                 using var realm = Realm.GetInstance(config);
 
-                return action(realm, dataDir);
+                string? result = action(realm, dataDir);
+                if (result == null)
+                    BeatmapStore.InvalidateCache();
+                return result;
             }
             catch (Exception ex)
             {

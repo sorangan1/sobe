@@ -118,6 +118,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     error = applyEdit(realm, targetSet, oldHash, newSha, newMd5, targetFilename, edits, dataDir);
                 });
 
+                if (error == null)
+                    BeatmapStore.InvalidateCache();
                 return error;
             }
             catch (Exception ex)

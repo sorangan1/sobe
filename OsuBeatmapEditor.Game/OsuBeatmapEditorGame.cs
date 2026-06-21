@@ -62,6 +62,9 @@ namespace OsuBeatmapEditor.Game
             deps.CacheAs(new Online.CollabSession(host.Storage));
             // On-disk cache of the user's saved patterns, so the gallery doesn't re-hit the backend each open.
             deps.CacheAs(new Online.PatternStore(host.Storage));
+            // Shared, disk-cached texture store for remote images (osu! avatars/covers). One instance app-wide so
+            // an image is fetched from the CDN once and reused across panels and restarts.
+            deps.CacheAs(new UI.OnlineTextureStore(host));
             return deps;
         }
 

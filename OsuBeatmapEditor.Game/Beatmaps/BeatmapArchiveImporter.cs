@@ -201,6 +201,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     set.Hash = LazerRealmFiles.ComputeSetHash(set, dataDir, difficulties[0].Sha);
                 });
 
+                BeatmapStore.InvalidateCache();
                 return null;
             });
 

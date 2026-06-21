@@ -46,6 +46,9 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private Container backgroundContainer = null!;
         private OsuButton newBeatmapButton = null!;
         private MenuIconButton previewToggleButton = null!;
+        // Top-bar actions that only make sense when signed in (collabs + friends); swapped for a
+        // "sign in" placeholder card when logged out.
+        private FillFlowContainer authActions = null!;
         private BeatmapInfoPanel infoPanel = null!;
         private NewBeatmapOverlay newBeatmapOverlay = null!;
         private NewDifficultyOverlay newDifficultyOverlay = null!;
@@ -192,32 +195,6 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                         Margin = new MarginPadding(30),
                         Action = onNewBeatmap,
                     },
-                    // Action icon row, to the right of the New Beatmap button: settings, collabs, download,
-                    // a random-map jump, refresh-library, and a play/pause toggle for the song preview.
-                    new FillFlowContainer
-                    {
-                        Anchor = Anchor.BottomLeft,
-                        Origin = Anchor.BottomLeft,
-                        AutoSizeAxes = Axes.Both,
-                        Direction = FillDirection.Horizontal,
-                        Spacing = new Vector2(10, 0),
-                        Margin = new MarginPadding { Left = 30 + 220 + 12, Bottom = 30 },
-                        Children = new Drawable[]
-                        {
-                            new MenuIconButton(FontAwesome.Solid.Cog, "Settings",
-                                () => settingsOverlay.ToggleVisibility()),
-                            new MenuIconButton(FontAwesome.Solid.Users, "Collabs",
-                                () => collabsOverlay.ToggleVisibility()),
-                            new MenuIconButton(FontAwesome.Solid.Download, "Download maps",
-                                () => downloadOverlay.ToggleVisibility()),
-                            new MenuIconButton(FontAwesome.Solid.Random, "Random map (F2)",
-                                () => carousel.SelectRandom()),
-                            new MenuIconButton(FontAwesome.Solid.Sync, "Refresh library (F5)",
-                                () => { toasts?.Push("Reloading library..."); reloadBeatmaps(notify: true); }),
-                            previewToggleButton = new MenuIconButton(FontAwesome.Solid.Pause, "Pause preview (Ctrl+Space)",
-                                togglePreview),
-                        },
-                    },
                     // Top-right toolbar (search + sort), drawn above the carousel so the dropdown popup
                     // and the search box stay interactive.
                     rightArea = new Container
@@ -267,12 +244,47 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                             },
                         },
                     },
-                    // Top chrome bar: usage stats (left) + osu! account control (right). Drawn above the
+                    // Top chrome bar: app version (centre) + the account card (right). Drawn above the
                     // carousel/background but below the modal overlays.
                     new TopBar
                     {
                         Anchor = Anchor.TopLeft,
                         Origin = Anchor.TopLeft,
+                    },
+                    // Left top-bar actions (over the bar): settings, download, and a grouped card for the
+                    // random/refresh/preview-toggle controls.
+                    new FillFlowContainer
+                    {
+                        Anchor = Anchor.TopLeft,
+                        Origin = Anchor.TopLeft,
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Md, 0),
+                        Margin = new MarginPadding { Left = EditorTheme.Spacing.Lg, Top = (TopBar.HeightPx - 40) / 2f },
+                        Children = new Drawable[]
+                        {
+                            topBarButton(FontAwesome.Solid.Cog, "Settings", () => settingsOverlay.ToggleVisibility()),
+                            topBarButton(FontAwesome.Solid.Download, "Download maps", () => downloadOverlay.ToggleVisibility()),
+                            buildPlaybackCard(),
+                        },
+                    },
+                    // Right top-bar actions, immediately left of the account card: collabs + friends.
+                    // Both are online (sobe) features, so the whole row is hidden while logged out.
+                    authActions = new FillFlowContainer
+                    {
+                        Anchor = Anchor.TopRight,
+                        Origin = Anchor.TopRight,
+                        AutoSizeAxes = Axes.Both,
+                        Alpha = 0,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Md, 0),
+                        Margin = new MarginPadding { Right = UserProfileCard.CardWidth + EditorTheme.Spacing.Lg, Top = (TopBar.HeightPx - 40) / 2f },
+                        Children = new Drawable[]
+                        {
+                            topBarButton(FontAwesome.Solid.Users, "Collabs", () => collabsOverlay.ToggleVisibility()),
+                            topBarButton(FontAwesome.Solid.UserFriends, "Friends (sobe mutuals)",
+                                () => toasts?.Push("Friends list coming soon")),
+                        },
                     },
                     newBeatmapOverlay = new NewBeatmapOverlay
                     {
@@ -352,6 +364,12 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 searchDebounce?.Cancel();
                 searchDebounce = Scheduler.AddDelayed(() => carousel.SetFilter(e.NewValue), 60);
             });
+
+            // Show the collab/friends actions only while signed in (and react to login/logout live).
+            if (auth != null)
+                auth.User.BindValueChanged(_ => updateAuthActions(), true);
+            else
+                updateAuthActions();
 
             carousel.SetSort(prefs.Sort.Value);
             carousel.SetBeatmaps(sets);
@@ -790,6 +808,55 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         }
 
         private void onNewBeatmap() => newBeatmapOverlay.ShowForNewBeatmap();
+
+        /// <summary>Signed in: shows the collab/friends actions. Logged out: shows the "sign in" card instead.</summary>
+        private void updateAuthActions()
+        {
+            bool loggedIn = auth?.IsLoggedIn == true;
+            authActions.FadeTo(loggedIn ? 1f : 0f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+        }
+
+        // --- Top-bar action helpers ---
+
+        /// <summary>A standalone 40px icon button sized for the top bar.</summary>
+        private static MenuIconButton topBarButton(IconUsage icon, string tooltip, Action action) =>
+            new MenuIconButton(icon, tooltip, action) { Size = new Vector2(40) };
+
+        /// <summary>
+        /// A small grouped "card" holding the playback controls — random map (F2), refresh library (F5),
+        /// and the song-preview play/pause toggle — as three segments on a shared raised surface.
+        /// </summary>
+        private Drawable buildPlaybackCard()
+        {
+            const float button = 34;
+
+            return new Container
+            {
+                AutoSizeAxes = Axes.Both,
+                Masking = true,
+                CornerRadius = EditorTheme.Radius.Lg,
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Raised },
+                    new FillFlowContainer
+                    {
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
+                        Padding = new MarginPadding(EditorTheme.Spacing.Xs),
+                        Children = new Drawable[]
+                        {
+                            new MenuIconButton(FontAwesome.Solid.Random, "Random map (F2)",
+                                () => carousel.SelectRandom()) { Size = new Vector2(button) },
+                            new MenuIconButton(FontAwesome.Solid.Sync, "Refresh library (F5)",
+                                () => { toasts?.Push("Reloading library..."); reloadBeatmaps(notify: true); }) { Size = new Vector2(button) },
+                            previewToggleButton = new MenuIconButton(FontAwesome.Solid.Pause, "Pause preview (Ctrl+Space)",
+                                togglePreview) { Size = new Vector2(button) },
+                        },
+                    },
+                },
+            };
+        }
 
         // --- Context-menu actions (Create new Difficulty / Create new Set) ---
 

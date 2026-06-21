@@ -844,15 +844,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
         }
 
+        // Short-lived cache of fetched discussions, keyed by beatmapset id, shared across editor sessions so
+        // reopening the same map (or toggling Modding Mode) doesn't re-hit the backend every time. Discussions
+        // change slowly, so a couple of minutes of staleness is fine.
+        private static readonly TimeSpan discussions_ttl = TimeSpan.FromMinutes(2);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (System.DateTime Fetched, System.Collections.Generic.List<Online.ModdingDiscussion> Data)> discussionsCache = new();
+
         /// <summary>Fetches the beatmapset's discussions (once) from the backend and populates the modding views.</summary>
         private void loadDiscussions()
         {
             discussionsRequested = true;
             int setId = set.OnlineID;
 
+            // Serve a fresh cached copy immediately, skipping the network round-trip entirely.
+            if (setId > 0 && discussionsCache.TryGetValue(setId, out var cached)
+                && System.DateTime.UtcNow - cached.Fetched < discussions_ttl)
+            {
+                loadedDiscussions = cached.Data;
+                moddingPanel.SetDiscussions(cached.Data);
+                refreshModdingViews();
+                return;
+            }
+
             Task.Run(async () =>
             {
                 var discussions = await Online.SobeApi.GetDiscussionsAsync(setId).ConfigureAwait(false);
+                if (setId > 0)
+                    discussionsCache[setId] = (System.DateTime.UtcNow, discussions);
                 Schedule(() =>
                 {
                     loadedDiscussions = discussions;

@@ -15,6 +15,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         public string Artist { get; init; } = string.Empty;
         public string Author { get; init; } = string.Empty;
 
+        /// <summary>The mapper's osu! user id (for their avatar), or -1 when unknown / not an online user.</summary>
+        public int AuthorOnlineId { get; init; } = -1;
+
         public IReadOnlyList<BeatmapDifficultyModel> Difficulties { get; init; } = new List<BeatmapDifficultyModel>();
 
         /// <summary>osu!lazer data directory these files live under (for resolving the content-addressable store).</summary>

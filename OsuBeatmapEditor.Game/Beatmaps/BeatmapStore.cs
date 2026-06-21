@@ -18,6 +18,37 @@ namespace OsuBeatmapEditor.Game.Beatmaps
     {
         private const string osu_ruleset_short_name = "osu";
 
+        // Caches the last full load, keyed by the realm file's identity (path + size + last-write time). Reading
+        // the whole realm means copying the entire client.realm to a temp file and walking it, which is costly on
+        // large libraries — so we skip it entirely when nothing on disk has changed since last time. Our own saves
+        // and external osu!lazer edits both bump the file's write time, so the key stays correct.
+        private static readonly object cacheLock = new object();
+        private static string? cachedKey;
+        private static IReadOnlyList<BeatmapSetModel>? cachedResult;
+
+        /// <summary>Drops the cached load so the next <see cref="LoadAll"/> re-reads the realm unconditionally.</summary>
+        public static void InvalidateCache()
+        {
+            lock (cacheLock)
+            {
+                cachedKey = null;
+                cachedResult = null;
+            }
+        }
+
+        private static string? realmIdentity(string realmFile)
+        {
+            try
+            {
+                var info = new FileInfo(realmFile);
+                return info.Exists ? $"{realmFile}|{info.Length}|{info.LastWriteTimeUtc.Ticks}" : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         /// <summary>
         /// Loads all osu! Standard beatmap sets, or an empty list if osu!lazer cannot be found.
         /// Blocking; call from a background thread (e.g. a <c>[BackgroundDependencyLoader]</c>).
@@ -55,6 +86,17 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             if (dataDir == null || realmFile == null)
                 return Array.Empty<BeatmapSetModel>();
 
+            // Serve the previous load if the realm file is byte-for-byte unchanged since we last read it.
+            string? key = realmIdentity(realmFile);
+            if (key != null)
+            {
+                lock (cacheLock)
+                {
+                    if (key == cachedKey && cachedResult != null)
+                        return cachedResult;
+                }
+            }
+
             string tempCopy = Path.Combine(Path.GetTempPath(), $"osu-editor-{Guid.NewGuid():N}.realm");
 
             try
@@ -73,6 +115,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
                     var difficulties = new List<BeatmapDifficultyModel>();
                     string title = string.Empty, artist = string.Empty, author = string.Empty;
+                    int authorOnlineId = -1;
                     DateTimeOffset dateModified = DateTimeOffset.MinValue;
 
                     foreach (dynamic beatmap in set.Beatmaps)
@@ -85,6 +128,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         title = metadata?.Title ?? title;
                         artist = metadata?.Artist ?? artist;
                         author = metadata?.Author?.Username ?? author;
+                        authorOnlineId = tryInt(() => metadata?.Author?.OnlineID) ?? authorOnlineId;
 
                         DateTimeOffset? lastUpdate = tryDate(() => beatmap.LastLocalUpdate);
                         if (lastUpdate is { } lu && lu > dateModified)
@@ -131,6 +175,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         Title = title,
                         Artist = artist,
                         Author = author,
+                        AuthorOnlineId = authorOnlineId,
                         Difficulties = difficulties,
                         DataDirectory = dataDir,
                         Files = files,
@@ -139,6 +184,15 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                         DateAdded = dateAdded,
                         DateModified = dateModified,
                     });
+                }
+
+                if (key != null)
+                {
+                    lock (cacheLock)
+                    {
+                        cachedKey = key;
+                        cachedResult = result;
+                    }
                 }
 
                 return result;
