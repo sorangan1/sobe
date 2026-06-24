@@ -1410,6 +1410,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
+        /// Flashes the selection outlines red to signal a transform was refused - e.g. a rotation that would have
+        /// pushed a slider out of bounds (which previously got "fixed" by clamping/resizing it, compounding into
+        /// runaway growth). A quick visual "no" instead of silently distorting the slider.
+        /// </summary>
+        public void FlashSelectionBlocked() =>
+            selectionLayer.FlashColour(new Color4(1f, 0.15f, 0.15f, 1f), 450, Easing.OutQuint);
+
+        /// <summary>
         /// Rebuilds the always-visible yellow selection outlines so selected objects stay outlined even
         /// once they fade out of the approach window - matching osu!lazer's editor.
         /// </summary>

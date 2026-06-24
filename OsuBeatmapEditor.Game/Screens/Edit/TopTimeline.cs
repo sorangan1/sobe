@@ -1870,6 +1870,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
             }
 
+            // A rubber-band drag that ended up selecting at least one object switches to the select tool too -
+            // same as a single click does (OnMouseDown), which the box-select path otherwise missed.
+            if (dragBox != null && selection.Selected.Count > 0)
+                ObjectSelectedHere?.Invoke();
+
             dragBox?.Expire();
             dragBox = null;
         }

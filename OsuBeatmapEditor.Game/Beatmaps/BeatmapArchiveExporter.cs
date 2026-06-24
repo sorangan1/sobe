@@ -65,6 +65,42 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             }
         }
 
+        /// <summary>
+        /// Writes just the given difficulty's <c>.osu</c> (its last saved state, read from osu!lazer's store) into
+        /// <paramref name="exportsDir"/>, named <c>Artist - Title (Creator) [Version].osu</c>. On success returns
+        /// <c>null</c> and sets <paramref name="outputPath"/>; otherwise returns an error message.
+        /// </summary>
+        public static string? ExportDifficultyOsu(BeatmapSetModel set, BeatmapDifficultyModel difficulty, string exportsDir, out string outputPath)
+        {
+            outputPath = string.Empty;
+
+            if (string.IsNullOrEmpty(difficulty.OsuFileHash))
+                return "This difficulty hasn't been saved yet, so it has no .osu to export.";
+            if (string.IsNullOrEmpty(set.DataDirectory))
+                return "osu!lazer's data directory could not be located.";
+
+            string? source = LazerFileStore.ResolvePath(set.DataDirectory, difficulty.OsuFileHash);
+            if (source == null || !File.Exists(source))
+                return "The difficulty's .osu could not be located in osu!lazer's store.";
+
+            try
+            {
+                Directory.CreateDirectory(exportsDir);
+
+                string name = LazerRealmFiles.ValidFilename($"{set.Artist} - {set.Title} ({set.Author}) [{difficulty.DifficultyName}]");
+                string target = uniquePath(Path.Combine(exportsDir, $"{name}.osu"));
+                File.Copy(source, target);
+
+                outputPath = target;
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "BeatmapArchiveExporter: .osu export failed");
+                return $"Export failed: {ex.Message}";
+            }
+        }
+
         /// <summary>Appends " (n)" before the extension until the path is free, so repeated exports don't clobber.</summary>
         private static string uniquePath(string path)
         {

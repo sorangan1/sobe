@@ -29,6 +29,9 @@ namespace OsuBeatmapEditor.Game.UI
         /// <summary>Font size of the button label.</summary>
         public float FontSize { get; init; } = 15;
 
+        /// <summary>Optional icon shown to the left of the label (centred together). Null = label only.</summary>
+        public IconUsage? Icon { get; init; }
+
         /// <summary>The button's label; can be updated after construction.</summary>
         public string Text
         {
@@ -75,6 +78,39 @@ namespace OsuBeatmapEditor.Game.UI
         [BackgroundDependencyLoader]
         private void load()
         {
+            label = new SpriteText
+            {
+                Text = text,
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                Colour = textColour,
+                Font = FontUsage.Default.With(size: FontSize, weight: "SemiBold"),
+            };
+
+            // With an icon, lay the icon + label out in a centred row; without one, the label is centred alone.
+            Drawable content = Icon is { } ic
+                ? new FillFlowContainer
+                {
+                    Anchor = Anchor.Centre,
+                    Origin = Anchor.Centre,
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Horizontal,
+                    Spacing = new osuTK.Vector2(EditorTheme.Spacing.Sm, 0),
+                    Children = new Drawable[]
+                    {
+                        new SpriteIcon
+                        {
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            Icon = ic,
+                            Size = new osuTK.Vector2(FontSize - 1),
+                            Colour = textColour,
+                        },
+                        label,
+                    },
+                }
+                : label;
+
             Children = new Drawable[]
             {
                 background = new Box
@@ -82,14 +118,7 @@ namespace OsuBeatmapEditor.Game.UI
                     RelativeSizeAxes = Axes.Both,
                     Colour = idleColour,
                 },
-                label = new SpriteText
-                {
-                    Text = text,
-                    Anchor = Anchor.Centre,
-                    Origin = Anchor.Centre,
-                    Colour = textColour,
-                    Font = FontUsage.Default.With(size: FontSize, weight: "SemiBold"),
-                },
+                content,
             };
 
             // Dim while disabled (ClickableContainer suppresses the Action automatically).

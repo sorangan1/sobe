@@ -42,6 +42,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float top_bar_height = TopTimeline.HEIGHT;
         private const float bottom_bar_height = EditorTimeline.HEIGHT;
 
+        // Top/bottom inset the playfield keeps when the HUD is hidden - small breathing room so it recentres and
+        // grows slightly into the space the timelines used to occupy, without going fully edge-to-edge.
+        private const float hidden_bar_inset = 28f;
+
         // Width reserved on the right of the top timeline for the adjacent settings panel (beat divisor / BPM / SV).
         private const float timeline_side_width = 168f;
 
@@ -203,6 +207,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private bool discussionsRequested;
         // Smoothly-interpolated current top-bar height, lerped toward its collapsed/expanded target each frame.
         private float topHeightCurrent = top_bar_height;
+        private float bottomHeightCurrent = bottom_bar_height;
+
+        // When true the editor chrome (timelines, panels, chips, counters) is hidden so only the background/grid +
+        // hit objects show; the playfield recentres and grows slightly. Toggled with Shift+Tab or the eye button.
+        private bool hudHidden;
+        private Container hudLayer = null!;
         private SpriteText bpmText = null!;
         private SpriteText svText = null!;
         private SpriteText distanceSnapText = null!;
@@ -228,6 +238,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private EditorTimeline bottomTimeline = null!;
         private ConfirmExitOverlay confirmExit = null!;
         private RotationPopover rotationPopover = null!;
+        private ExportMenu exportMenu = null!;
+        private UI.IconBarButton exportButton = null!;
         private TimingPillPopover timingPillPopover = null!;
         private PlaybackControl playbackControl = null!;
 
@@ -366,6 +378,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Padding = new MarginPadding { Top = top_bar_height, Bottom = bottom_bar_height },
                     Child = playfield = new Playfield(),
                 },
+                // Everything below is editor "chrome" (timelines, panels, chips, counters): grouped so the whole
+                // HUD can be hidden in one go (Shift+Tab), leaving only the background/grid + hit objects visible.
+                hudLayer = new Container
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Children = new Drawable[]
+                    {
                 // Authorship legend (who-placed-what colours); shown only while authorship mode is on.
                 authorLegend = new FillFlowContainer
                 {
@@ -426,6 +445,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     {
                                         new HitsoundModeButton(hitsoundMode),
                                         new CollabButton(collabLinked, () => collabOverlay.ToggleVisibility(), "Collab - co-map this difficulty with someone (\"git for maps\")"),
+                                        new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.EyeSlash, "Hide interface (Shift+Tab) - show only the grid/background + objects",
+                                            toggleHud),
                                         authorsButton = new AuthorsButton(authorshipOn, toggleAuthorship, "Authors - colour objects by who placed them") { Alpha = 0 },
                                     },
                                 },
@@ -630,6 +651,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     SetNormalBank = SetNormalBank,
                     SetAdditionBank = SetAdditionBank,
                 },
+                    },
+                },
                 settingsOverlay = new EditorSettingsOverlay(),
                 songSettingsOverlay = new SongSettingsOverlay(),
                 timingPointsOverlay = new TimingPointsOverlay(parsed, () => CurrentTime),
@@ -641,6 +664,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 rotationPopover = new RotationPopover
                 {
                     OnRotate = (degrees, aroundPlayfield) => RotateSelectionBy(degrees, aroundPlayfield),
+                },
+                exportMenu = new ExportMenu
+                {
+                    OnExportOsz = exportMap,
+                    OnExportOsu = exportDifficultyOsu,
                 },
                 timingPillPopover = new TimingPillPopover
                 {
@@ -1032,10 +1060,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // The object band (top_bar_height) plus three compact lane rows.
                 target = top_bar_height + 3 * hitsound_lane_height;
 
+            // Hidden HUD: collapse the reserved bars to a small inset so the playfield recentres and grows slightly.
+            if (hudHidden)
+                target = hidden_bar_inset;
+
             if (Math.Abs(topHeightCurrent - target) < 0.5f)
                 topHeightCurrent = target;
             else
                 topHeightCurrent = (float)Interpolation.Lerp(target, topHeightCurrent, Math.Exp(-0.018 * Time.Elapsed));
+
+            float bottomTarget = hudHidden ? hidden_bar_inset : bottom_bar_height;
+            if (Math.Abs(bottomHeightCurrent - bottomTarget) < 0.5f)
+                bottomHeightCurrent = bottomTarget;
+            else
+                bottomHeightCurrent = (float)Interpolation.Lerp(bottomTarget, bottomHeightCurrent, Math.Exp(-0.018 * Time.Elapsed));
 
             // Modding Mode reserves room on the right; ease the playfield (and the right-anchored HUD) inward.
             float moddingTarget = moddingMode.Value ? modding_panel_width + modding_panel_gap : 0f;
@@ -1049,7 +1087,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             float hudRight = 16 + moddingInsetCurrent;
 
             topTimeline.Height = topHeightCurrent;
-            composeContainer.Padding = new MarginPadding { Top = topHeightCurrent, Bottom = bottom_bar_height, Right = moddingInsetCurrent };
+            composeContainer.Padding = new MarginPadding { Top = topHeightCurrent, Bottom = bottomHeightCurrent, Right = moddingInsetCurrent };
 
             // The top bar (left panel + timeline + settings panel) is a fixed block - the modding panel never
             // moves it (it slides in over the compose area below). So nothing up here tracks moddingInset.
@@ -1361,6 +1399,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Leave the new object unselected: keeping it selected made Q (new combo) act on the freshly
             // placed circle instead of arming the next placement, which surprised the mapper.
             selection.Clear();
+            // "New combo" is a one-shot for the object just placed: once it carries the new combo, disarm so the
+            // following circles continue the combo (matching the mapper's expectation and the phantom preview).
+            playfield.NewComboArmed = false;
         }
 
         /// <summary>Inserts a new slider through the given control points (head first) on the current snapped time.</summary>
@@ -1432,6 +1473,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             afterEdit();
             // Leave the new slider unselected (see PlaceCircle) so Q keeps arming the next placement.
             selection.Clear();
+            // New combo is a one-shot: the slider just placed carries it, so disarm for the following objects.
+            playfield.NewComboArmed = false;
             sliderPlaceTime = null;
         }
 
@@ -3302,8 +3345,49 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             Vector2 centre = transformQuad.Centre;
-            applySelectionMap(p => rotateAround(p, centre, degrees));
+            Func<Vector2, Vector2> map = p => rotateAround(p, centre, degrees);
+
+            // Refuse a rotation that would push the selection off the playfield: clamping it back in would distort
+            // (resize) the slider, and repeating that compounds into runaway growth. Flash red instead.
+            if (!transformStaysInBounds(map))
+            {
+                playfield.FlashSelectionBlocked();
+                return;
+            }
+
+            applySelectionMap(map);
         }
+
+        /// <summary>
+        /// True if mapping every snapshot object's geometry through <paramref name="map"/> keeps it inside the
+        /// playfield, so no clamping (and thus no slider resize/distortion) is needed. Slider control points and
+        /// circle positions are the points <see cref="clampControlPoints"/> would otherwise pull back in.
+        /// </summary>
+        private bool transformStaysInBounds(Func<Vector2, Vector2> map)
+        {
+            if (transformSnapshot == null)
+                return false;
+
+            foreach (var o in transformSnapshot.Values)
+            {
+                if (o.Kind == HitObjectKind.Slider && o.ControlPoints is { Count: >= 1 } cps)
+                {
+                    foreach (var cp in cps)
+                        if (!inPlayfield(map(cp.Position)))
+                            return false;
+                }
+                else if (o.Kind == HitObjectKind.Circle)
+                {
+                    if (!inPlayfield(map(new Vector2(o.X, o.Y))))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool inPlayfield(Vector2 p) =>
+            p.X >= 0 && p.X <= ParsedBeatmap.PLAYFIELD_WIDTH && p.Y >= 0 && p.Y <= ParsedBeatmap.PLAYFIELD_HEIGHT;
 
         public void ScaleSelection(Vector2 scaleDelta, Anchor reference)
         {
@@ -3342,10 +3426,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ? new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f)
                 : transformQuad.Centre;
 
+            Func<Vector2, Vector2> map = p => rotateAround(p, centre, degrees);
+
+            // Block (and flash) a rotation that wouldn't fit rather than clamp-resizing the slider - see RotateSelection.
+            if (!transformStaysInBounds(map))
+            {
+                playfield.FlashSelectionBlocked();
+                transformSnapshot = null;
+                return;
+            }
+
             transformUndo = takeSnapshot();
             transformChanged = false;
 
-            applySelectionMap(p => rotateAround(p, centre, degrees));
+            applySelectionMap(map);
 
             if (transformChanged && transformUndo != null)
             {
@@ -4217,8 +4311,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.Cog, "Settings",
                     () => settingsOverlay.ToggleVisibility()),
-                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport, "Export .osz (saved state)",
-                    exportMap),
+                exportButton = new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport, "Export... (.osz set or this difficulty's .osu)",
+                    () => exportMenu.ShowAt(exportButton.ScreenSpaceDrawQuad.BottomLeft)),
                 new OsuButton("Song Setup", OsuColour.Surface)
                 {
                     Size = new Vector2(84, 24),
@@ -4229,17 +4323,53 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             },
         };
 
+        /// <summary>Hides/shows the editor chrome (timelines, panels, chips, counters); the playfield recentres and
+        /// grows slightly into the freed space (eased in <see cref="updateHitsoundLayout"/>). Shift+Tab / eye button.</summary>
+        private void toggleHud()
+        {
+            hudHidden = !hudHidden;
+            hudLayer.FadeTo(hudHidden ? 0 : 1, 200, Easing.OutQuint);
+            if (hudHidden)
+                toasts?.Push("Interface hidden - Shift+Tab to show", icon: osu.Framework.Graphics.Sprites.FontAwesome.Solid.EyeSlash);
+        }
+
         /// <summary>Exports the open map's set to a <c>.osz</c> off-thread, then toasts + reveals it. Reflects the
         /// last saved state of the set's files (unsaved edits aren't included until you save).</summary>
         private void exportMap()
         {
-            toasts?.Push($"Exporting {set.Artist} - {set.Title}...");
+            toasts?.Push($"Exporting {set.Artist} - {set.Title}...", icon: osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport);
             string exportsDir = host.Storage.GetFullPath("exports");
             var exportSet = set;
 
             Task.Run(() =>
             {
                 string? error = BeatmapArchiveExporter.Export(exportSet, exportsDir, out string outputPath);
+                Schedule(() =>
+                {
+                    if (error == null)
+                    {
+                        toasts?.Push($"Exported to {Path.GetFileName(outputPath)}", EditorTheme.Colours.Success);
+                        host.PresentFileExternally(outputPath);
+                    }
+                    else
+                    {
+                        toasts?.Push(error, EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        /// <summary>Exports just the open difficulty's <c>.osu</c> (last saved state) off-thread, then toasts + reveals it.</summary>
+        private void exportDifficultyOsu()
+        {
+            toasts?.Push($"Exporting [{difficulty.DifficultyName}]...", icon: osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport);
+            string exportsDir = host.Storage.GetFullPath("exports");
+            var exportSet = set;
+            var exportDiff = difficulty;
+
+            Task.Run(() =>
+            {
+                string? error = BeatmapArchiveExporter.ExportDifficultyOsu(exportSet, exportDiff, exportsDir, out string outputPath);
                 Schedule(() =>
                 {
                     if (error == null)
@@ -4622,6 +4752,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Shift+Tab hides/shows the whole editor HUD (osu!'s "hide interface" convention), leaving only the
+            // background/grid + hit objects. The shortcut is how you bring the HUD back, since the toggle button
+            // is itself part of the hidden HUD.
+            if (e.Key == Key.Tab && e.ShiftPressed && !cmd && !e.Repeat)
+            {
+                toggleHud();
+                return true;
+            }
+
             // Toggle distance snapping (lazer default Y).
             if (settings.DistanceSnapKey.Value.Matches(e) && !e.Repeat)
             {
@@ -4769,7 +4908,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 editable.IsDirty.Value = false;
                 DidSave = true;
-                toasts?.Push("Beatmap saved", EditorTheme.Colours.Success);
+                toasts?.Push("Beatmap saved", EditorTheme.Colours.Success, osu.Framework.Graphics.Sprites.FontAwesome.Solid.Save);
 
                 // Saving no longer auto-pushes a collab revision - the mapper uploads progress on demand from the
                 // COLLAB panel, so every Ctrl+S doesn't spawn a new revision. Nudge them once if it's a collab.

@@ -45,7 +45,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container pieceLayer = null!;
         private SmoothPath preview = null!;
         private Container? contextMenu;
-        private TailDragMarker? tailMarker;
 
         // Multi-selection of control points (lazer-style): kept static so it survives the visualiser being
         // recreated after an edit/part-selection, keyed by slider so switching sliders clears it.
@@ -91,58 +90,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             rebuildPieces();
             rebuildPolygon();
-            rebuildTailMarker();
             applySelectionVisual();
-        }
-
-        /// <summary>
-        /// Adds the tail end-cap drag handle at the rendered slider end (osu!lazer's EndDragMarker): dragging it
-        /// changes the slider's length, or with Shift its velocity. It sits just past the tail along the path so
-        /// it stays grabbable even when the tail coincides with the last control point.
-        /// </summary>
-        private void rebuildTailMarker()
-        {
-            var path = SliderGeometry.ComputePath(controlPoints, pixelLength);
-            if (path.Count < 1)
-                return;
-
-            float offset = diameter * 0.5f;
-            pieceLayer.Add(tailMarker = new TailDragMarker(diameter * 0.3f)
-            {
-                Position = endCapPosition(path, offset),
-                Begin = screen => actions.BeginSliderLengthDrag(sliderId, clamp(ToLocalSpace(screen))),
-                Drag = (screen, shift) =>
-                {
-                    var p = actions.PreviewSliderLength(clamp(ToLocalSpace(screen)), shift);
-                    if (p.Count < 2)
-                        return;
-
-                    preview.Alpha = 1;
-                    preview.Vertices = p;
-                    preview.Position = -preview.PositionInBoundingBox(Vector2.Zero);
-                    if (tailMarker != null)
-                        tailMarker.Position = endCapPosition(p, offset);
-                },
-                End = () =>
-                {
-                    preview.Alpha = 0;
-                    actions.EndSliderLengthDrag();
-                },
-            });
-        }
-
-        /// <summary>The end-cap position: the path end nudged outward along its final tangent by <paramref name="offset"/>.</summary>
-        private static Vector2 endCapPosition(IReadOnlyList<Vector2> path, float offset)
-        {
-            if (path.Count == 0)
-                return Vector2.Zero;
-            if (path.Count == 1)
-                return path[0];
-
-            Vector2 dir = path[^1] - path[^2];
-            if (dir.LengthSquared > 1e-6f)
-                dir = dir.Normalized();
-            return path[^1] + dir * offset;
         }
 
         /// <summary>(Re)creates a handle per control point.</summary>
@@ -598,61 +546,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
         }
 
-        /// <summary>
-        /// The tail end-cap handle (osu!lazer's EndDragMarker): a diamond at the slider's end that only handles
-        /// dragging (clicks fall through so the tail edge-node selection still works). Reports the screen-space
-        /// cursor + Shift state so the editor can change the slider's length (or, with Shift, its velocity).
-        /// </summary>
-        private partial class TailDragMarker : Container, IHasTooltip
-        {
-            public Action<Vector2>? Begin;       // grab: screen-space cursor
-            public Action<Vector2, bool>? Drag;  // move: screen-space cursor, Shift held
-            public Action? End;
-
-            private readonly Box fill;
-
-            public TailDragMarker(float size)
-            {
-                Origin = Anchor.Centre;
-                Size = new Vector2(size);
-                // A 45-degree rotated square reads as a diamond, distinct from the round control-point handles.
-                Rotation = 45f;
-                Masking = true;
-                BorderThickness = 2f;
-                BorderColour = Color4.White;
-                Child = fill = new Box
-                {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = EditorTheme.Colours.Selection,
-                    Alpha = 0.9f,
-                };
-            }
-
-            public LocalisableString TooltipText => "Drag to change length (hold Shift for velocity)";
-
-            protected override bool OnDragStart(DragStartEvent e)
-            {
-                Begin?.Invoke(e.ScreenSpaceMousePosition);
-                return true;
-            }
-
-            protected override void OnDrag(DragEvent e) => Drag?.Invoke(e.ScreenSpaceMousePosition, e.ShiftPressed);
-
-            protected override void OnDragEnd(DragEndEvent e) => End?.Invoke();
-
-            protected override bool OnHover(HoverEvent e)
-            {
-                fill.Alpha = 1f;
-                return base.OnHover(e);
-            }
-
-            protected override void OnHoverLost(HoverLostEvent e)
-            {
-                fill.Alpha = 0.9f;
-                base.OnHoverLost(e);
-            }
-        }
-
         /// <summary>One row in the shift+right-click curve-type menu: a coloured dot + label, highlighting on hover.</summary>
         private partial class MenuButton : CompositeDrawable
         {
@@ -704,6 +597,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             protected override void OnHoverLost(HoverLostEvent e) => background.Alpha = 0f;
 
+            // Consume the press so it never reaches the full-area ClickCatcher behind the menu - otherwise the
+            // catcher would close (Expire) the menu on mouse-down, before this button's OnClick could ever fire.
+            protected override bool OnMouseDown(MouseDownEvent e) => true;
+
             protected override bool OnClick(ClickEvent e)
             {
                 onClick();
@@ -732,8 +629,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             protected override bool OnMouseDown(MouseDownEvent e)
             {
-                // Also dismiss on right-click so a second shift+right-click elsewhere doesn't stack menus.
-                Action?.Invoke();
+                // Only dismiss on a right-click press (so a fresh shift+right-click elsewhere doesn't stack menus).
+                // A left press must NOT close here: doing so on every mouse-down expired the menu before a menu
+                // button's click could resolve, which made the whole menu unclickable. Left-clicks outside the
+                // panel still dismiss via OnClick above; the menu buttons consume their own press.
+                if (e.Button == osuTK.Input.MouseButton.Right)
+                {
+                    Action?.Invoke();
+                    return false;
+                }
+
                 return false;
             }
         }
