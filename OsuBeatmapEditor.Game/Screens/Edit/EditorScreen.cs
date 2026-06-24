@@ -180,9 +180,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly BindableFloat autoTrailWidth = new BindableFloat(1f) { MinValue = 0.2f, MaxValue = 4f };
         // Auto key overlay: show the K1/K2 "tapping" indicator alongside the auto cursor (persisted).
         private readonly BindableBool autoKeyOverlay = new BindableBool();
+        // Humanise the auto cursor: arcs, overshoot, jitter and aim error instead of perfect Auto (persisted).
+        private readonly BindableBool autoHumanize = new BindableBool();
         private AutoPreviewMenu autoMenu = null!;
         private MenuDotsButton autoMenuButton = null!;
         private bool autoMenuOpen;
+        private HumanizeTuningPanel humanizeTuningPanel = null!;
         // Modding Mode: review the beatmap's osu! discussion ("mod") entries. Discussion bubbles appear on the
         // top timeline; filters sit on the left, messages on the right; HD/HR are forced off (Auto-only).
         private readonly BindableBool moddingMode = new BindableBool();
@@ -261,6 +264,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private ITrackStore? trackStore;
         private Track? track;
         private InterpolatingFramedClock? audioClock;
+
+        // Visuals (playhead, objects, timelines) read this offset clock instead of the raw audio clock: while
+        // playing it shifts them by the user's audio offset so they line up with delayed output (e.g. Bluetooth).
+        // Authoring (CurrentTime) and hitsound feedback stay on the raw audioClock.
+        private FramedOffsetClock? visualClock;
         private HitsoundPlayer? hitsounds;
         private int hitsoundIndex;
         private double lastHitsoundTime;
@@ -332,6 +340,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 audioClock = new InterpolatingFramedClock();
                 audioClock.ChangeSource(track);
 
+                // The visual clock wraps the (manually processed) audio clock; its offset is set per frame in
+                // advanceClocks(). processSource:false so it doesn't re-advance the audio clock a second time.
+                visualClock = new FramedOffsetClock(audioClock, processSource: false);
+
                 // Rate-mod preview: speeding up the track also speeds up the interpolating clock, and so the
                 // playhead + object approach + hitsounds. DoubleTime uses Tempo (pitch preserved); Nightcore uses
                 // Frequency (pitch rises). Both driven by the DT/NC chip via these adjustments.
@@ -374,7 +386,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Anchor = Anchor.TopLeft,
                     Origin = Anchor.TopLeft,
                     Padding = new MarginPadding { Left = timeline_side_width, Right = timeline_side_width },
-                    Child = topTimeline = new TopTimeline(parsed, () => CurrentTime, track?.Length ?? 0, hitsoundMode)
+                    Child = topTimeline = new TopTimeline(parsed, () => VisualTime, track?.Length ?? 0, hitsoundMode)
                     {
                         Anchor = Anchor.TopLeft,
                         Origin = Anchor.TopLeft,
@@ -444,7 +456,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
                     },
                 },
-                bottomTimeline = new EditorTimeline(track, parsed, () => CurrentTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
+                bottomTimeline = new EditorTimeline(track, parsed, () => VisualTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
                 playbackControl = new PlaybackControl(track, () => track?.IsRunning ?? false, togglePlay)
                 {
                     Anchor = Anchor.BottomRight,
@@ -554,7 +566,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     },
                 },
                 // The Auto-preview popover (cursor colour + trail length), opened on demand from the "..." button.
-                autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth, autoKeyOverlay)
+                autoMenu = new AutoPreviewMenu(autoColour, autoTrail, autoTrailWidth, autoKeyOverlay, autoHumanize, toggleHumanizeTuning)
+                {
+                    Anchor = Anchor.TopRight,
+                    Origin = Anchor.TopRight,
+                    Alpha = 0,
+                },
+                // Live tuning panel for the Humanize model; opened from the AU mini-menu, edits HumanizeTuning in real time.
+                humanizeTuningPanel = new HumanizeTuningPanel(() => humanizeTuningPanel!.Hide(), () => settings.SaveHumanizeTuning())
                 {
                     Anchor = Anchor.TopRight,
                     Origin = Anchor.TopRight,
@@ -650,7 +669,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 betaOverlay = new BetaNoticeOverlay(),
             };
 
-            playfield.TimeSource = () => CurrentTime;
+            // Visibility/fade follow the (offset) visual time so objects scroll in sync with the playhead; placement
+            // snapping stays on the raw authoring time so the audio offset never shifts where objects land.
+            playfield.TimeSource = () => VisualTime;
             playfield.SnappedTimeSource = () => snapTime(CurrentTime);
             playfield.PlacementSnap = SnapPlacement;
             playfield.SliderTickDistance = sliderTickDistance;
@@ -684,8 +705,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 rebuildHitObjects();
             }, true);
 
-            // Hit objects animate against the interpolated audio clock (set in load), so transforms track playback.
-            if (audioClock != null)
+            // Hit objects animate against the offset visual clock (set in load) so their approach/fade transforms
+            // track the same shifted playhead the timelines use; falls back to the raw audio clock if unavailable.
+            if (visualClock != null)
+                playfield.SetClock(visualClock);
+            else if (audioClock != null)
                 playfield.SetClock(audioClock);
             editable.Cs.BindValueChanged(_ =>
             {
@@ -761,6 +785,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             autoTrail.BindValueChanged(t => playfield.SetAutoTrailLength(t.NewValue), true);
             autoTrailWidth.BindValueChanged(w => playfield.SetAutoTrailWidth(w.NewValue), true);
             autoKeyOverlay.BindValueChanged(k => playfield.SetKeyOverlay(k.NewValue), true);
+            autoHumanize.BindValueChanged(h => playfield.SetHumanize(h.NewValue), true);
 
             // Persist the Auto-cursor settings: seed from the stored values, then mirror edits back so they
             // survive across sessions (the colour stored as Colour4, our cursor uses osuTK Color4).
@@ -768,10 +793,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             autoTrail.Value = (int)settings.AutoTrailLength.Value;
             autoTrailWidth.Value = settings.AutoTrailWidth.Value;
             autoKeyOverlay.Value = settings.AutoKeyOverlay.Value;
+            autoHumanize.Value = settings.AutoHumanize.Value;
             autoColour.BindValueChanged(c => settings.AutoCursorColour.Value = toColour4(c.NewValue));
             autoTrail.BindValueChanged(t => settings.AutoTrailLength.Value = t.NewValue);
             autoTrailWidth.BindValueChanged(w => settings.AutoTrailWidth.Value = w.NewValue);
             autoKeyOverlay.BindValueChanged(k => settings.AutoKeyOverlay.Value = k.NewValue);
+            autoHumanize.BindValueChanged(h => settings.AutoHumanize.Value = h.NewValue);
 
             // Modding Mode: load the discussions the first time it's entered; toggle the side panels + bubbles;
             // force HD/HR off (Auto-only) while active.
@@ -789,6 +816,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private static Colour4 toColour4(Color4 c) => new Colour4(c.R, c.G, c.B, c.A);
 
         /// <summary>Shows/hides the Auto-cursor popover and keeps it positioned under the mod chips.</summary>
+        private void toggleHumanizeTuning()
+        {
+            if (humanizeTuningPanel.State.Value == Visibility.Visible)
+                humanizeTuningPanel.Hide();
+            else
+                humanizeTuningPanel.Show();
+        }
+
         private void toggleAutoMenu() => setAutoMenuOpen(!autoMenuOpen);
 
         private void setAutoMenuOpen(bool open)
@@ -940,12 +975,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The smoothed playback time (ms), interpolated between coarse audio-clock updates.</summary>
         private double CurrentTime => audioClock?.CurrentTime ?? track?.CurrentTime ?? 0;
 
+        /// <summary>
+        /// Playback time fed to the visual playhead, objects and timelines: <see cref="CurrentTime"/> shifted by the
+        /// user's audio offset while playing, so what's on screen matches what's heard through a laggy output. Equals
+        /// <see cref="CurrentTime"/> while paused (no offset), so it never moves where placed objects land.
+        /// </summary>
+        private double VisualTime => visualClock?.CurrentTime ?? CurrentTime;
+
+        /// <summary>
+        /// Advances the raw audio clock and the offset visual clock (one per frame, and after a seek). The offset
+        /// is only applied while the track is running - paused, the playhead must sit exactly where edits land.
+        /// </summary>
+        private void advanceClocks()
+        {
+            audioClock?.ProcessFrame();
+
+            if (visualClock != null)
+            {
+                visualClock.Offset = track?.IsRunning == true ? settings.AudioOffset.Value : 0;
+                visualClock.ProcessFrame();
+            }
+        }
+
         protected override void Update()
         {
             base.Update();
             updateHitsoundLayout();
-            // Advance the interpolating clock once per frame, before children read CurrentTime.
-            audioClock?.ProcessFrame();
+            // Advance the clocks once per frame, before children read CurrentTime / VisualTime.
+            advanceClocks();
             updateHitsounds();
             updateBpm();
             toolPanel.SetActive(currentTool());
@@ -1005,6 +1062,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             float belowChips = chipsTop + modButtons.DrawHeight + 6;
             autoMenu.Margin = new MarginPadding { Right = hudRight, Top = belowChips };
             distanceSnapText.Margin = new MarginPadding { Right = hudRight, Top = belowChips };
+            // Live tuning panel sits just left of the AU mini-menu so both stay visible while dragging sliders.
+            humanizeTuningPanel.Margin = new MarginPadding { Right = hudRight + autoMenu.DrawWidth + 12, Top = belowChips };
 
             // The lazer-style bank bar sits on the left, just below the timeline, when the hitsound lanes are open.
             hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 12 };
@@ -4973,7 +5032,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return;
 
             track.Seek(Math.Clamp(time, 0, track.Length));
-            audioClock?.ProcessFrame();
+            advanceClocks();
         }
 
         public override void OnEntering(ScreenTransitionEvent e)

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using osu.Framework.Bindables;
 using osu.Framework.Graphics;
@@ -71,6 +73,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public readonly BindableFloat ObjectFadeOut = new BindableFloat(600f) { MinValue = 100f, MaxValue = 2000f, Precision = 50f };
 
         /// <summary>
+        /// Audio offset (ms) applied to the on-screen playhead/objects during playback, to compensate for output
+        /// latency - notably Bluetooth headphones, which buffer ~100-300 ms. A negative value delays the visuals so
+        /// what you see lines up with what you hear; 0 disables it. Only affects playback preview, never the timing
+        /// of placed objects or hitsound feedback.
+        /// </summary>
+        public readonly BindableFloat AudioOffset = new BindableFloat(0f) { MinValue = -500f, MaxValue = 500f, Precision = 1f };
+
+        /// <summary>
         /// Whether the beta-notice popup is shown when the editor opens. The user can opt out from the
         /// popup itself (and back in via this setting).
         /// </summary>
@@ -132,6 +142,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Auto-preview: show the K1/K2 key overlay (the cursor's "tapping"), like osu!lazer.</summary>
         public readonly BindableBool AutoKeyOverlay = new BindableBool(false);
+
+        /// <summary>Auto-preview: "humanise" the cursor (arcs, overshoot, jitter, aim error) instead of perfect Auto.</summary>
+        public readonly BindableBool AutoHumanize = new BindableBool(false);
 
         /// <summary>Modding Mode: discussion types the user has hidden (comma-separated), persisted across maps.</summary>
         public readonly Bindable<string> ModdingMutedTypes = new Bindable<string>(string.Empty);
@@ -198,6 +211,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["objectborder"] = ObjectBorderThickness,
                 ["slidertick"] = SliderTickSize,
                 ["objectfadeout"] = ObjectFadeOut,
+                ["audiooffset"] = AudioOffset,
                 ["autotraillength"] = AutoTrailLength,
                 ["autotrailwidth"] = AutoTrailWidth,
             };
@@ -218,6 +232,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             AutoUpdate.ValueChanged += _ => save();
             AutoUpdatePrompted.ValueChanged += _ => save();
             AutoKeyOverlay.ValueChanged += _ => save();
+            AutoHumanize.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
             // the loading guard is clear.
@@ -275,6 +290,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (data.TryGetValue("autoKeyOverlay", out string? keyOverlay) && bool.TryParse(keyOverlay, out bool keyOverlayValue))
                     AutoKeyOverlay.Value = keyOverlayValue;
 
+                if (data.TryGetValue("autoHumanize", out string? humanize) && bool.TryParse(humanize, out bool humanizeValue))
+                    AutoHumanize.Value = humanizeValue;
+
+                // Humanize tuning: apply any stored per-field overrides onto the live HumanizeTuning statics.
+                foreach (var f in humanizeTuningFields())
+                    if (data.TryGetValue("hz." + f.Name, out string? hv) &&
+                        float.TryParse(hv, NumberStyles.Float, CultureInfo.InvariantCulture, out float fv))
+                        f.SetValue(null, fv);
+
                 int version = data.TryGetValue("version", out string? vRaw) && int.TryParse(vRaw, out int v) ? v : 0;
                 migrate(version);
             }
@@ -330,6 +354,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["autoUpdate"] = AutoUpdate.Value.ToString();
                 data["autoUpdatePrompted"] = AutoUpdatePrompted.Value.ToString();
                 data["autoKeyOverlay"] = AutoKeyOverlay.Value.ToString();
+                data["autoHumanize"] = AutoHumanize.Value.ToString();
+
+                // Humanize tuning: persist every HumanizeTuning static field so dialled-in values survive a restart.
+                foreach (var f in humanizeTuningFields())
+                    data["hz." + f.Name] = ((float)f.GetValue(null)!).ToString(CultureInfo.InvariantCulture);
+
                 data["version"] = settings_version.ToString();
 
                 using var stream = storage.GetStream(filename, FileAccess.Write, FileMode.Create);
@@ -340,6 +370,17 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 // Best-effort persistence.
             }
+        }
+
+        /// <summary>Persists the current <see cref="HumanizeTuning"/> values (the live tuning panel calls this on "Save").</summary>
+        public void SaveHumanizeTuning() => save();
+
+        /// <summary>The public static float fields of <see cref="HumanizeTuning"/> (all its tunables).</summary>
+        private static IEnumerable<FieldInfo> humanizeTuningFields()
+        {
+            foreach (var f in typeof(HumanizeTuning).GetFields(BindingFlags.Public | BindingFlags.Static))
+                if (f.FieldType == typeof(float))
+                    yield return f;
         }
     }
 }

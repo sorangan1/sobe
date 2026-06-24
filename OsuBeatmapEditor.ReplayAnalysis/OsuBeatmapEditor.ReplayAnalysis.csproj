@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>OsuBeatmapEditor.ReplayAnalysis</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reuse the editor's pure decoder/geometry/stacking + lazer storage helpers. -->
+    <ProjectReference Include="..\OsuBeatmapEditor.Game\OsuBeatmapEditor.Game.csproj" />
+    <!-- LZMA-decode the .osr replay frame block. -->
+    <PackageReference Include="SharpCompress" Version="0.36.0" />
+  </ItemGroup>
+
+</Project>

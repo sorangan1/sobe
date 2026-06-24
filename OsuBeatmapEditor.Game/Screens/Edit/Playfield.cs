@@ -104,6 +104,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Optional K1/K2 "tapping" overlay shown alongside the Auto cursor (a setting under the AU chip).
         private KeyOverlay keyOverlay = null!;
         private bool modKeyOverlay;
+        // "Humanise" the Auto cursor: arc between objects, overshoot + correct, jitter and aim slightly off-centre.
+        private bool modHumanize;
         // The object index the key overlay is currently lighting (so a new object bumps the count once).
         private int lastKeyObjectIndex = -1;
 
@@ -293,6 +295,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Sets the Auto cursor trail thickness multiplier.</summary>
         public void SetAutoTrailWidth(float width) => autoCursor.SetTrailWidth(width);
 
+        /// <summary>Toggles the "humanised" Auto cursor (arcs, overshoot, jitter, aim error). Visual only.</summary>
+        public void SetHumanize(bool enabled) => modHumanize = enabled;
+
         /// <summary>Toggles the K1/K2 "tapping" overlay shown alongside the Auto cursor (visual only).</summary>
         public void SetKeyOverlay(bool enabled)
         {
@@ -390,30 +395,304 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     hi = mid - 1;
             }
 
+            autoHold = 0f;
+            Vector2 pos = autoBasePosition(prev, time, objs);
+
+            // Humanise: add a continuous, low-amplitude wobble on top of whatever base position we landed on
+            // (resting on an object, following a slider, or gliding through a gap). The gap/aim humanisation
+            // is folded into the base position below. The wobble is damped on a stack, where a real player keeps
+            // the hand planted instead of drifting.
+            // Damp the wobble on a stack, but not to zero: replay analysis shows the hand still drifts ~0.4 of a
+            // radius across a stacked pair (mostly the per-note aim error), so it is steadied, not frozen.
+            if (modHumanize)
+                pos += humanJitter(time) * (HumanizeTuning.JitterAmount * (1f - HumanizeTuning.JitterSteadyDamp * autoHold));
+
+            return pos;
+        }
+
+        /// <summary>How "planted" the cursor is this frame (1 = sitting on a stack, 0 = moving). Damps the jitter.</summary>
+        private float autoHold;
+
+        /// <summary>The exact (un-jittered) Auto position for the current time, given the index of the last started object.</summary>
+        private Vector2 autoBasePosition(int prev, double time, IReadOnlyList<HitObjectModel> objs)
+        {
             // Before the first object: wait on its start position.
             if (prev < 0)
                 return autoStartPos(objs[0]);
 
             var cur = objs[prev];
 
+            // When humanising, a player lets go of a slider slightly before its true end (and flicks out with the
+            // slider's momentum). curEnd is that early release time; the gap to the next object starts from it.
+            double curEnd = modHumanize ? humanReleaseTime(cur) : autoEndTime(cur);
+
             // Inside the current object (a long slider / spinner): follow it.
-            if (time <= autoEndTime(cur))
+            if (time <= curEnd)
                 return autoFollowPos(cur, time);
 
             // After the last object: rest where it ended.
             if (prev + 1 >= objs.Count)
                 return autoEndPos(cur);
 
-            // In the gap between two objects: glide from one to the next, easing in/out like Auto does.
+            // In the gap between two objects: glide from one to the next.
             var next = objs[prev + 1];
-            double from = autoEndTime(cur);
+            double from = curEnd;
             double to = next.StartTime;
             if (to <= from)
                 return autoStartPos(next);
 
+            bool sliderExit = modHumanize && cur.Kind == HitObjectKind.Slider;
+            Vector2 a = sliderExit ? autoFollowPos(cur, curEnd) : autoEndPos(cur);
+            Vector2 b = autoStartPos(next);
             double f = Math.Clamp((time - from) / (to - from), 0, 1);
+
+            // Humanised gap: flow through tight spacing (streams / close jumps) on a curve, overshoot + correct
+            // only on very large jumps. Otherwise the perfect Auto easing (smoothstep) along a straight line.
+            if (modHumanize)
+            {
+                // Leaving a slider, the "before" tangent points along the slider so the cursor carries its momentum out.
+                Vector2 sliderBefore = sliderExit ? autoFollowPos(cur, Math.Max(cur.StartTime, curEnd - 24)) : a;
+                return humanGapPosition(objs, prev, sliderExit, a, b, sliderBefore, f, to - from);
+            }
+
             f = f * f * (3 - 2 * f); // smoothstep
-            return Vector2.Lerp(autoEndPos(cur), autoStartPos(next), (float)f);
+            return Vector2.Lerp(a, b, (float)f);
+        }
+
+        /// <summary>
+        /// When humanising, the time a player effectively lets go of an object. Replay analysis shows real players
+        /// stay on the slider almost to the end (median lead ~2.5ms, ~1% of duration) - the follow circle lets the
+        /// cursor drift off the ball without dropping tracking - so the release is tiny, not the big lead I first guessed.
+        /// </summary>
+        private double humanReleaseTime(HitObjectModel o)
+        {
+            if (o.Kind != HitObjectKind.Slider)
+                return autoEndTime(o);
+            double dur = Math.Max(0, o.Duration);
+            return autoEndTime(o) - Math.Min(dur * HumanizeTuning.SliderReleaseFrac, HumanizeTuning.SliderReleaseMaxMs);
+        }
+
+        /// <summary>
+        /// A "human" glide from <paramref name="a"/> to the next object's start over normalised progress <paramref name="f"/>.
+        /// The spacing decides the feel, exactly like osu!'s aim metric (distance normalised to a 50px radius, one diameter = 100):
+        /// <list type="bullet">
+        /// <item>Tight spacing (streams) → high <c>flow</c>: an approximating B-spline through the run of notes at near-constant
+        /// velocity, so the cursor sweeps smoothly NEAR each note (like a slider) instead of snapping onto each one.</item>
+        /// <item>Medium straight jumps → <c>overshoot</c>: a straight ease-out-back flick that passes the target then corrects.</item>
+        /// <item>Back-and-forth jumps → a figure-of-eight bow; large jumps → a plain straight smoothstep onto the circle.</item>
+        /// </list>
+        /// The B-spline is C2-continuous across gaps, so a whole stream joins into one flowing curve with no seams.
+        /// </summary>
+        private Vector2 humanGapPosition(IReadOnlyList<HitObjectModel> objs, int prev, bool sliderExit, Vector2 a, Vector2 b, Vector2 sliderBefore, double f, double gapMs)
+        {
+            float radius = currentDiameter * 0.5f;
+            float scaling = radius > 0.01f ? 50f / radius : 1f; // osu!'s normalised_radius = 50
+            float dNorm = (b - a).Length * scaling;             // jump distance in osu! normalised units (diameter = 100)
+
+            // Stacked notes sit a few px apart (stack offset ~0.05 diameter each). A real player keeps the cursor
+            // planted on the stack and just taps, so we hold position and skip the curve entirely there.
+            // CRITICAL: real streams are spaced ~45-90 normalised (replay analysis), so the stack range must stay
+            // well below that - otherwise streams get a partial "hold" and jerk note-to-note instead of flowing.
+            float stack = 1f - smoothstep(dNorm, HumanizeTuning.StackLo, HumanizeTuning.StackHi);
+
+            // Flow = how much this is a stream (smooth sweep) vs a jump (straight). What makes a stream is the RHYTHM,
+            // not the spacing: a run of short, regular note-to-note time gaps flows even when spaced far apart ("spaced
+            // streams"). So flow is the max of a spatial term (tight spacing) and a TIME term (fast + regular run).
+            float spatialFlow = 1f - smoothstep(dNorm, HumanizeTuning.SpatialFlowLo, HumanizeTuning.SpatialFlowHi);
+            float flow = Math.Max(spatialFlow, streamTimeFactor(objs, prev, sliderExit, gapMs));
+
+            // Steady the wobble on stacks AND through fast streams (the hand isn't shaky mid-stream); damps the jitter.
+            autoHold = Math.Max(stack, flow);
+
+            // How much the motion reverses (1 = doubles straight back). Computed up front because it splits the two
+            // medium-jump behaviours: a straight flick overshoots, a back-and-forth loops (figure-of-eight) instead.
+            Vector2 ctxBefore = prev - 1 >= 0 ? autoStartPos(objs[prev - 1]) : a;
+            Vector2 ctxAfter = prev + 2 < objs.Count ? autoStartPos(objs[prev + 2]) : b;
+            Vector2 inDir = safeNormalize(a - ctxBefore);
+            Vector2 outDir = safeNormalize(ctxAfter - b);
+            float reversal = Math.Clamp(-Vector2.Dot(inDir, outDir), 0f, 1f);
+
+            // Overshoot + correct: a subtle flick past the target on clear straight jumps only. Gated by (1-flow) so a
+            // spaced stream (high flow despite large spacing) keeps flowing instead of overshooting each note.
+            float overshoot = smoothstep(dNorm, HumanizeTuning.OvershootOnLo, HumanizeTuning.OvershootOnHi)
+                * (1f - smoothstep(dNorm, HumanizeTuning.OvershootOffLo, HumanizeTuning.OvershootOffHi))
+                * (1f - HumanizeTuning.OvershootReversalGate * reversal) * (1f - flow);
+
+            // Stream (B-spline) control points use CLEAN centres - no per-note aim error - so the smooth sweep doesn't
+            // weave note-to-note. Leaving a slider, the entry comes from the slider so the cursor carries its momentum.
+            Vector2 cBefore = sliderExit ? sliderBefore : cleanNode(objs, prev - 1);
+            Vector2 cA = sliderExit ? a : cleanNode(objs, prev);
+            Vector2 cB = cleanNode(objs, prev + 1);
+            Vector2 cAfter = cleanNode(objs, prev + 2);
+
+            double linear = f;
+            double smooth = f * f * (3 - 2 * f);
+            double timing = smooth;
+            timing = lerp(timing, linear, flow);                 // streams glide through at steady speed
+            timing = lerp(timing, humanEaseOutBack(f), overshoot); // medium straight jumps flick past then settle
+            timing = lerp(timing, stackHold(f), stack);          // a stack stays put, then settles at the very end
+
+            // Jump path: a straight line (with the target's aim error) that lands on the circle (overshoots past it
+            // when timing > 1). Stream path: a cubic B-spline that APPROXIMATES the clean centres (passes near, not
+            // through) so a 1/4 stream reads as one smooth slider-like sweep instead of snapping to each circle.
+            Vector2 straight = Vector2.Lerp(a, b, (float)timing);
+            Vector2 curved = bspline(cBefore, cA, cB, cAfter, (float)timing);
+            Vector2 pos = Vector2.Lerp(straight, curved, flow * (1f - stack)); // streams flow, jumps stay straight
+
+            // Perpendicular bow on jumps. Real aim arcs to the OUTSIDE of corners, and the side is set by the path's
+            // turn direction (geometry) - NOT an alternating index - so a rotational pattern (e.g. a clockwise
+            // triangle) keeps every arc on the same outer side and never flips inward between jumps. A pure
+            // back-and-forth has no net turn, so there we fall back to an alternating figure-of-eight. Off on streams
+            // (the B-spline already shapes them) and stacks.
+            Vector2 chord = b - a;
+            float chordLen = chord.Length;
+            if (chordLen > 0.001f)
+            {
+                Vector2 prevDir = safeNormalize(a - ctxBefore);
+                Vector2 thisDir = chord / chordLen;
+                Vector2 nextDir = safeNormalize(ctxAfter - b);
+                float turn = cross(prevDir, thisDir) + cross(thisDir, nextDir); // signed total turn through this gap
+                float turnMag = Math.Abs(turn);
+
+                float sign, arcAmt;
+                if (turnMag > HumanizeTuning.ArcTurnThreshold)
+                {
+                    sign = turn > 0 ? -1f : 1f;            // bow to the outside of the turn (opposite its direction)
+                    arcAmt = HumanizeTuning.ArcOutsideAmount * Math.Min(1f, turnMag);
+                }
+                else
+                {
+                    sign = (prev & 1) == 0 ? 1f : -1f;     // ambiguous reversal → alternating figure-of-eight
+                    arcAmt = HumanizeTuning.ArcFigure8Amount * reversal;
+                }
+
+                float bowWeight = arcAmt * (1f - stack) * (1f - flow);
+                if (bowWeight > 0.001f)
+                {
+                    Vector2 perp = new Vector2(-chord.Y, chord.X) / chordLen;
+                    pos += perp * ((float)Math.Sin(f * Math.PI) * bowWeight * Math.Min(chordLen, HumanizeTuning.ArcMaxPx) * sign);
+                }
+            }
+
+            // Relax toward the playfield centre during a long pause (e.g. after a fast burst), then carry on to the
+            // target. Peaks mid-gap and vanishes at the ends, so the endpoints stay put.
+            float centrePull = smoothstep((float)gapMs, HumanizeTuning.CentreDriftSlowLo, HumanizeTuning.CentreDriftSlowHi) * (1f - stack);
+            if (centrePull > 0.001f)
+            {
+                Vector2 centre = new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f);
+                pos = Vector2.Lerp(pos, centre, (float)Math.Sin(f * Math.PI) * HumanizeTuning.CentreDriftAmount * centrePull);
+            }
+
+            return pos;
+        }
+
+        private static Vector2 safeNormalize(Vector2 v)
+        {
+            float l = v.Length;
+            return l > 0.0001f ? v / l : Vector2.Zero;
+        }
+
+        /// <summary>2D cross product (z of a×b); its sign is the turn direction from <paramref name="a"/> to <paramref name="b"/>.</summary>
+        private static float cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;
+
+        /// <summary>
+        /// How stream-like this gap is by RHYTHM (0..1): a run of short, regular note-to-note time gaps between circles.
+        /// This is what makes even a wide-spaced ("spaced") stream flow smoothly - the cadence, not the spacing. Zero
+        /// when leaving a slider, when either side isn't a circle, or when the gap is slow/irregular (a real jump).
+        /// </summary>
+        private static float streamTimeFactor(IReadOnlyList<HitObjectModel> objs, int prev, bool sliderExit, double gapMs)
+        {
+            if (sliderExit || objs[prev].Kind != HitObjectKind.Circle || objs[prev + 1].Kind != HitObjectKind.Circle)
+                return 0f;
+
+            double gThis = Math.Max(1, gapMs);
+            double gPrev = prev - 1 >= 0 ? objs[prev].StartTime - objs[prev - 1].StartTime : gThis;
+            double gNext = prev + 2 < objs.Count ? objs[prev + 2].StartTime - objs[prev + 1].StartTime : gThis;
+
+            float shortGap = 1f - smoothstep((float)gThis, HumanizeTuning.StreamGapFastMs, HumanizeTuning.StreamGapSlowMs);
+            return shortGap * regularity(gThis, gPrev) * regularity(gThis, gNext);
+        }
+
+        /// <summary>1 when two time gaps are close (a regular run), falling to 0 as they diverge (see StreamRegular Lo/Hi).</summary>
+        private static float regularity(double a, double b)
+        {
+            double m = Math.Max(a, b);
+            if (m < 1) return 1f;
+            return 1f - smoothstep((float)(Math.Abs(a - b) / m), HumanizeTuning.StreamRegularLo, HumanizeTuning.StreamRegularHi);
+        }
+
+        /// <summary>An object's start centre WITHOUT aim error (just position + stack), clamped so callers can ask past the ends.
+        /// Used for the stream B-spline control points so the smooth sweep isn't jittered by each note's aim offset.</summary>
+        private Vector2 cleanNode(IReadOnlyList<HitObjectModel> objs, int k)
+        {
+            var o = objs[Math.Clamp(k, 0, objs.Count - 1)];
+            return autoStartPos(o) - aimError(o);
+        }
+
+        /// <summary>Stays at 0 for most of the gap, then ramps to 1 near the end — the cursor holds on a stack and only moves to settle.</summary>
+        private static double stackHold(double f) => smoothstep((float)f, HumanizeTuning.StackHoldStart, 1f);
+
+        /// <summary>
+        /// Uniform cubic B-spline point at <paramref name="t"/> on the p1→p2 segment. Unlike Catmull-Rom it does NOT pass
+        /// through the control points — it approximates them — so a run of stream notes becomes one smooth sweep that
+        /// flows near each note instead of snapping to it. C2-continuous across segments (endpoints depend only on the
+        /// shared control points), so the whole stream joins into a single flowing curve.
+        /// </summary>
+        private static Vector2 bspline(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t)
+        {
+            float t2 = t * t;
+            float t3 = t2 * t;
+            float b0 = (1f - 3f * t + 3f * t2 - t3) / 6f;
+            float b1 = (4f - 6f * t2 + 3f * t3) / 6f;
+            float b2 = (1f + 3f * t + 3f * t2 - 3f * t3) / 6f;
+            float b3 = t3 / 6f;
+            return p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;
+        }
+
+        /// <summary>Smoothstep ramp from 0 (at <paramref name="edge0"/>) to 1 (at <paramref name="edge1"/>).</summary>
+        private static float smoothstep(float x, float edge0, float edge1)
+        {
+            float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+            return t * t * (3f - 2f * t);
+        }
+
+        private static double lerp(double a, double b, double t) => a + (b - a) * t;
+
+        /// <summary>Ease-out-back: accelerates, overshoots the target a little, then settles exactly on it at f=1.
+        /// The overshoot magnitude is <see cref="HumanizeTuning.OvershootAmount"/> (c1); higher = flies further past.</summary>
+        private static double humanEaseOutBack(double f)
+        {
+            double c1 = HumanizeTuning.OvershootAmount;
+            double c3 = c1 + 1;
+            double t = f - 1;
+            return 1 + c3 * t * t * t + c1 * t * t;
+        }
+
+        /// <summary>A faint multi-frequency wobble (osu!px) — the barely-unsteady hand. Replay analysis shows real
+        /// streams shake only ~0.27px (median), so this is kept very small. ~0.13px amplitude.</summary>
+        private static Vector2 humanJitter(double time)
+        {
+            double t = time / 1000.0;
+            float x = (float)(Math.Sin(t * 9.0) * 0.085 + Math.Sin(t * 19.0) * 0.045);
+            float y = (float)(Math.Cos(t * 7.5) * 0.085 + Math.Sin(t * 21.0) * 0.045);
+            return new Vector2(x, y);
+        }
+
+        /// <summary>
+        /// A stable per-object aim error (osu!px) for circles when humanising: the cursor lands a little off the
+        /// centre instead of dead-on. Derived from the object's id so it's identical every pass. Zero otherwise.
+        /// </summary>
+        private Vector2 aimError(HitObjectModel o)
+        {
+            if (!modHumanize || o.Kind != HitObjectKind.Circle)
+                return Vector2.Zero;
+
+            uint h = (uint)o.Id * 2654435761u + 40503u;
+            float ang = (h & 0xFFFF) / 65535f * (float)(Math.PI * 2);
+            float mag = ((h >> 16) & 0xFFFF) / 65535f;
+            // Replay analysis: real aim error is a median ~0.33 of the radius (factor 0.6 x uniform mag ≈ that median).
+            float radius = currentDiameter * 0.5f * HumanizeTuning.AimErrorAmount * mag;
+            return new Vector2((float)Math.Cos(ang), (float)Math.Sin(ang)) * radius;
         }
 
         /// <summary>Spin speed (rad/ms) and radius (osu!px) the Auto cursor uses on spinners.</summary>
@@ -421,7 +700,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float auto_spin_radius = 55f;
 
         private Vector2 autoStartPos(HitObjectModel o)
-            => new Vector2(o.X, o.Y) + DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
+            => new Vector2(o.X, o.Y) + DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter) + aimError(o);
 
         private Vector2 autoEndPos(HitObjectModel o)
         {
@@ -436,7 +715,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     return new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2, ParsedBeatmap.PLAYFIELD_HEIGHT / 2);
 
                 default:
-                    return new Vector2(o.X, o.Y) + stack;
+                    return new Vector2(o.X, o.Y) + stack + aimError(o);
             }
         }
 
@@ -456,7 +735,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     int span = spanDur > 0 ? Math.Min(o.Slides - 1, (int)(elapsed / spanDur)) : 0;
                     double within = spanDur > 0 ? (elapsed - span * spanDur) / spanDur : 0;
                     double frac = span % 2 == 0 ? within : 1 - within; // bounce back on each repeat
-                    return SliderGeometry.PointAtFraction(path, Math.Clamp(frac, 0, 1)) + stack;
+                    Vector2 exact = SliderGeometry.PointAtFraction(path, Math.Clamp(frac, 0, 1)) + stack;
+
+                    if (!modHumanize)
+                        return exact;
+
+                    // Players don't trace the slider shape 1:1 - they cut curvature, staying inside the path within the
+                    // follow circle. Average the path over a small fraction window to round off the curve, and fade the
+                    // laziness to 0 at each span boundary (head/repeats/tail are still hit on-path).
+                    Vector2 avg = Vector2.Zero;
+                    float wsum = 0;
+                    for (int k = -2; k <= 2; k++)
+                    {
+                        float w = 3 - Math.Abs(k);
+                        double fr = Math.Clamp(frac + k * 0.05, 0, 1);
+                        avg += (SliderGeometry.PointAtFraction(path, fr) + stack) * w;
+                        wsum += w;
+                    }
+                    float lazy = HumanizeTuning.SliderLaziness * (float)Math.Sin(within * Math.PI);
+                    return Vector2.Lerp(exact, avg / wsum, lazy);
                 }
 
                 case HitObjectKind.Spinner:
@@ -467,7 +764,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 }
 
                 default:
-                    return new Vector2(o.X, o.Y) + stack;
+                    return new Vector2(o.X, o.Y) + stack + aimError(o);
             }
         }
 

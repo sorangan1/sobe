@@ -91,7 +91,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             bindable.BindValueChanged(_ => updateText());
         }
 
-        protected override bool CanAddCharacter(char character) => char.IsDigit(character) || character == '.';
+        protected override bool CanAddCharacter(char character)
+            => char.IsDigit(character) || character == '.' || (character == '-' && bindable.MinValue < 0);
 
         // Always use '.' as the decimal separator, independent of the system locale.
         private void updateText() => Text = bindable.Value.ToString("0.0#", CultureInfo.InvariantCulture);

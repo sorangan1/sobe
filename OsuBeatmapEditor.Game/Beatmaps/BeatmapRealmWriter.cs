@@ -119,7 +119,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 });
 
                 if (error == null)
+                {
+                    // Keep the open editor's in-memory snapshot in sync with the realm: the difficulty's .osu
+                    // content hash just changed to newSha. Without this, a second save in the same session would
+                    // still look up the old hash - which no longer exists in the realm - and fail to find the set
+                    // or the edited difficulty.
+                    difficulty.OsuFileHash = newSha;
                     BeatmapStore.InvalidateCache();
+                }
                 return error;
             }
             catch (Exception ex)

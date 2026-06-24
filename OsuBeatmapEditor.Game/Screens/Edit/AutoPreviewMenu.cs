@@ -23,6 +23,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly BindableInt trailLength;
         private readonly BindableFloat trailWidth;
         private readonly BindableBool keyOverlay;
+        private readonly BindableBool humanize;
+        private readonly System.Action onTune;
 
         // The colours offered for the cursor. Yellow first (the default the user asked for).
         private static readonly Color4[] swatch_colours =
@@ -37,12 +39,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private readonly List<SwatchButton> swatches = new List<SwatchButton>();
 
-        public AutoPreviewMenu(Bindable<Color4> colour, BindableInt trailLength, BindableFloat trailWidth, BindableBool keyOverlay)
+        public AutoPreviewMenu(Bindable<Color4> colour, BindableInt trailLength, BindableFloat trailWidth, BindableBool keyOverlay, BindableBool humanize, System.Action onTune)
         {
             this.colour = colour;
             this.trailLength = trailLength;
             this.trailWidth = trailWidth;
             this.keyOverlay = keyOverlay;
+            this.humanize = humanize;
+            this.onTune = onTune;
 
             AutoSizeAxes = Axes.Both;
         }
@@ -122,6 +126,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                 },
                             },
                             new ToggleRow("Key overlay", keyOverlay),
+                            new ToggleRow("Humanize", humanize),
+                            new TuneButton("Tune parameters...", onTune),
                         },
                     },
                 },
@@ -159,6 +165,40 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Colour = EditorTheme.Colours.Text,
             Font = EditorTheme.Type.Label(),
         };
+
+        /// <summary>A full-width clickable row that opens the live tuning panel.</summary>
+        private partial class TuneButton : CompositeDrawable
+        {
+            private readonly System.Action onClick;
+            private readonly Box bg;
+
+            public TuneButton(string text, System.Action onClick)
+            {
+                this.onClick = onClick;
+
+                RelativeSizeAxes = Axes.X;
+                Height = 22;
+                Masking = true;
+                CornerRadius = EditorTheme.Radius.Sm;
+
+                InternalChildren = new Drawable[]
+                {
+                    bg = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Sunken },
+                    new SpriteText
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Text = text,
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.Label(),
+                    },
+                };
+            }
+
+            protected override bool OnHover(HoverEvent e) { bg.FadeColour(EditorTheme.Colours.Selection, 80); return true; }
+            protected override void OnHoverLost(HoverLostEvent e) => bg.FadeColour(EditorTheme.Colours.Sunken, 80);
+            protected override bool OnClick(ClickEvent e) { onClick(); return true; }
+        }
 
         /// <summary>A labelled on/off switch bound to a <see cref="BindableBool"/> (click anywhere on the row toggles it).</summary>
         private partial class ToggleRow : CompositeDrawable

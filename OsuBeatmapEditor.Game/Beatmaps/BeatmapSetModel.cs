@@ -56,8 +56,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         public double StarRating { get; init; }
         public string RulesetShortName { get; init; } = string.Empty;
 
-        /// <summary>SHA-256 hash of this difficulty's .osu file; also its key in the file store. Empty for unsaved maps.</summary>
-        public string OsuFileHash { get; init; } = string.Empty;
+        /// <summary>SHA-256 hash of this difficulty's .osu file; also its key in the file store. Empty for unsaved maps.
+        /// Updated in place by <see cref="BeatmapRealmWriter"/> after an in-place save so the open editor's snapshot
+        /// stays in sync with the realm and a subsequent save can still locate the difficulty by its current hash.</summary>
+        public string OsuFileHash { get; set; } = string.Empty;
 
         /// <summary>This difficulty's background image filename (from its metadata). Empty if none.</summary>
         public string BackgroundFile { get; init; } = string.Empty;

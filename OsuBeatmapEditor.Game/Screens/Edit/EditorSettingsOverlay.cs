@@ -111,7 +111,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         private Drawable buildAudioSection() => section(
-            SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()));
+            SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()),
+            heightRow("Audio offset (ms)", settings.AudioOffset),
+            new SpriteText
+            {
+                Text = "Shifts the playhead during playback to match output latency (e.g. Bluetooth headphones).\nNegative delays the visuals so what you see lines up with what you hear.",
+                Colour = EditorTheme.Colours.TextFaint,
+                Font = EditorTheme.Type.Label(),
+            });
 
         private Drawable buildObjectsSection() => section(
             colourRow("Combo colour 1", settings.ComboColour1),
