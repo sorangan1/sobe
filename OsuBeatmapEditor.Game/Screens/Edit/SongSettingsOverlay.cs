@@ -24,11 +24,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         protected override string Heading => "Song Setup";
         protected override Bindable<string>? LastSectionStore => lastSection;
 
-        protected override (string name, Func<Drawable> content)[] CreateSections() => new (string, Func<Drawable>)[]
+        protected override (string name, IconUsage icon, Func<Drawable> content)[] CreateSections() => new (string, IconUsage, Func<Drawable>)[]
         {
-            ("General", buildGeneralSection),
-            ("Difficulty", buildDifficultySection),
-            ("Colours", buildColoursSection),
+            ("General", FontAwesome.Solid.Music, buildGeneralSection),
+            ("Difficulty", FontAwesome.Solid.SlidersH, buildDifficultySection),
+            ("Colours", FontAwesome.Solid.Palette, buildColoursSection),
         };
 
         private Drawable buildColoursSection() => flow(

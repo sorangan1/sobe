@@ -99,6 +99,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Whether the app checks for and installs updates automatically on launch.</summary>
         public readonly BindableBool AutoUpdate = new BindableBool(true);
 
+        /// <summary>
+        /// Power-saving mode: caps the frame rate to the monitor's refresh rate (VSync) instead of the
+        /// default 2x-refresh. Roughly halves GPU/CPU draw work on high-refresh displays, at the cost of a
+        /// little input latency while scrubbing. Applied to the framework's global frame-sync setting.
+        /// </summary>
+        public readonly BindableBool PowerSaving = new BindableBool(false);
+
         /// <summary>Whether the one-time "enable automatic updates?" prompt has been answered.</summary>
         public readonly BindableBool AutoUpdatePrompted = new BindableBool(false);
 
@@ -231,6 +238,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             BackgroundDim.ValueChanged += _ => save();
             AutoUpdate.ValueChanged += _ => save();
             AutoUpdatePrompted.ValueChanged += _ => save();
+            PowerSaving.ValueChanged += _ => save();
             AutoKeyOverlay.ValueChanged += _ => save();
             AutoHumanize.ValueChanged += _ => save();
 
@@ -286,6 +294,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("autoUpdatePrompted", out string? prompted) && bool.TryParse(prompted, out bool promptedValue))
                     AutoUpdatePrompted.Value = promptedValue;
+
+                if (data.TryGetValue("powerSaving", out string? power) && bool.TryParse(power, out bool powerValue))
+                    PowerSaving.Value = powerValue;
 
                 if (data.TryGetValue("autoKeyOverlay", out string? keyOverlay) && bool.TryParse(keyOverlay, out bool keyOverlayValue))
                     AutoKeyOverlay.Value = keyOverlayValue;
@@ -353,6 +364,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
                 data["autoUpdate"] = AutoUpdate.Value.ToString();
                 data["autoUpdatePrompted"] = AutoUpdatePrompted.Value.ToString();
+                data["powerSaving"] = PowerSaving.Value.ToString();
                 data["autoKeyOverlay"] = AutoKeyOverlay.Value.ToString();
                 data["autoHumanize"] = AutoHumanize.Value.ToString();
 

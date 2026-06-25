@@ -3,6 +3,7 @@ using osu.Framework.Allocation;
 using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
+using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using OsuBeatmapEditor.Game.Graphics;
 using OsuBeatmapEditor.Game.UI;
@@ -25,57 +26,84 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         protected override string Heading => "Settings";
         protected override Bindable<string>? LastSectionStore => settings.LastSection;
 
-        protected override (string name, Func<Drawable> content)[] CreateSections() => new (string, Func<Drawable>)[]
+        protected override (string name, IconUsage icon, Func<Drawable> content)[] CreateSections() => new (string, IconUsage, Func<Drawable>)[]
         {
-            ("Color", buildColourSection),
-            ("Objects", buildObjectsSection),
-            ("Timeline", buildTimelineSection),
-            ("Audio", buildAudioSection),
-            ("Updates", buildUpdatesSection),
-            ("Shortcuts", buildShortcutsSection),
+            ("General", FontAwesome.Solid.Cog, buildGeneralSection),
+            ("Appearance", FontAwesome.Solid.Palette, buildColourSection),
+            ("Objects", FontAwesome.Solid.Bullseye, buildObjectsSection),
+            ("Timeline", FontAwesome.Solid.RulerHorizontal, buildTimelineSection),
+            ("Audio", FontAwesome.Solid.VolumeUp, buildAudioSection),
+            ("Performance", FontAwesome.Solid.TachometerAlt, buildPerformanceSection),
+            ("Shortcuts", FontAwesome.Solid.Keyboard, buildShortcutsSection),
+            ("Updates", FontAwesome.Solid.SyncAlt, buildUpdatesSection),
         };
+
+        private Drawable buildGeneralSection() => section(
+            fieldLabel("Default beatmap creator"),
+            new EditorTextBox(settings.DefaultCreator) { RelativeSizeAxes = Axes.X, Height = EditorTheme.Sizing.InputHeight },
+            description("Auto-filled into the creator field of new and edited beatmaps."),
+            divider(),
+            toggleRow("Show beta notice on open", settings.ShowBetaPopup),
+            description("Shows the welcome / beta disclaimer each time the editor opens."));
+
+        private Drawable buildPerformanceSection() => section(
+            toggleRow("Power saving (cap to refresh rate)", settings.PowerSaving),
+            description("Limits the frame rate to your monitor's refresh rate instead of running at double it. "
+                       + "Lowers GPU/CPU use noticeably on high-refresh displays, with slightly more input latency. "
+                       + "The app also throttles itself automatically while its window isn't focused."));
 
         private Drawable buildUpdatesSection()
         {
-            var status = new SpriteText { Colour = EditorTheme.Colours.TextMuted, Font = EditorTheme.Type.Body() };
+            // A wrapping text block so long status lines stay inside the panel instead of clipping at its edge.
+            var status = new TextFlowContainer(t => { t.Colour = EditorTheme.Colours.TextMuted; t.Font = EditorTheme.Type.Body(); })
+            {
+                RelativeSizeAxes = Axes.X,
+                AutoSizeAxes = Axes.Y,
+            };
             var button = new OsuButton("Check for updates", OsuColour.Surface) { Size = new Vector2(190, 36) };
+
+            void setStatus(string text)
+            {
+                status.Clear();
+                status.AddText(text);
+            }
 
             void refresh()
             {
                 switch (updates?.State.Value)
                 {
                     case Updates.UpdateState.Checking:
-                        status.Text = "Checking for updates...";
+                        setStatus("Checking for updates...");
                         button.Text = "Check for updates";
                         break;
 
                     case Updates.UpdateState.UpToDate:
-                        status.Text = "You're on the latest version.";
+                        setStatus("You're on the latest version.");
                         button.Text = "Check again";
                         break;
 
                     case Updates.UpdateState.UpdateAvailable:
-                        status.Text = $"Version {updates.LatestVersion.Value} is available.";
+                        setStatus($"Version {updates.LatestVersion.Value} is available.");
                         button.Text = updates.CanSelfInstall ? "Install from main menu" : "Open download page";
                         break;
 
                     case Updates.UpdateState.Downloading:
-                        status.Text = $"Downloading {updates.LatestVersion.Value}... {updates.Progress.Value * 100:0}%";
+                        setStatus($"Downloading {updates.LatestVersion.Value}... {updates.Progress.Value * 100:0}%");
                         button.Text = "Downloading...";
                         break;
 
                     case Updates.UpdateState.ReadyToRestart:
-                        status.Text = $"Version {updates.LatestVersion.Value} is ready - restart from the main menu.";
+                        setStatus($"Version {updates.LatestVersion.Value} is ready - restart from the main menu.");
                         button.Text = "Ready";
                         break;
 
                     case Updates.UpdateState.Failed:
-                        status.Text = "Couldn't check for updates.";
+                        setStatus("Couldn't check for updates.");
                         button.Text = "Try again";
                         break;
 
                     default:
-                        status.Text = "Up to date checks run automatically on launch.";
+                        setStatus("Up to date checks run automatically on launch.");
                         button.Text = "Check for updates";
                         break;
                 }
@@ -113,12 +141,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Drawable buildAudioSection() => section(
             SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()),
             heightRow("Audio offset (ms)", settings.AudioOffset),
-            new SpriteText
-            {
-                Text = "Shifts the playhead during playback to match output latency (e.g. Bluetooth headphones).\nNegative delays the visuals so what you see lines up with what you hear.",
-                Colour = EditorTheme.Colours.TextFaint,
-                Font = EditorTheme.Type.Label(),
-            });
+            description("Shifts the playhead during playback to match output latency (e.g. Bluetooth headphones). "
+                       + "A negative value delays the visuals so what you see lines up with what you hear."));
 
         private Drawable buildObjectsSection() => section(
             colourRow("Combo colour 1", settings.ComboColour1),
@@ -154,16 +178,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             SettingsLayout.LabeledRow(label, controlWithReset(new ToggleSwitch(value), value));
 
         private Drawable buildShortcutsSection() => section(
-            new SpriteText
-            {
-                Text = "Default beatmap creator",
-                Colour = EditorTheme.Colours.TextMuted,
-                Font = EditorTheme.Type.Label(),
-            },
-            new EditorTextBox(settings.DefaultCreator) { RelativeSizeAxes = Axes.X, Height = EditorTheme.Sizing.InputHeight },
-            new Container { RelativeSizeAxes = Axes.X, Height = EditorTheme.Spacing.Md },
-            toggleRow("Show beta notice on open", settings.ShowBetaPopup),
-            new Container { RelativeSizeAxes = Axes.X, Height = EditorTheme.Spacing.Md },
             shortcutRow("Play / Pause", settings.PlayPauseKey),
             shortcutRow("Exit editor", settings.ExitKey),
             shortcutRow("Song setup", settings.SongSetupKey),
@@ -212,6 +226,50 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Direction = FillDirection.Vertical,
             Spacing = new Vector2(0, EditorTheme.Spacing.Md),
             Children = rows,
+        };
+
+        /// <summary>
+        /// A muted helper paragraph below a control. Wraps to the panel width (it fills its X axis and grows
+        /// down), so long explanations stay inside the panel instead of running off the edge and being clipped.
+        /// </summary>
+        private static Drawable description(string text)
+        {
+            var flow = new TextFlowContainer(t =>
+            {
+                t.Colour = EditorTheme.Colours.TextFaint;
+                t.Font = EditorTheme.Type.Label();
+            })
+            {
+                RelativeSizeAxes = Axes.X,
+                AutoSizeAxes = Axes.Y,
+                // Pull up a touch so the note reads as attached to the control above it, not a new row.
+                Margin = new MarginPadding { Top = -EditorTheme.Spacing.Xs },
+            };
+            flow.AddText(text);
+            return flow;
+        }
+
+        /// <summary>A small caption above a full-width input (e.g. the creator text box).</summary>
+        private static Drawable fieldLabel(string text) => new SpriteText
+        {
+            Text = text,
+            Colour = EditorTheme.Colours.TextMuted,
+            Font = EditorTheme.Type.Label(),
+        };
+
+        /// <summary>A hairline rule that separates groups of settings within one section.</summary>
+        private static Drawable divider() => new Container
+        {
+            RelativeSizeAxes = Axes.X,
+            Height = EditorTheme.Spacing.Sm,
+            Child = new Box
+            {
+                RelativeSizeAxes = Axes.X,
+                Height = EditorTheme.Sizing.BorderThickness,
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.CentreLeft,
+                Colour = EditorTheme.Colours.Border,
+            },
         };
     }
 }

@@ -82,6 +82,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private Online.PatternStore? patternStore { get; set; }
 
+        // The framework's global config; used to apply the power-saving frame cap. Absent under the test browser.
+        [Resolved(CanBeNull = true)]
+        private osu.Framework.Configuration.FrameworkConfigManager? frameworkConfig { get; set; }
+
         private EditorSettings settings = null!;
         private EditableBeatmap editable = null!;
         private readonly EditorSelection selection = new EditorSelection();
@@ -535,21 +539,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                     Colour = EditorTheme.Colours.Text,
                                     Font = EditorTheme.Type.Label(numeric: true),
                                 },
-                                svText = new SpriteText
-                                {
-                                    Anchor = Anchor.TopCentre,
-                                    Origin = Anchor.TopCentre,
-                                    Colour = EditorTheme.Colours.Velocity,
-                                    Font = EditorTheme.Type.Label(numeric: true),
-                                },
-                                // Live star rating - the same pill design as the song-select carousel.
-                                starChip = new Container
+                                // SV readout + live star-rating pill share one row: stacking all four readouts
+                                // overflowed the fixed-height panel and clipped the star at the bottom. The star
+                                // uses the same pill design as the song-select carousel.
+                                new FillFlowContainer
                                 {
                                     Anchor = Anchor.TopCentre,
                                     Origin = Anchor.TopCentre,
                                     AutoSizeAxes = Axes.Both,
+                                    Direction = FillDirection.Horizontal,
+                                    Spacing = new Vector2(8, 0),
                                     Margin = new MarginPadding { Top = 2 },
-                                    Child = new StarRatingDisplay(0),
+                                    Children = new Drawable[]
+                                    {
+                                        svText = new SpriteText
+                                        {
+                                            Anchor = Anchor.CentreLeft,
+                                            Origin = Anchor.CentreLeft,
+                                            Colour = EditorTheme.Colours.Velocity,
+                                            Font = EditorTheme.Type.Label(numeric: true),
+                                        },
+                                        starChip = new Container
+                                        {
+                                            Anchor = Anchor.CentreLeft,
+                                            Origin = Anchor.CentreLeft,
+                                            AutoSizeAxes = Axes.Both,
+                                            Child = new StarRatingDisplay(0),
+                                        },
+                                    },
                                 },
                             },
                         },
@@ -1029,6 +1046,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             base.Update();
             updateHitsoundLayout();
+            updatePlaybackThrottle();
             // Advance the clocks once per frame, before children read CurrentTime / VisualTime.
             advanceClocks();
             updateHitsounds();
@@ -1046,6 +1064,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             if (spinnerBuilding)
                 updateSpinnerPreview();
+        }
+
+        // Inactive-window frame caps. Hitsounds are played per-frame, so at the very low idle cap they bunch up
+        // to the frame boundary and sound off the beat. We therefore only keep that aggressive cap while paused
+        // (no hitsounds play then anyway); during playback we raise it so tabbed-away hitsound timing stays tight.
+        private const int inactive_hz_idle = 20;
+        private const int inactive_hz_playing = 240;
+        private bool? lastPlaybackThrottleRunning;
+
+        /// <summary>
+        /// Keeps the window's inactive frame cap in step with playback: a hard cap when paused (max power saving,
+        /// and no hitsounds are firing) and a high cap while playing so hitsound timing stays accurate even when
+        /// the editor is tabbed away. Driven off the actual track state so it covers every start/stop, including
+        /// the track finishing on its own.
+        /// </summary>
+        private void updatePlaybackThrottle()
+        {
+            bool running = track?.IsRunning == true;
+            if (running == lastPlaybackThrottleRunning)
+                return;
+
+            lastPlaybackThrottleRunning = running;
+            host.MaximumInactiveHz = running ? inactive_hz_playing : inactive_hz_idle;
         }
 
         /// <summary>
@@ -1191,18 +1232,22 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void updateBpm()
         {
             double now = CurrentTime;
-            double beatLength = 0;
 
-            foreach (var p in parsed.BeatPoints)
+            // Binary search the time-sorted timing points for the active BPM (last one at/before `now`),
+            // falling back to the first point when the playhead sits before the map's first timing point.
+            // Runs every frame, so O(log points) instead of scanning the whole list.
+            var bps = parsed.BeatPoints;
+            int lo = 0, hi = bps.Count;
+            while (lo < hi)
             {
-                if (p.Time <= now)
-                    beatLength = p.BeatLength;
+                int mid = (lo + hi) >> 1;
+                if (bps[mid].Time <= now)
+                    lo = mid + 1;
                 else
-                    break;
+                    hi = mid;
             }
 
-            if (beatLength <= 0 && parsed.BeatPoints.Count > 0)
-                beatLength = parsed.BeatPoints[0].BeatLength;
+            double beatLength = bps.Count == 0 ? 0 : bps[Math.Max(0, lo - 1)].BeatLength;
 
             // DT/NC speed the playback up by 1.5x, which also raises the effective BPM - show the sped-up value.
             double rate = rateMod.Value == RateMod.Off ? 1.0 : rate_mod_speed;
@@ -1765,15 +1810,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The effective slider-velocity multiplier (green-line SV) in force at the given time.</summary>
         private double velocityAt(double time)
         {
-            double sv = 1;
-            foreach (var p in parsed.VelocityPoints)
+            // Binary search the time-sorted green lines for the last one at/before `time`. This runs every
+            // frame (BPM/SV readouts) and on every slider length calc, so on SV-heavy maps the old linear scan
+            // was O(points) per call; this is O(log points) for identical results.
+            var pts = parsed.VelocityPoints;
+            int lo = 0, hi = pts.Count;
+            while (lo < hi)
             {
-                if (p.Time <= time)
-                    sv = p.Multiplier;
+                int mid = (lo + hi) >> 1;
+                if (pts[mid].Time <= time)
+                    lo = mid + 1;
                 else
-                    break;
+                    hi = mid;
             }
-            return sv;
+
+            return lo > 0 ? pts[lo - 1].Multiplier : 1;
         }
 
         /// <summary>
@@ -4307,19 +4358,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             AutoSizeAxes = Axes.Both,
             Direction = FillDirection.Horizontal,
             Spacing = new Vector2(6, 0),
+            // Ordered "configure the map -> configure the editor -> output", and all uniform icon buttons so the
+            // row reads as a consistent toolbar (matching the icon-button row just below it).
             Children = new Drawable[]
             {
-                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.Cog, "Settings",
+                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.Music, "Song setup - this map's metadata, difficulty (CS/AR/OD) and colours",
+                    () => songSettingsOverlay.ToggleVisibility()),
+                new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.Cog, "Settings - editor preferences",
                     () => settingsOverlay.ToggleVisibility()),
                 exportButton = new UI.IconBarButton(osu.Framework.Graphics.Sprites.FontAwesome.Solid.FileExport, "Export... (.osz set or this difficulty's .osu)",
                     () => exportMenu.ShowAt(exportButton.ScreenSpaceDrawQuad.BottomLeft)),
-                new OsuButton("Song Setup", OsuColour.Surface)
-                {
-                    Size = new Vector2(84, 24),
-                    FontSize = 13,
-                    CornerRadius = 5,
-                    Action = () => songSettingsOverlay.ToggleVisibility(),
-                },
             },
         };
 
@@ -4517,6 +4565,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Greet the user with the beta notice unless they've opted out.
             if (settings.ShowBetaPopup.Value)
                 betaOverlay.Show();
+
+            // Push the power-saving preference into the framework's global frame-sync, and keep it in sync.
+            settings.PowerSaving.BindValueChanged(_ => applyFrameLimit(), true);
+        }
+
+        /// <summary>
+        /// Applies the power-saving preference to the framework's global frame limiter: VSync (cap to the
+        /// monitor's refresh) when on, the default 2x-refresh when off. The framework persists this itself, so
+        /// it stays in effect after leaving the editor.
+        /// </summary>
+        private void applyFrameLimit()
+        {
+            var frameSync = frameworkConfig?.GetBindable<osu.Framework.Configuration.FrameSync>(
+                osu.Framework.Configuration.FrameworkSetting.FrameSync);
+            if (frameSync == null)
+                return;
+
+            frameSync.Value = settings.PowerSaving.Value
+                ? osu.Framework.Configuration.FrameSync.VSync
+                : osu.Framework.Configuration.FrameSync.Limit2x;
         }
 
         protected override bool OnKeyDown(KeyDownEvent e)
@@ -5189,6 +5257,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             statistics?.ExitMap();
             LastTime = track?.CurrentTime ?? 0;
             track?.Stop();
+
+            // Leaving the editor: restore the hard idle cap (we may have raised it for playback).
+            host.MaximumInactiveHz = inactive_hz_idle;
 
             if (host.Window != null)
                 host.Window.Title = "osu! Beatmap Editor";

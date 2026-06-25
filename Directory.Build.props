@@ -5,6 +5,16 @@
     <!-- Only the .NET 10 runtime is installed locally; allow the net8.0 targets to run on it. -->
     <RollForward>Major</RollForward>
   </PropertyGroup>
+  <!-- Runtime tuning for a desktop UI app: workstation *concurrent* GC keeps collections off the
+       update thread so they don't stutter the editor (server GC would trade RAM for throughput we
+       don't need). Tiered compilation + PGO let the hot paths (timeline, slider geometry) re-JIT to
+       faster code as the session runs. These land in the published runtimeconfig.json. -->
+  <PropertyGroup Label="Runtime performance">
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredCompilation>true</TieredCompilation>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
   <PropertyGroup Label="Documentation">
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>

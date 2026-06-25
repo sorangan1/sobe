@@ -9,6 +9,7 @@ using osu.Framework.Graphics.UserInterface;
 using osu.Framework.Input.Events;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.UI;
 using osuTK;
 using osuTK.Input;
 
@@ -491,16 +492,16 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             var items = new List<MenuItem>();
 
             if (includeEdit)
-                items.Add(new MenuItem("Edit", () => EditRequested?.Invoke(set, diff)));
+                items.Add(new IconMenuItem("Edit", FontAwesome.Solid.Edit, () => EditRequested?.Invoke(set, diff)));
 
-            items.Add(new MenuItem("Create new Difficulty", () => CreateDifficultyRequested?.Invoke(set, diff)));
-            items.Add(new MenuItem("Create new Set", () => CreateSetRequested?.Invoke(set, diff)));
-            items.Add(new MenuItem("Export .osz", () => ExportSetRequested?.Invoke(set)));
+            items.Add(new IconMenuItem("Create new Difficulty", FontAwesome.Solid.Plus, () => CreateDifficultyRequested?.Invoke(set, diff)));
+            items.Add(new IconMenuItem("Create new Set", FontAwesome.Solid.FolderPlus, () => CreateSetRequested?.Invoke(set, diff)));
+            items.Add(new IconMenuItem("Export .osz", FontAwesome.Solid.FileExport, () => ExportSetRequested?.Invoke(set)));
 
             if (setLevel)
-                items.Add(new MenuItem("Delete set", () => DeleteSetRequested?.Invoke(set)));
+                items.Add(new IconMenuItem("Delete set", FontAwesome.Solid.TrashAlt, () => DeleteSetRequested?.Invoke(set), destructive: true));
             else
-                items.Add(new MenuItem("Delete difficulty", () => DeleteDifficultyRequested?.Invoke(set, diff)));
+                items.Add(new IconMenuItem("Delete difficulty", FontAwesome.Solid.TrashAlt, () => DeleteDifficultyRequested?.Invoke(set, diff), destructive: true));
 
             return items.ToArray();
         }

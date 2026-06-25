@@ -98,6 +98,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         private IReadOnlyList<BeatmapSetModel> sets = Array.Empty<BeatmapSetModel>();
 
         private LargeTextureStore? textures;
+        private LargeTextureStore? cardTextures;
         private Drawable? currentBackground;
         private int backgroundRequest;
 
@@ -131,7 +132,13 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             if (dataDir != null)
             {
                 var fileStore = new StorageBackedResourceStore(new NativeStorage(Path.Combine(dataDir, "files"), host));
+                // Full-resolution store for the screen-filling hero background (it covers the whole window).
                 textures = new LargeTextureStore(host.Renderer, host.CreateTextureLoaderStore(fileStore), TextureFilteringMode.Linear, false);
+                // Separate store for the carousel cards: those only ever show the background in a small panel, so
+                // downscaling the longest side to 640px before upload keeps their combined VRAM a fraction of the
+                // full-resolution art - with no visible quality loss at card size. The hero keeps full detail.
+                var cardLoader = new DownscalingTextureLoaderStore(host.CreateTextureLoaderStore(fileStore), 640);
+                cardTextures = new LargeTextureStore(host.Renderer, cardLoader, TextureFilteringMode.Linear, false);
                 trackStore = audio.GetTrackStore(new StorageBackedResourceStore(new NativeStorage(Path.Combine(dataDir, "files"), host)));
             }
 
@@ -347,7 +354,7 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
             carousel.DeleteSetRequested = onDeleteSet;
             carousel.DeleteDifficultyRequested = onDeleteDifficulty;
             carousel.ExportSetRequested = exportSet;
-            carousel.Textures = textures;
+            carousel.Textures = cardTextures;
 
             sortDropdown.Items = Enum.GetValues<SortMode>();
             // Restore the last-used sort and persist any change.
@@ -1004,6 +1011,9 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         {
             if (window != null && dragDropHandler != null)
                 window.DragDrop -= dragDropHandler;
+
+            textures?.Dispose();
+            cardTextures?.Dispose();
 
             base.Dispose(isDisposing);
         }

@@ -40,6 +40,11 @@ namespace OsuBeatmapEditor.Game
         {
             base.SetHost(host);
 
+            // When the window isn't focused (alt-tabbed away) there's nothing to look at, so cap the
+            // update/draw loops hard. The default inactive cap still spends real CPU/GPU on a window the
+            // user isn't watching; 20 Hz keeps audio/background work ticking for a fraction of the power.
+            host.MaximumInactiveHz = 20;
+
             if (host.Window != null)
             {
                 host.Window.Title = AppInfo.FullName;

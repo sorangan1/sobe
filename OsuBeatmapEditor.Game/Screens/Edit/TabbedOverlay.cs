@@ -26,14 +26,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private const float content_header = 46f;
 
         private readonly Dictionary<string, NavItem> navItems = new Dictionary<string, NavItem>();
-        private (string name, Func<Drawable> content)[] sections = Array.Empty<(string, Func<Drawable>)>();
+        private (string name, IconUsage icon, Func<Drawable> content)[] sections = Array.Empty<(string, IconUsage, Func<Drawable>)>();
 
         private Container panel = null!;
         private Container contentContainer = null!;
         private FillFlowContainer nav = null!;
 
         protected abstract string Heading { get; }
-        protected abstract (string name, Func<Drawable> content)[] CreateSections();
+        protected abstract (string name, IconUsage icon, Func<Drawable> content)[] CreateSections();
 
         /// <summary>Optional persisted store for the last-opened section.</summary>
         protected virtual Bindable<string>? LastSectionStore => null;
@@ -121,9 +121,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 },
             };
 
-            foreach (var (name, _) in sections)
+            foreach (var (name, icon, _) in sections)
             {
-                var item = new NavItem(name, () => showSection(name));
+                var item = new NavItem(name, icon, () => showSection(name));
                 navItems[name] = item;
                 nav.Add(item);
             }
@@ -149,18 +149,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var (key, item) in navItems)
                 item.SetSelected(key == name);
 
-            // Per-section content: a header (section name + hairline rule) over a scrollable body.
+            var section = sections.First(s => s.name == name);
+
+            // Per-section content: a header (icon + section name + hairline rule) over a scrollable body.
             contentContainer.Child = new Container
             {
                 RelativeSizeAxes = Axes.Both,
                 Children = new Drawable[]
                 {
-                    new SpriteText
+                    new FillFlowContainer
                     {
                         Margin = new MarginPadding { Left = EditorTheme.Spacing.Xl, Top = EditorTheme.Spacing.Lg },
-                        Text = name,
-                        Colour = EditorTheme.Colours.Text,
-                        Font = EditorTheme.Type.Heading(),
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Sm + 2, 0),
+                        Children = new Drawable[]
+                        {
+                            new SpriteIcon
+                            {
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Icon = section.icon,
+                                Size = new Vector2(16),
+                                Colour = EditorTheme.Colours.Accent,
+                            },
+                            new SpriteText
+                            {
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Text = name,
+                                Colour = EditorTheme.Colours.Text,
+                                Font = EditorTheme.Type.Heading(),
+                            },
+                        },
                     },
                     new Box
                     {
@@ -182,7 +203,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                 RelativeSizeAxes = Axes.X,
                                 AutoSizeAxes = Axes.Y,
                                 Padding = new MarginPadding { Horizontal = EditorTheme.Spacing.Xl, Top = EditorTheme.Spacing.Lg, Bottom = EditorTheme.Spacing.Xl },
-                                Child = sections.First(s => s.name == name).content(),
+                                Child = section.content(),
                             },
                         },
                     },
@@ -219,18 +240,21 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return base.OnKeyDown(e);
         }
 
-        /// <summary>A selectable section entry in the sidebar: an accent bar + text, with hover/selected states.</summary>
+        /// <summary>A selectable section entry in the sidebar: an accent bar + icon + text, with hover/selected states.</summary>
         private partial class NavItem : ClickableContainer
         {
             private readonly string label;
+            private readonly IconUsage icon;
             private Box background = null!;
             private Box accentBar = null!;
             private SpriteText text = null!;
+            private SpriteIcon iconSprite = null!;
             private bool selected;
 
-            public NavItem(string label, Action onClick)
+            public NavItem(string label, IconUsage icon, Action onClick)
             {
                 this.label = label;
+                this.icon = icon;
                 Action = onClick;
                 RelativeSizeAxes = Axes.X;
                 Height = 38;
@@ -249,14 +273,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Colour = EditorTheme.Colours.Accent,
                         Alpha = 0,
                     },
-                    text = new SpriteText
+                    // Icon + label in a row, so a fixed icon column keeps every label aligned.
+                    new FillFlowContainer
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
                         Margin = new MarginPadding { Left = EditorTheme.Spacing.Xl },
-                        Text = label,
-                        Colour = EditorTheme.Colours.TextMuted,
-                        Font = EditorTheme.Type.Body(),
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Md + 2, 0),
+                        Children = new Drawable[]
+                        {
+                            iconSprite = new SpriteIcon
+                            {
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Icon = icon,
+                                Size = new Vector2(15),
+                                Colour = EditorTheme.Colours.TextMuted,
+                            },
+                            text = new SpriteText
+                            {
+                                Anchor = Anchor.CentreLeft,
+                                Origin = Anchor.CentreLeft,
+                                Text = label,
+                                Colour = EditorTheme.Colours.TextMuted,
+                                Font = EditorTheme.Type.Body(),
+                            },
+                        },
                     },
                 };
             }
@@ -266,7 +310,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 selected = value;
                 accentBar.FadeTo(value ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
                 background.FadeTo(value ? 0.12f : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                text.FadeColour(value ? EditorTheme.Colours.Text : EditorTheme.Colours.TextMuted, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                var c = value ? EditorTheme.Colours.Text : EditorTheme.Colours.TextMuted;
+                text.FadeColour(c, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                // The icon picks up the accent when selected, a quiet way to reinforce the active section.
+                iconSprite.FadeColour(value ? EditorTheme.Colours.Accent : EditorTheme.Colours.TextMuted, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             }
 
             protected override bool OnHover(HoverEvent e)
@@ -275,6 +322,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     background.FadeTo(0.06f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
                     text.FadeColour(EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+                    iconSprite.FadeColour(EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
                 }
                 return base.OnHover(e);
             }
@@ -285,6 +333,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     background.FadeTo(0, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
                     text.FadeColour(EditorTheme.Colours.TextMuted, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+                    iconSprite.FadeColour(EditorTheme.Colours.TextMuted, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
                 }
                 base.OnHoverLost(e);
             }

@@ -30,21 +30,43 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             control.Anchor = Anchor.CentreRight;
             control.Origin = Anchor.CentreRight;
 
+            // Two columns: the label fills the remaining width (truncating with an ellipsis if it's too long),
+            // the control auto-sizes on the right. This keeps a long label from sliding under the control or
+            // spilling past the row edge, whatever width the control turns out to be.
             return new Container
             {
                 RelativeSizeAxes = Axes.X,
                 Height = height,
-                Children = new Drawable[]
+                Child = new GridContainer
                 {
-                    new SpriteText
+                    RelativeSizeAxes = Axes.Both,
+                    ColumnDimensions = new[]
                     {
-                        Anchor = Anchor.CentreLeft,
-                        Origin = Anchor.CentreLeft,
-                        Text = label,
-                        Colour = EditorTheme.Colours.Text,
-                        Font = EditorTheme.Type.Body(),
+                        new Dimension(),
+                        new Dimension(GridSizeMode.AutoSize),
                     },
-                    control,
+                    Content = new[]
+                    {
+                        new[]
+                        {
+                            new Container
+                            {
+                                RelativeSizeAxes = Axes.Both,
+                                Padding = new MarginPadding { Right = EditorTheme.Spacing.Md },
+                                Child = new SpriteText
+                                {
+                                    Anchor = Anchor.CentreLeft,
+                                    Origin = Anchor.CentreLeft,
+                                    RelativeSizeAxes = Axes.X,
+                                    Truncate = true,
+                                    Text = label,
+                                    Colour = EditorTheme.Colours.Text,
+                                    Font = EditorTheme.Type.Body(),
+                                },
+                            },
+                            control,
+                        },
+                    },
                 },
             };
         }
