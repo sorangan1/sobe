@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using osu.Framework.Allocation;
+using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
+using osu.Framework.Graphics.UserInterface;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
@@ -21,6 +23,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public Func<EditorScreen.HitsoundState>? StateProvider;
         public Action<SampleBank>? SetNormalBank;
         public Action<SampleBank>? SetAdditionBank;
+        public Action<float>? SetVolume;
+        public Action<int>? SetIndex;
+        public Action? CopyHitsounds;
+        public Action? PasteHitsounds;
+        public Func<bool>? HasClip;
+
+        // Volume slider with a "push state -> slider only when it actually changed" guard, so polling never fights a drag.
+        private readonly BindableFloat volume = new BindableFloat { MinValue = 0f, MaxValue = 1f, Precision = 0.01f };
+        private float lastVolume = -1f;
+        private bool suppressVolume;
+        private SpriteText volumeReadout = null!;
+        private SpriteText indexReadout = null!;
+        private int currentIndex;
+        private TextButton pasteButton = null!;
 
         private static readonly (SampleBank Bank, string Label)[] bank_options =
         {
@@ -36,98 +52,127 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public HitsoundBankBar()
         {
             AutoSizeAxes = Axes.Both;
-            Masking = true;
-            CornerRadius = EditorTheme.Radius.Lg;
         }
 
         [BackgroundDependencyLoader]
         private void load()
         {
-            InternalChildren = new Drawable[]
+            // Compact, transparent layout: it lives inside the timeline's lane gutter (which provides the background),
+            // so hitsounding needs no separate side panel. Rows: Normal bank, Addition bank, Volume, Index, Copy/Paste.
+            InternalChild = new FillFlowContainer
             {
-                new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Surface },
-                new FillFlowContainer
+                AutoSizeAxes = Axes.Both,
+                Direction = FillDirection.Vertical,
+                Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
+                Children = new Drawable[]
                 {
-                    AutoSizeAxes = Axes.Both,
-                    Direction = FillDirection.Vertical,
-                    Padding = new MarginPadding(EditorTheme.Spacing.Sm),
-                    Spacing = new Vector2(0, EditorTheme.Spacing.Sm),
-                    Children = new Drawable[]
+                    group("N", normalChips, b => SetNormalBank?.Invoke(b)),
+                    group("A", additionChips, b => SetAdditionBank?.Invoke(b)),
+                    volumeRow(),
+                    indexRow(),
+                    new FillFlowContainer
                     {
-                        // Bank selectors, stacked: Addition sits below Normal (keeps the panel narrow).
-                        new FillFlowContainer
+                        AutoSizeAxes = Axes.Both,
+                        Direction = FillDirection.Horizontal,
+                        Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
+                        Children = new Drawable[]
                         {
-                            AutoSizeAxes = Axes.Both,
-                            Direction = FillDirection.Vertical,
-                            Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
-                            Children = new Drawable[]
-                            {
-                                group("Normal", normalChips, b => SetNormalBank?.Invoke(b)),
-                                group("Addition", additionChips, b => SetAdditionBank?.Invoke(b)),
-                            },
-                        },
-                        // Hairline divider.
-                        new Box { RelativeSizeAxes = Axes.X, Height = 1, Colour = EditorTheme.Colours.Border },
-                        // Controls legend (how to use the lane grid), as a vertical list.
-                        new FillFlowContainer
-                        {
-                            AutoSizeAxes = Axes.Both,
-                            Direction = FillDirection.Vertical,
-                            Spacing = new Vector2(0, EditorTheme.Spacing.Xs),
-                            Children = new Drawable[]
-                            {
-                                legendEntry("L-Click", "add"),
-                                legendEntry("R-Click", "remove"),
-                                legendEntry("Shift + L", "cycle bank"),
-                                legendEntry("Drag", "paint (L add / R erase)"),
-                            },
+                            new TextButton("Copy", () => CopyHitsounds?.Invoke(), 72),
+                            pasteButton = new TextButton("Paste", () => PasteHitsounds?.Invoke(), 72),
                         },
                     },
                 },
             };
+
+            // Dragging the slider edits the volume; a guarded poll in Update keeps it showing the current value.
+            volume.BindValueChanged(v =>
+            {
+                volumeReadout.Text = v.NewValue <= 0 ? "Auto" : $"{(int)Math.Round(v.NewValue * 100)}%";
+                if (suppressVolume)
+                    return;
+                SetVolume?.Invoke(v.NewValue);
+                lastVolume = v.NewValue;
+            }, true);
         }
 
-        /// <summary>A keycap-style chip plus a short description, used in the controls legend.</summary>
-        private static Drawable legendEntry(string keys, string description) => new FillFlowContainer
+        /// <summary>The volume row: a 0-100% slider (0 = "Auto" / inherit the timing point) plus a numeric readout.</summary>
+        private Drawable volumeRow() => labeledRow("Volume", new Drawable[]
         {
-            AutoSizeAxes = Axes.Both,
-            Direction = FillDirection.Horizontal,
-            Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
-            Children = new Drawable[]
+            new Container
             {
-                // Fixed-width keycap so the descriptions line up down the list.
-                new Container
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.CentreLeft,
+                Width = 76,
+                Height = 10,
+                Child = new BasicSliderBar<float>
                 {
-                    Anchor = Anchor.CentreLeft,
-                    Origin = Anchor.CentreLeft,
-                    Width = 78,
-                    AutoSizeAxes = Axes.Y,
-                    Masking = true,
-                    CornerRadius = EditorTheme.Radius.Sm,
-                    Children = new Drawable[]
+                    RelativeSizeAxes = Axes.Both,
+                    Current = volume,
+                    BackgroundColour = EditorTheme.Colours.Sunken,
+                    SelectionColour = EditorTheme.Colours.Accent,
+                },
+            },
+            volumeReadout = new SpriteText
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.CentreLeft,
+                Width = 34,
+                Text = "Auto",
+                Colour = EditorTheme.Colours.TextMuted,
+                Font = EditorTheme.Type.Caption(numeric: true),
+            },
+        });
+
+        /// <summary>The sample-index row: a -/+ stepper (0 = "Auto" / inherit the timing point) plus a numeric readout.</summary>
+        private Drawable indexRow() => labeledRow("Index", new Drawable[]
+        {
+            new TextButton("-", () => SetIndex?.Invoke(Math.Max(0, currentIndex - 1)), 22),
+            indexReadout = new SpriteText
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.CentreLeft,
+                Width = 30,
+                Text = "Auto",
+                Colour = EditorTheme.Colours.TextMuted,
+                Font = EditorTheme.Type.Caption(numeric: true),
+            },
+            new TextButton("+", () => SetIndex?.Invoke(currentIndex + 1), 22),
+        });
+
+        /// <summary>A fixed-width caption (lined up with the bank rows) followed by the given controls, laid out horizontally.</summary>
+        private static Drawable labeledRow(string caption, Drawable[] controls)
+        {
+            var row = new FillFlowContainer
+            {
+                AutoSizeAxes = Axes.Both,
+                Direction = FillDirection.Horizontal,
+                Spacing = new Vector2(EditorTheme.Spacing.Xs, 0),
+                Children = new Drawable[]
+                {
+                    new Container
                     {
-                        new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
-                        new SpriteText
+                        Anchor = Anchor.CentreLeft,
+                        Origin = Anchor.CentreLeft,
+                        Width = 30,
+                        AutoSizeAxes = Axes.Y,
+                        Child = new SpriteText
                         {
-                            Anchor = Anchor.Centre,
-                            Origin = Anchor.Centre,
-                            Padding = new MarginPadding { Horizontal = 5, Vertical = 2 },
-                            Text = keys,
-                            Colour = EditorTheme.Colours.Text,
+                            Anchor = Anchor.CentreLeft,
+                            Origin = Anchor.CentreLeft,
+                            Text = caption,
+                            Colour = EditorTheme.Colours.TextMuted,
                             Font = EditorTheme.Type.Caption(),
                         },
                     },
                 },
-                new SpriteText
-                {
-                    Anchor = Anchor.CentreLeft,
-                    Origin = Anchor.CentreLeft,
-                    Text = description,
-                    Colour = EditorTheme.Colours.TextMuted,
-                    Font = EditorTheme.Type.Caption(),
-                },
-            },
-        };
+            };
+
+            foreach (var c in controls)
+                row.Add(c);
+
+            return row;
+        }
+
 
         private static FillFlowContainer group(string caption, Dictionary<SampleBank, Chip> into, Action<SampleBank> onClick)
         {
@@ -143,7 +188,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     {
                         Anchor = Anchor.CentreLeft,
                         Origin = Anchor.CentreLeft,
-                        Width = 62,
+                        Width = 30,
                         AutoSizeAxes = Axes.Y,
                         Child = new SpriteText
                         {
@@ -178,6 +223,61 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 chip.SetActive(bank == s.Normal);
             foreach (var (bank, chip) in additionChips)
                 chip.SetActive(bank == s.Addition);
+
+            // Push the current volume to the slider only when it actually changed (selection swap / external edit),
+            // so a value the user is dragging is never yanked back under them.
+            if (Math.Abs(s.Volume - lastVolume) > 0.0005f)
+            {
+                suppressVolume = true;
+                volume.Value = s.Volume;
+                lastVolume = s.Volume;
+                suppressVolume = false;
+            }
+
+            currentIndex = s.Index;
+            indexReadout.Text = s.Index <= 0 ? "Auto" : s.Index.ToString();
+
+            if (HasClip != null)
+                pasteButton.SetEnabledLook(HasClip());
+        }
+
+        /// <summary>A small momentary text button (steppers, Copy/Paste); fixed width so it can hold a relative-sized background.</summary>
+        private partial class TextButton : ClickableContainer
+        {
+            private readonly Box bg;
+
+            public TextButton(string text, Action onClick, float width = 52)
+            {
+                Action = onClick;
+                Width = width;
+                Height = 24;
+                Masking = true;
+                CornerRadius = EditorTheme.Radius.Md;
+                Children = new Drawable[]
+                {
+                    bg = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
+                    new SpriteText
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Text = text,
+                        Colour = EditorTheme.Colours.Text,
+                        Font = EditorTheme.Type.Label(),
+                    },
+                };
+            }
+
+            /// <summary>Dims the button when its action is unavailable (e.g. Paste with an empty clipboard).</summary>
+            public void SetEnabledLook(bool enabled) => Alpha = enabled ? 1f : 0.4f;
+
+            protected override bool OnHover(osu.Framework.Input.Events.HoverEvent e)
+            {
+                bg.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+                return true;
+            }
+
+            protected override void OnHoverLost(osu.Framework.Input.Events.HoverLostEvent e)
+                => bg.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
         }
 
         /// <summary>A small toggleable square button; active = solid accent (matches the hitsound palette chips).</summary>
@@ -192,7 +292,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 text = label;
                 Action = onClick;
-                Size = new Vector2(26, EditorTheme.Sizing.ButtonHeight);
+                Size = new Vector2(26, 24);
                 Masking = true;
                 CornerRadius = EditorTheme.Radius.Md;
             }

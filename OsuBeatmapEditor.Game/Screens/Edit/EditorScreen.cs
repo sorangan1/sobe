@@ -232,6 +232,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private FillFlowContainer modButtons = null!;
         private FillFlowContainer leftPanels = null!;
         private HitsoundBankBar hitsoundBankBar = null!;
+        private Container hitsoundControlsBlock = null!; // left-side block (below the toolbar) hosting the bank bar in lanes mode
         private double lastDistanceSpacing = double.NaN;
         private ToolPanel toolPanel = null!;
         private FillFlowContainer toolButtons = null!;
@@ -294,17 +295,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private enum SampleEventKind { Hit, SliderTick }
 
         /// <summary>A single scheduled hitsound playback: object heads, each slider node, spinner ends, and slider ticks.</summary>
-        private readonly record struct SampleEvent(double Time, SampleEventKind Kind, int HitSound, SampleBank Normal, SampleBank Addition, float Volume);
+        private readonly record struct SampleEvent(double Time, SampleEventKind Kind, int HitSound, SampleBank Normal, SampleBank Addition, float Volume, int Index = 0, string Filename = "");
 
         /// <summary>All hitsound events for the map, time-sorted; rebuilt after every edit (see <see cref="rebuildSampleEvents"/>).</summary>
         private readonly List<SampleEvent> sampleEvents = new List<SampleEvent>();
+
+        // Continuous body loops (sliderslide/sliderwhistle/spinnerspin): the channels currently sounding, keyed by
+        // "{objectId}:{role}", plus per-frame scratch sets so the active loops are recomputed from the playhead each frame.
+        private readonly Dictionary<string, SampleChannel> activeLoops = new Dictionary<string, SampleChannel>();
+        private readonly HashSet<string> desiredLoops = new HashSet<string>();
+        private readonly List<string> loopsToStop = new List<string>();
 
         /// <summary>The hitsounds applied to newly placed objects (set from the left-panel palette when nothing is selected).</summary>
         private int pendingHitSound;
         // New objects default to Auto banks (inherit the timing point), like osu!lazer.
         private SampleBank pendingNormalBank = SampleBank.Auto;
         private SampleBank pendingAdditionBank = SampleBank.Auto;
+        // New objects also inherit the timing point's volume + custom sample index (0 = inherit/Auto), like osu!lazer.
+        private float pendingSampleVolume; // 0 = inherit (Auto), else 0..1 explicit override
+        private int pendingSampleIndex;    // 0 = inherit (Auto), else explicit custom-sample-bank index
         private LargeTextureStore? textures;
+
+        /// <summary>The hitsounds copied by "Copy hitsounds", ready to paste onto another selection (null = nothing copied).</summary>
+        private HitsoundClip? hitsoundClipboard;
         private Texture? backgroundTexture;
         private ScheduledDelegate? circleSizeRebuild;
 
@@ -368,9 +381,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             // Hitsound feedback: bundled default-skin samples, played as playback crosses each object.
-            var sampleStore = audio.GetSampleStore(
+            var skinSampleStore = audio.GetSampleStore(
                 new NamespacedResourceStore<byte[]>(new DllResourceStore(OsuBeatmapEditorResources.ResourceAssembly), "Samples"));
-            hitsounds = new HitsoundPlayer(sampleStore);
+
+            // The map's OWN packed samples (custom hitsounds) are consulted first, like osu!lazer's beatmap skin.
+            ISampleStore? beatmapSampleStore = !string.IsNullOrEmpty(set.DataDirectory) && set.Files.Count > 0
+                ? audio.GetSampleStore(new BeatmapSampleStore(set.Files, set.DataDirectory))
+                : null;
+
+            hitsounds = new HitsoundPlayer(skinSampleStore, beatmapSampleStore);
             rebuildSampleEvents();
 
             InternalChildren = new Drawable[]
@@ -414,6 +433,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Anchor = Anchor.TopLeft,
                         Origin = Anchor.TopLeft,
                         TimingPillClicked = onTimingPillClicked,
+                        // Lets the hitsound cells dim by their effective volume (object override, else the timing point).
+                        TimingVolume = volumeAt,
                     },
                 },
                 // Left block of the top bar: tool buttons (Song Setup / Settings) plus the Modding / Hitsounds
@@ -458,14 +479,42 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         },
                     },
                 },
-                // Patterns + Modding text buttons, just below the top-left panel column (under the hitsound
-                // toggles). Kept out of the fixed-height panel above so they aren't clipped by its masking.
-                new FillFlowContainer
+                // The hitsound controls (banks/volume/index/copy-paste) as a left-side block directly below the
+                // top-left toolbar column, shown only while the hitsound lanes are open. Keeps the controls OUT of the
+                // timeline so the lanes keep (almost) the full timeline width. Y is fixed; Height tracks the lanes band.
+                hitsoundControlsBlock = new Container
                 {
                     Anchor = Anchor.TopLeft,
-                    Origin = Anchor.TopCentre,
-                    X = timeline_side_width / 2f,
-                    Y = top_bar_height + 8,
+                    Origin = Anchor.TopLeft,
+                    Width = timeline_side_width,
+                    Y = top_bar_height,
+                    Masking = true,
+                    Alpha = 0,
+                    Children = new Drawable[]
+                    {
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = OsuColour.BackgroundDark, Alpha = 0.82f },
+                        hitsoundBankBar = new HitsoundBankBar
+                        {
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            StateProvider = CurrentHitsoundState,
+                            SetNormalBank = SetNormalBank,
+                            SetAdditionBank = SetAdditionBank,
+                            SetVolume = SetSampleVolume,
+                            SetIndex = SetSampleIndex,
+                            CopyHitsounds = CopyHitsounds,
+                            PasteHitsounds = PasteHitsounds,
+                            HasClip = () => HasHitsoundClip,
+                        },
+                    },
+                },
+                // Patterns + Modding moved to the bottom bar (bottom-left, right of the background-dim wheel) so they
+                // no longer flank the top timeline / hitsound lanes.
+                new FillFlowContainer
+                {
+                    Anchor = Anchor.BottomLeft,
+                    Origin = Anchor.BottomLeft,
+                    Margin = new MarginPadding { Left = 50, Bottom = bottom_bar_height + 12 },
                     AutoSizeAxes = Axes.Both,
                     Direction = FillDirection.Horizontal,
                     Spacing = new Vector2(6, 0),
@@ -644,13 +693,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Children = new Drawable[]
                     {
                         toolPanel = new ToolPanel { ToolSelected = applyTool },
-                        new HitsoundPanel
-                        {
-                            StateProvider = CurrentHitsoundState,
-                            ToggleAddition = ToggleAddition,
-                            SetNormalBank = SetNormalBank,
-                            SetAdditionBank = SetAdditionBank,
-                        },
                         // Appears only while holding Shift over a selection: a quick "save this selection as a pattern".
                         savePatternButton = new SavePatternButton
                         {
@@ -658,15 +700,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                             OnSave = saveSelectionAsPattern,
                         },
                     },
-                },
-                hitsoundBankBar = new HitsoundBankBar
-                {
-                    Anchor = Anchor.TopLeft,
-                    Origin = Anchor.TopLeft,
-                    Alpha = 0,
-                    StateProvider = CurrentHitsoundState,
-                    SetNormalBank = SetNormalBank,
-                    SetAdditionBank = SetAdditionBank,
                 },
                     },
                 },
@@ -878,16 +911,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>
-        /// Updates the left chrome's visibility from both flags: the tool/hitsound column shows only outside Modding
-        /// Mode and when the hitsound-lanes editor is closed; the lazer-style bank bar shows when lanes are open
-        /// (but never while modding). Centralised so the two toggles don't fight over <see cref="leftPanels"/>.
+        /// Updates the left chrome's visibility from both flags: the tool column shows only outside Modding Mode and
+        /// when the hitsound-lanes editor is closed; the left-side hitsound controls block shows when the lanes are
+        /// open (but never while modding). Centralised so the two toggles don't fight over the left column.
         /// </summary>
         private void updateLeftChrome()
         {
             bool lanes = hitsoundMode.Value;
             bool modding = moddingMode.Value;
             leftPanels.FadeTo(modding || lanes ? 0 : 1, 150, Easing.OutQuad);
-            hitsoundBankBar.FadeTo(!modding && lanes ? 1 : 0, 150, Easing.OutQuad);
+            hitsoundControlsBlock.FadeTo(!modding && lanes ? 1 : 0, 150, Easing.OutQuad);
         }
 
         /// <summary>Entering/leaving Modding Mode: force Auto-only, reserve the right panel, fetch discussions once.</summary>
@@ -1050,6 +1083,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Advance the clocks once per frame, before children read CurrentTime / VisualTime.
             advanceClocks();
             updateHitsounds();
+            updateLoopingSamples();
             updateBpm();
             toolPanel.SetActive(currentTool());
 
@@ -1144,8 +1178,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             // Live tuning panel sits just left of the AU mini-menu so both stay visible while dragging sliders.
             humanizeTuningPanel.Margin = new MarginPadding { Right = hudRight + autoMenu.DrawWidth + 12, Top = belowChips };
 
-            // The lazer-style bank bar sits on the left, just below the timeline, when the hitsound lanes are open.
-            hitsoundBankBar.Margin = new MarginPadding { Left = 12, Top = topHeightCurrent + 12 };
+            // The left-side hitsound controls block spans the lanes band (below the toolbar) while the lanes are open.
+            hitsoundControlsBlock.Height = Math.Max(0, topHeightCurrent - top_bar_height);
         }
 
         // Cache key for the live combo preview shown while a placement tool is armed (snapped time + state).
@@ -1301,14 +1335,126 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     var e = sampleEvents[hitsoundIndex];
                     if (e.Kind == SampleEventKind.SliderTick)
-                        hitsounds.PlaySliderTick(e.Normal, e.Volume);
+                        hitsounds.PlaySliderTick(e.Normal, e.Volume, e.Index);
                     else
-                        hitsounds.Play(e.HitSound, e.Normal, e.Addition, e.Volume);
+                        hitsounds.Play(e.HitSound, e.Normal, e.Addition, e.Volume, e.Index, e.Filename);
                     hitsoundIndex++;
                 }
             }
 
             lastHitsoundTime = now;
+        }
+
+        /// <summary>
+        /// Starts/stops the continuous body loops (<c>sliderslide</c>/<c>sliderwhistle</c>/<c>spinnerspin</c>) so exactly
+        /// the objects the playhead is currently inside are sounding. Recomputed every frame from <see cref="CurrentTime"/>,
+        /// so it is seek/scrub-safe: seeking into a slider starts its loop, seeking out (or pausing) stops it, with no
+        /// stateful integration. Mirrors osu!lazer, where each DrawableSlider/Spinner owns a looping skinnable sample.
+        /// </summary>
+        private void updateLoopingSamples()
+        {
+            desiredLoops.Clear();
+
+            if (hitsounds != null && track != null && track.IsRunning)
+            {
+                double now = CurrentTime;
+                foreach (var o in parsed.HitObjects)
+                {
+                    if (o.Kind != HitObjectKind.Slider && o.Kind != HitObjectKind.Spinner)
+                        continue;
+
+                    double end = o.StartTime + o.Duration;
+                    if (now < o.StartTime || now >= end)
+                        continue;
+
+                    SampleBank bank = resolveBanksAt(o.StartTime, o.NormalBank, o.AdditionBank).Normal;
+                    int index = effectiveIndex(o.SampleIndex, o.StartTime);
+                    float volume = eventVolume(o, now);
+
+                    if (o.Kind == HitObjectKind.Slider)
+                    {
+                        ensureLoop($"{o.Id}:slide", bank, "sliderslide", index, volume);
+                        // The slider body also whistles for the whole slide when its hitsound carries the whistle bit.
+                        if ((o.HitSound & 0b0010) != 0)
+                            ensureLoop($"{o.Id}:whistle", bank, "sliderwhistle", index, volume);
+                    }
+                    else
+                    {
+                        // spinnerspin is a bank-less skin sample (no normal-/soft-/drum- prefix).
+                        ensureLoopRaw($"{o.Id}:spin", "spinnerspin", volume);
+                    }
+                }
+            }
+
+            // Stop any loop that's playing but no longer wanted (object passed, paused, seeked away, deleted, edited).
+            if (activeLoops.Count > 0)
+            {
+                loopsToStop.Clear();
+                foreach (var key in activeLoops.Keys)
+                    if (!desiredLoops.Contains(key))
+                        loopsToStop.Add(key);
+
+                foreach (var key in loopsToStop)
+                {
+                    stopLoop(activeLoops[key]);
+                    activeLoops.Remove(key);
+                }
+            }
+        }
+
+        /// <summary>Ensures a bank loop (sliderslide/sliderwhistle) is playing, keeping its volume fresh for live green-point changes.</summary>
+        private void ensureLoop(string key, SampleBank bank, string name, int index, float volume)
+        {
+            desiredLoops.Add(key);
+            if (activeLoops.TryGetValue(key, out var existing))
+            {
+                existing.Volume.Value = volume;
+                return;
+            }
+            // Resolve the channel only on the first frame the loop is wanted (not every frame it stays active).
+            startLoop(key, hitsounds!.GetLoopChannel(bank, name, index), volume);
+        }
+
+        /// <summary>Ensures a bank-less loop (spinnerspin) is playing.</summary>
+        private void ensureLoopRaw(string key, string name, float volume)
+        {
+            desiredLoops.Add(key);
+            if (activeLoops.TryGetValue(key, out var existing))
+            {
+                existing.Volume.Value = volume;
+                return;
+            }
+            startLoop(key, hitsounds!.GetLoopChannel(name), volume);
+        }
+
+        private void startLoop(string key, SampleChannel? channel, float volume)
+        {
+            if (channel == null)
+                return;
+
+            channel.Looping = true;
+            channel.Volume.Value = volume;
+            // Follow the DT/NC rate mods so the loop speeds up with the track, like the one-shot hitsounds.
+            channel.AddAdjustment(AdjustableProperty.Tempo, dtTempoRate);
+            channel.AddAdjustment(AdjustableProperty.Frequency, ncFrequencyRate);
+            channel.Play();
+            activeLoops[key] = channel;
+        }
+
+        private void stopLoop(SampleChannel channel)
+        {
+            channel.RemoveAdjustment(AdjustableProperty.Tempo, dtTempoRate);
+            channel.RemoveAdjustment(AdjustableProperty.Frequency, ncFrequencyRate);
+            channel.Stop();
+        }
+
+        /// <summary>Stops every active body loop (on dispose, or when audio is torn down).</summary>
+        private void stopAllLoops()
+        {
+            foreach (var channel in activeLoops.Values)
+                stopLoop(channel);
+            activeLoops.Clear();
+            desiredLoops.Clear();
         }
 
         /// <summary>
@@ -1327,7 +1473,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     {
                         double t = o.StartTime + o.Duration;
                         var (n, a) = resolveBanksAt(t, o.NormalBank, o.AdditionBank);
-                        sampleEvents.Add(new SampleEvent(t, SampleEventKind.Hit, o.HitSound, n, a, eventVolume(o, t)));
+                        sampleEvents.Add(new SampleEvent(t, SampleEventKind.Hit, o.HitSound, n, a, eventVolume(o, t), effectiveIndex(o.SampleIndex, t), o.SampleFilename));
                         break;
                     }
 
@@ -1341,7 +1487,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                                 : new NodeSample(o.HitSound, o.NormalBank, o.AdditionBank);
                             double t = o.StartTime + perNode * i;
                             var (n, a) = resolveBanksAt(t, ns.NormalBank, ns.AdditionBank);
-                            sampleEvents.Add(new SampleEvent(t, SampleEventKind.Hit, ns.HitSound, n, a, eventVolume(o, t)));
+                            // The custom file sample (if any) applies to the slider's head node only; index applies to every node.
+                            sampleEvents.Add(new SampleEvent(t, SampleEventKind.Hit, ns.HitSound, n, a, eventVolume(o, t), effectiveIndex(o.SampleIndex, t), i == 0 ? o.SampleFilename : ""));
                         }
                         addSliderTicks(o);
                         break;
@@ -1349,7 +1496,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     default:
                     {
                         var (n, a) = resolveBanksAt(o.StartTime, o.NormalBank, o.AdditionBank);
-                        sampleEvents.Add(new SampleEvent(o.StartTime, SampleEventKind.Hit, o.HitSound, n, a, eventVolume(o, o.StartTime)));
+                        sampleEvents.Add(new SampleEvent(o.StartTime, SampleEventKind.Hit, o.HitSound, n, a, eventVolume(o, o.StartTime), effectiveIndex(o.SampleIndex, o.StartTime), o.SampleFilename));
                         break;
                     }
                 }
@@ -1395,9 +1542,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     double frac = d / spanLength;
                     double t = reverse ? spanStart + (1 - frac) * spanDuration : spanStart + frac * spanDuration;
-                    // The slider tick plays in the slider's resolved normal bank.
+                    // The slider tick plays in the slider's resolved normal bank and sample index.
                     SampleBank tickBank = resolveBanksAt(t, o.NormalBank, o.AdditionBank).Normal;
-                    sampleEvents.Add(new SampleEvent(t, SampleEventKind.SliderTick, 0, tickBank, SampleBank.Normal, eventVolume(o, t)));
+                    sampleEvents.Add(new SampleEvent(t, SampleEventKind.SliderTick, 0, tickBank, SampleBank.Normal, eventVolume(o, t), effectiveIndex(o.SampleIndex, t)));
                 }
             }
         }
@@ -1437,7 +1584,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             pushUndo();
             removeObjectsAt(time);
             parsed.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Circle, null, RawLine: raw, Id: id,
-                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank,
+                SampleVolume: pendingSampleVolume, SampleIndex: pendingSampleIndex));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
@@ -1512,7 +1660,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             removeObjectsAt(time);
             parsed.HitObjects.Add(new HitObjectModel(hx, hy, time, HitObjectKind.Slider, fullPath, duration, 1,
                 RawLine: raw, Id: id, ControlPoints: cps, NodeSamples: nodeSamples,
-                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank,
+                SampleVolume: pendingSampleVolume, SampleIndex: pendingSampleIndex));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
@@ -1583,7 +1732,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             removeObjectsAt(start);
             parsed.HitObjects.Add(new HitObjectModel(cx, cy, start, HitObjectKind.Spinner, null,
                 Duration: Math.Max(0, end - start), RawLine: raw, Id: id,
-                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank));
+                HitSound: pendingHitSound, NormalBank: pendingNormalBank, AdditionBank: pendingAdditionBank,
+                SampleVolume: pendingSampleVolume, SampleIndex: pendingSampleIndex));
             parsed.HitObjects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             afterEdit();
@@ -1885,6 +2035,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return set switch { 2 => SampleBank.Soft, 3 => SampleBank.Drum, _ => SampleBank.Normal };
         }
 
+        /// <summary>The custom sample-bank index of the timing point active at <paramref name="time"/> (0 if none).</summary>
+        private int sampleIndexAt(double time)
+        {
+            int index = 0;
+            double bestTime = double.NegativeInfinity;
+            foreach (var p in parsed.TimingPointModels)
+            {
+                if (p.Time <= time && p.Time >= bestTime)
+                {
+                    bestTime = p.Time;
+                    index = p.SampleIndex;
+                }
+            }
+            return index;
+        }
+
+        /// <summary>An object's effective sample index: its own override when set (&gt;0), else the active timing point's (osu! inherit).</summary>
+        private int effectiveIndex(int objectIndex, double time) => objectIndex > 0 ? objectIndex : sampleIndexAt(time);
+
         /// <summary>
         /// Resolves an object's (possibly <see cref="SampleBank.Auto"/>) normal/addition banks to concrete banks at
         /// the given time, following osu!'s inherit chain: a normal Auto takes the timing point's set, and an
@@ -1934,22 +2103,28 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         // --- Hitsound editing (left-panel palette): additions + sample banks on the selection, or pending defaults ---
 
-        /// <summary>A snapshot of the hitsounds shown by the palette: the selection's, or the pending placement defaults.</summary>
-        public readonly record struct HitsoundState(int HitSound, SampleBank Normal, SampleBank Addition, bool HasSelection);
+        /// <summary>A snapshot of the hitsounds shown by the palette: the selection's, or the pending placement defaults.
+        /// <see cref="Volume"/>/<see cref="Index"/> are object-level (0 = inherit the timing point / "Auto").</summary>
+        public readonly record struct HitsoundState(int HitSound, SampleBank Normal, SampleBank Addition, bool HasSelection, float Volume = 0f, int Index = 0);
 
         /// <summary>The hitsounds the palette should display: the selected slider node's, else the first selected object's, else the pending defaults.</summary>
         public HitsoundState CurrentHitsoundState()
         {
+            // Volume/index are object-level (not per-node), so a selected node reports its owning object's volume/index.
             if (nodeSelection.Selected is { } node && tryNodeSample(node, out NodeSample ns))
-                return new HitsoundState(ns.HitSound, ns.NormalBank, ns.AdditionBank, true);
+            {
+                int oi = parsed.HitObjects.FindIndex(x => x.Id == node.ObjectId);
+                var owner = oi >= 0 ? parsed.HitObjects[oi] : default;
+                return new HitsoundState(ns.HitSound, ns.NormalBank, ns.AdditionBank, true, owner.SampleVolume, owner.SampleIndex);
+            }
 
             foreach (var o in parsed.HitObjects)
             {
                 if (selection.Contains(o.Id))
-                    return new HitsoundState(o.HitSound, o.NormalBank, o.AdditionBank, true);
+                    return new HitsoundState(o.HitSound, o.NormalBank, o.AdditionBank, true, o.SampleVolume, o.SampleIndex);
             }
 
-            return new HitsoundState(pendingHitSound, pendingNormalBank, pendingAdditionBank, false);
+            return new HitsoundState(pendingHitSound, pendingNormalBank, pendingAdditionBank, false, pendingSampleVolume, pendingSampleIndex);
         }
 
         /// <summary>Reads the sample for a selected slider node, normalising the node list to <c>Slides + 1</c> entries.</summary>
@@ -2015,8 +2190,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>The pending placement sample set as an "normalSet:additionSet" pair (for slider edgeSets).</summary>
         private string pendingSet() => $"{HitObjectLineEditor.SampleSet(pendingNormalBank)}:{HitObjectLineEditor.SampleSet(pendingAdditionBank)}";
 
-        /// <summary>The pending placement hitSample field: "normalSet:additionSet:index:volume:filename".</summary>
-        private string pendingSampleField() => $"{pendingSet()}:0:0:";
+        /// <summary>The pending placement hitSample field: "normalSet:additionSet:index:volume:filename" (0/0 = inherit).</summary>
+        private string pendingSampleField() => $"{pendingSet()}:{Math.Max(0, pendingSampleIndex)}:{(pendingSampleVolume > 0 ? Math.Clamp((int)Math.Round(pendingSampleVolume * 100), 1, 100) : 0)}:";
 
         /// <summary>
         /// Toggles a whistle/finish/clap addition (bit) on the selection (object + every slider node), or on the
@@ -2116,12 +2291,141 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 playFeedback(s.StartTime, s.HitSound, s.NormalBank, s.AdditionBank);
         }
 
+        /// <summary>
+        /// Applies an OBJECT-LEVEL hitsound mutation (volume / index — fields with no per-node form) to the target
+        /// objects as one undo step: the selected objects, or the object owning a selected slider node. Returns false
+        /// (and changes nothing) when nothing is targeted, so the caller can fall back to the pending defaults.
+        /// </summary>
+        private bool applyObjectLevelHitsound(Func<HitObjectModel, HitObjectModel> mutate)
+        {
+            var ids = new HashSet<int>(selection.Selected);
+            if (ids.Count == 0 && nodeSelection.Selected is { } node)
+                ids.Add(node.ObjectId);
+            if (ids.Count == 0)
+                return false;
+
+            pushUndo();
+
+            HitObjectModel? sample = null;
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            {
+                if (!ids.Contains(parsed.HitObjects[i].Id))
+                    continue;
+
+                parsed.HitObjects[i] = mutate(parsed.HitObjects[i]);
+                sample ??= parsed.HitObjects[i];
+            }
+
+            afterEdit();
+
+            if (sample is { } s)
+                playFeedback(s.StartTime, s.HitSound, s.NormalBank, s.AdditionBank);
+            return true;
+        }
+
+        /// <summary>Sets the sample volume override on the selection/node-owner, or the pending default. 0 = inherit the timing point ("Auto").</summary>
+        public void SetSampleVolume(float volume)
+        {
+            int pct = volume <= 0 ? 0 : Math.Clamp((int)Math.Round(volume * 100), 1, 100);
+
+            if (applyObjectLevelHitsound(o => o with { SampleVolume = pct / 100f, RawLine = HitObjectLineEditor.SetSampleVolume(o.RawLine, pct) }))
+                return;
+
+            pendingSampleVolume = pct / 100f;
+            playFeedback(CurrentTime, pendingHitSound, pendingNormalBank, pendingAdditionBank);
+        }
+
+        /// <summary>Sets the custom sample-bank index on the selection/node-owner, or the pending default. 0 = inherit the timing point ("Auto").</summary>
+        public void SetSampleIndex(int index)
+        {
+            index = Math.Max(0, index);
+
+            if (applyObjectLevelHitsound(o => o with { SampleIndex = index, RawLine = HitObjectLineEditor.SetSampleIndex(o.RawLine, index) }))
+                return;
+
+            pendingSampleIndex = index;
+            playFeedback(CurrentTime, pendingHitSound, pendingNormalBank, pendingAdditionBank);
+        }
+
+        /// <summary>A copied hitsound "feel": the object-level additions/banks/volume/index plus the per-node samples (for sliders).</summary>
+        public readonly record struct HitsoundClip(int HitSound, SampleBank Normal, SampleBank Addition, float Volume, int Index, IReadOnlyList<NodeSample>? Nodes);
+
+        /// <summary>Whether there is a hitsound clip ready to paste (drives the Paste button's enabled state).</summary>
+        public bool HasHitsoundClip => hitsoundClipboard != null;
+
+        /// <summary>Copies the first selected object's hitsounds (additions, banks, volume, index, per-node samples) for later paste.</summary>
+        public void CopyHitsounds()
+        {
+            HitObjectModel? src = null;
+            foreach (var o in parsed.HitObjects)
+                if (selection.Contains(o.Id)) { src = o; break; }
+
+            // Fall back to the object owning a selected slider node.
+            if (src == null && nodeSelection.Selected is { } node)
+            {
+                int i = parsed.HitObjects.FindIndex(x => x.Id == node.ObjectId);
+                if (i >= 0) src = parsed.HitObjects[i];
+            }
+
+            if (src is { } s)
+            {
+                hitsoundClipboard = new HitsoundClip(s.HitSound, s.NormalBank, s.AdditionBank, s.SampleVolume, s.SampleIndex, s.NodeSamples);
+                toasts?.Push("Hitsounds copied", EditorTheme.Colours.Velocity);
+            }
+        }
+
+        /// <summary>Pastes the copied hitsounds onto every selected object (one undo step); per-node samples map by node, clamped to each target.</summary>
+        public void PasteHitsounds()
+        {
+            if (hitsoundClipboard is not { } clip || selection.Selected.Count == 0)
+                return;
+
+            int pct = clip.Volume > 0 ? Math.Clamp((int)Math.Round(clip.Volume * 100), 1, 100) : 0;
+
+            applyHitsoundEdit(o =>
+            {
+                // Per-node samples: reuse the clip's node list, clamped/extended to this slider's own node count.
+                List<NodeSample>? nodes = null;
+                if (o.Kind == HitObjectKind.Slider)
+                {
+                    int count = Math.Max(1, o.Slides) + 1;
+                    nodes = new List<NodeSample>(count);
+                    for (int i = 0; i < count; i++)
+                    {
+                        NodeSample ns = clip.Nodes is { Count: > 0 }
+                            ? clip.Nodes[Math.Min(i, clip.Nodes.Count - 1)]
+                            : new NodeSample(clip.HitSound, clip.Normal, clip.Addition);
+                        nodes.Add(ns);
+                    }
+                }
+
+                string raw = HitObjectLineEditor.SetHitSound(o.RawLine, clip.HitSound);
+                raw = HitObjectLineEditor.SetSampleBanks(raw, clip.Normal, clip.Addition);
+                raw = HitObjectLineEditor.SetSampleIndex(raw, clip.Index);
+                raw = HitObjectLineEditor.SetSampleVolume(raw, pct);
+                if (o.Kind == HitObjectKind.Slider && nodes != null)
+                    raw = HitObjectLineEditor.SetSliderNodeSamples(raw, nodes);
+
+                return o with
+                {
+                    HitSound = clip.HitSound,
+                    NormalBank = clip.Normal,
+                    AdditionBank = clip.Addition,
+                    SampleVolume = pct / 100f,
+                    SampleIndex = clip.Index,
+                    NodeSamples = nodes ?? o.NodeSamples,
+                    RawLine = raw,
+                };
+            });
+        }
+
         /// <summary>Plays a one-off hitsound so a palette change is immediately audible (osu!lazer feedback). Banks
         /// are resolved (Auto -> the timing point at <paramref name="time"/>) so the feedback matches playback.</summary>
         private void playFeedback(double time, int hitSound, SampleBank normal, SampleBank addition)
         {
             var (n, a) = resolveBanksAt(time, normal, addition);
-            hitsounds?.Play(hitSound, n, a, 1f);
+            // Edit feedback honours the active timing point's custom sample index (e.g. soft-hitclap2).
+            hitsounds?.Play(hitSound, n, a, 1f, sampleIndexAt(time));
         }
 
         /// <summary>
@@ -4700,6 +5004,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Copy / paste HITSOUNDS only (Ctrl+Shift+C / Ctrl+Shift+V): the additions/banks/volume/index "feel".
+            // Placed before the plain Ctrl+C/V so the Shift variants win instead of falling through to object copy.
+            if (cmd && e.ShiftPressed && !e.Repeat && e.Key == Key.C)
+            {
+                CopyHitsounds();
+                return true;
+            }
+
+            if (cmd && e.ShiftPressed && !e.Repeat && e.Key == Key.V)
+            {
+                PasteHitsounds();
+                return true;
+            }
+
             // Copy / cut / paste (Ctrl+C / Ctrl+X / Ctrl+V), like lazer.
             if (cmd && !e.Repeat && e.Key == Key.C)
             {
@@ -5270,6 +5588,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void Dispose(bool isDisposing)
         {
+            stopAllLoops();
             track?.Dispose();
             trackStore?.Dispose();
             textures?.Dispose();

@@ -54,6 +54,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Raised when a timing-point pill is clicked: the point's id and the pill's bottom screen position.</summary>
         public Action<int, Vector2>? TimingPillClicked;
 
+        /// <summary>The timing point's sample volume (0..1) at a time, so a hitsound cell can dim by its effective volume.</summary>
+        public Func<double, float>? TimingVolume;
+
         [Resolved]
         private EditorSettings settings { get; set; } = null!;
 
@@ -126,11 +129,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ("FINISH", hs_finish, EditorTheme.Colours.Kiai),    // orange
         };
 
-        // Hitsound-lane cell visuals + the fixed opaque label gutter on the left of the lanes.
+        // Hitsound-lane cell visuals + a slim fixed gutter on the left carrying the C/W/F lane-colour tags. The actual
+        // hitsound CONTROLS live in a separate left-side block in the editor (not in the timeline), so the lanes keep
+        // (almost) the full timeline width for cells.
         private const float cell_size = 28f;
-        private const float lane_gutter = 96f;
+        private const float lane_gutter = 34f;      // slim: just the lane-tag strip
+        private const float lane_tag_width = 24f;   // the strip carrying the C/W/F lane-colour tags
 
-        // Band tints/separators (fixed, drawn behind the cells); the scrolling cells; the left label gutter (on top).
+        // Band tints/separators (fixed, drawn behind the cells); the scrolling cells; the left tag gutter (on top).
         private Container laneChrome = null!;
         private Container laneCellsRoot = null!;
         private Container laneLabels = null!;
@@ -620,12 +626,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var (time, sample) in hitsoundColumns(o))
             {
                 float x = (float)(time * pixelsPerMs);
+                // Effective volume: the object's explicit override, else the timing point's volume at this column.
+                float volume = o.SampleVolume > 0 ? o.SampleVolume : (TimingVolume?.Invoke(time) ?? 1f);
                 for (int lane = 0; lane < 3; lane++)
                 {
                     var def = hitsoundLaneDefs[lane];
                     bool on = (sample.HitSound & def.Bit) != 0;
                     // The cell's letter shows the note's NORMAL bank; the addition bank lives in the bank bar.
-                    var cell = makeCell(x, def.Colour, on, sample.NormalBank);
+                    var cell = makeCell(x, def.Colour, on, sample.NormalBank, volume);
                     laneCellContainers[lane].Add(cell);
                     cells.Add(cell);
                 }
@@ -658,8 +666,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // --- Hitsound lanes ---
 
         /// <summary>Builds the static lane chrome: per-lane tint bands + separators (behind the cells), the three
-        /// scrolling cell containers, and the left-edge labels. Called once on load; geometry is relative thirds
-        /// so it follows the lane region as the timeline expands (see <see cref="updateLaneLayout"/>).</summary>
+        /// scrolling cell containers, and the fixed left control gutter. Called once on load; geometry is relative
+        /// thirds so it follows the lane region as the timeline expands (see <see cref="updateLaneLayout"/>).</summary>
         private void buildLaneChrome()
         {
             for (int i = 0; i < 3; i++)
@@ -696,56 +704,64 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Height = 1f / 3f,
                     Y = i / 3f,
                 });
+            }
 
-                // A fixed-width OPAQUE gutter column on the left holds the lane label (room for more controls later).
-                laneLabels.Add(new Container
+            // The slim fixed gutter: an opaque strip of C/W/F lane-colour tags on the far left, with a divider. The
+            // hitsound controls themselves live in a separate left-side block (see EditorScreen), not here.
+            laneLabels.Add(new Container
+            {
+                RelativeSizeAxes = Axes.Y,
+                Width = lane_gutter,
+                Masking = true,
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Surface },
+                    buildLaneTagStrip(),
+                    // Right-edge divider separating the gutter from the scrolling cells.
+                    new Box
+                    {
+                        Anchor = Anchor.TopRight,
+                        Origin = Anchor.TopRight,
+                        RelativeSizeAxes = Axes.Y,
+                        Width = 1,
+                        Colour = EditorTheme.Colours.Border,
+                    },
+                },
+            });
+
+            // Transient action-feedback effects (flash + ring), scrolling with the cells, drawn above them.
+            laneCellsRoot.Add(laneEffects = new Container { RelativeSizeAxes = Axes.Both });
+        }
+
+        /// <summary>The slim far-left strip of the gutter: the three lane-colour tag letters (C / W / F), stacked.</summary>
+        private Drawable buildLaneTagStrip()
+        {
+            var strip = new Container { RelativeSizeAxes = Axes.Y, Width = lane_tag_width };
+            for (int i = 0; i < 3; i++)
+            {
+                var def = hitsoundLaneDefs[i];
+                strip.Add(new Container
                 {
                     RelativeSizeAxes = Axes.Both,
                     RelativePositionAxes = Axes.Y,
                     Height = 1f / 3f,
                     Y = i / 3f,
-                    Child = new Container
+                    Children = new Drawable[]
                     {
-                        Anchor = Anchor.TopLeft,
-                        Origin = Anchor.TopLeft,
-                        RelativeSizeAxes = Axes.Y,
-                        Width = lane_gutter,
-                        Masking = true,
-                        Children = new Drawable[]
+                        // Lane-coloured accent down the left edge.
+                        new Box { RelativeSizeAxes = Axes.Y, Width = 3, Colour = def.Colour },
+                        new SpriteText
                         {
-                            new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Surface },
-                            // A thin lane-coloured accent down the left edge of the gutter.
-                            new Box
-                            {
-                                RelativeSizeAxes = Axes.Y,
-                                Width = 3,
-                                Colour = def.Colour,
-                            },
-                            // Right-edge divider separating the gutter from the cells.
-                            new Box
-                            {
-                                Anchor = Anchor.TopRight,
-                                Origin = Anchor.TopRight,
-                                RelativeSizeAxes = Axes.Y,
-                                Width = 1,
-                                Colour = EditorTheme.Colours.Border,
-                            },
-                            new SpriteText
-                            {
-                                Anchor = Anchor.CentreLeft,
-                                Origin = Anchor.CentreLeft,
-                                Margin = new MarginPadding { Left = 14 },
-                                Text = def.Label,
-                                Colour = def.Colour,
-                                Font = FontUsage.Default.With(size: 13, weight: "Bold"),
-                            },
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            Text = def.Label[..1], // C / W / F
+                            Colour = def.Colour,
+                            Font = FontUsage.Default.With(size: 13, weight: "Bold"),
                         },
                     },
                 });
             }
-
-            // Transient action-feedback effects (flash + ring), scrolling with the cells, drawn above them.
-            laneCellsRoot.Add(laneEffects = new Container { RelativeSizeAxes = Axes.Both });
+            return strip;
         }
 
         /// <summary>Positions/sizes the three lane regions below the object band each frame, fading them in as the
@@ -795,8 +811,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         };
 
         /// <summary>One hitsound cell: a filled lane-coloured chip with the addition-bank letter when the addition
-        /// is on, or a faint hollow slot when off.</summary>
-        private Drawable makeCell(float x, Color4 colour, bool on, SampleBank bank) => new Container
+        /// is on, or a faint hollow slot when off. A lit cell dims with its <paramref name="volume"/> (0..1) so quiet
+        /// notes read as fainter than loud ones.</summary>
+        private Drawable makeCell(float x, Color4 colour, bool on, SampleBank bank, float volume = 1f) => new Container
         {
             Anchor = Anchor.CentreLeft,
             Origin = Anchor.Centre,
@@ -812,7 +829,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 {
                     RelativeSizeAxes = Axes.Both,
                     Colour = on ? colour : EditorTheme.Colours.Surface,
-                    Alpha = on ? 1f : 0.35f,
+                    // Lit cells fade toward ~40% at silence; off cells keep their faint hollow look.
+                    Alpha = on ? 0.4f + 0.6f * Math.Clamp(volume, 0f, 1f) : 0.35f,
                 },
                 new SpriteText
                 {
@@ -890,12 +908,26 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (!hitsoundMode.Value || region < 12)
                 return false;
 
-            float y = ToLocalSpace(screenPosition).Y;
-            if (y < HEIGHT || y > DrawHeight)
+            var local = ToLocalSpace(screenPosition);
+            if (local.Y < HEIGHT || local.Y > DrawHeight)
                 return false;
 
-            lane = Math.Clamp((int)((y - HEIGHT) / (region / 3f)), 0, 2);
+            // The left gutter belongs to its inline controls, not the cells - never paint/toggle there.
+            if (local.X < lane_gutter)
+                return false;
+
+            lane = Math.Clamp((int)((local.Y - HEIGHT) / (region / 3f)), 0, 2);
             return true;
+        }
+
+        /// <summary>True when the position is over the lanes' control gutter (so its inline controls own the input).</summary>
+        private bool inLaneGutter(Vector2 screenPosition)
+        {
+            if (!hitsoundMode.Value)
+                return false;
+
+            var local = ToLocalSpace(screenPosition);
+            return local.Y > HEIGHT && local.Y <= DrawHeight && local.X < lane_gutter;
         }
 
         /// <summary>The node column nearest the given time (within a cell's reach), as an (objectId, nodeIndex) pair.</summary>
@@ -1605,6 +1637,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnMouseDown(MouseDownEvent e)
         {
+            // The lanes' control gutter is owned by its inline controls (banks/volume/index/copy-paste): don't claim
+            // the press, so those child controls receive it (and the volume slider can drag).
+            if (inLaneGutter(e.ScreenSpaceMousePosition))
+                return false;
+
             // In the hitsound lanes, defer to click/drag/up handlers (left toggles, drag paints, Shift+right sets bank).
             if (tryLaneAt(e.ScreenSpaceMousePosition, out _))
             {
@@ -1634,6 +1671,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnClick(ClickEvent e)
         {
+            // Clicks on the control gutter belong to its inline controls; never clear the selection or paint there.
+            if (inLaneGutter(e.ScreenSpaceMousePosition))
+                return false;
+
             // Shift + click in the lower timing-pill band adds a green SV point at the nearest beat tick (the gray
             // "+ SV" pill previews exactly where it lands).
             if (e.ShiftPressed && timingBandAt(e.ScreenSpaceMousePosition)
@@ -1737,6 +1778,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnDragStart(DragStartEvent e)
         {
+            // A drag starting on the control gutter belongs to its inline controls (e.g. the volume slider), not a
+            // paint stroke or rubber-band select.
+            if (inLaneGutter(e.ScreenSpaceMouseDownPosition))
+                return false;
+
             // A drag in the hitsound lanes paints a whole row: left adds the addition, right erases it.
             if ((e.Button == MouseButton.Left || e.Button == MouseButton.Right) && tryLaneAt(e.ScreenSpaceMouseDownPosition, out int paintLane))
             {

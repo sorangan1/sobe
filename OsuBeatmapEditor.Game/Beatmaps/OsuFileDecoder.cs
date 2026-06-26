@@ -258,12 +258,13 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         };
 
         /// <summary>Reads the object's hitSound bitfield and resolves its sample banks and volume.</summary>
-        private static (int hitSound, SampleBank normal, SampleBank addition, float volume) parseHitSounds(string[] parts, double time, List<TimingPoint> timingPoints)
+        private static (int hitSound, SampleBank normal, SampleBank addition, float volume, int index, string filename) parseHitSounds(string[] parts, double time, List<TimingPoint> timingPoints)
         {
             int hitSound = parts.Length > 4 && int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out int hs) ? hs : 0;
 
-            // hitSample (last field) "normalSet:additionSet:index:volume:filename" overrides bank/volume.
-            int normalSet = 0, additionSet = 0, sampleVolume = 0;
+            // hitSample (last field) "normalSet:additionSet:index:volume:filename" overrides bank/volume/index/file.
+            int normalSet = 0, additionSet = 0, sampleVolume = 0, sampleIndex = 0;
+            string filename = "";
             string last = parts[^1];
             if (last.Contains(':'))
             {
@@ -276,8 +277,16 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                     additionSet = adds;
                 }
 
+                // index (custom sample bank) -> a numeric suffix at playback (soft-hitclap2); 0 = inherit timing point.
+                if (hsParts.Length >= 3)
+                    int.TryParse(hsParts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out sampleIndex);
+
                 if (hsParts.Length >= 4)
                     int.TryParse(hsParts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out sampleVolume);
+
+                // filename = a fully custom sample file packed with the map (overrides the normal sample at playback).
+                if (hsParts.Length >= 5)
+                    filename = hsParts[4].Trim();
             }
 
             // Banks are kept RAW (0 -> Auto): the inherit chain (addition->normal->timing point) is resolved at
@@ -286,7 +295,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             // sample-event at its own time during playback (EditorScreen.volumeAt).
             float volume = sampleVolume > 0 ? Math.Clamp(sampleVolume / 100f, 0f, 1f) : 0f;
 
-            return (hitSound, toBank(normalSet), toBank(additionSet), volume);
+            return (hitSound, toBank(normalSet), toBank(additionSet), volume, sampleIndex, filename);
         }
 
         /// <summary>
@@ -352,7 +361,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 comboIndex += 1 + ((type >> 4) & 0b111);
             firstHitObject = false;
 
-            (int hitSound, SampleBank normalBank, SampleBank additionBank, float sampleVolume) = parseHitSounds(parts, time, timingPoints);
+            (int hitSound, SampleBank normalBank, SampleBank additionBank, float sampleVolume, int sampleIndex, string sampleFilename) = parseHitSounds(parts, time, timingPoints);
 
             // Type bitfield: bit 0 = circle, bit 1 = slider, bit 3 = spinner.
             if ((type & 0b1000) != 0)
@@ -363,7 +372,8 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
                 result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Spinner, null, Duration: spinnerDuration,
                     ComboNumber: comboNumber, ComboIndex: comboIndex,
-                    HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line));
+                    HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line,
+                    SampleIndex: sampleIndex, SampleFilename: sampleFilename));
             }
             else if ((type & 0b10) != 0 && parts.Length >= 6)
             {
@@ -371,12 +381,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 (var path, double duration, int slides) = parseSlider(time, parts, timingPoints, sliderMultiplier, controlPoints);
                 var nodeSamples = parseNodeSamples(parts, slides, time, timingPoints, hitSound, normalBank, additionBank);
                 result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Slider, path, duration, slides, comboNumber, comboIndex,
-                    hitSound, normalBank, additionBank, sampleVolume, line, ControlPoints: controlPoints, NodeSamples: nodeSamples));
+                    hitSound, normalBank, additionBank, sampleVolume, line, ControlPoints: controlPoints, NodeSamples: nodeSamples,
+                    SampleIndex: sampleIndex, SampleFilename: sampleFilename));
             }
             else
             {
                 result.HitObjects.Add(new HitObjectModel(x, y, time, HitObjectKind.Circle, null, ComboNumber: comboNumber, ComboIndex: comboIndex,
-                    HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line));
+                    HitSound: hitSound, NormalBank: normalBank, AdditionBank: additionBank, SampleVolume: sampleVolume, RawLine: line,
+                    SampleIndex: sampleIndex, SampleFilename: sampleFilename));
             }
         }
 

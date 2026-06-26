@@ -92,7 +92,9 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         int Id = -1,
         int StackHeight = 0,
         IReadOnlyList<SliderControlPoint>? ControlPoints = null,
-        IReadOnlyList<NodeSample>? NodeSamples = null);
+        IReadOnlyList<NodeSample>? NodeSamples = null,
+        int SampleIndex = 0,
+        string SampleFilename = "");
 
     /// <summary>
     /// A timing point reduced to what the timeline needs: its time, whether it is uninherited (BPM), and its

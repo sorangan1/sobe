@@ -132,16 +132,16 @@ namespace OsuBeatmapEditor.Game.Beatmaps
         }
 
         /// <summary>
-        /// Sets the object's normal and addition sample banks in its <c>hitSample</c> field
-        /// (the trailing "normalSet:additionSet:index:volume:filename"), preserving index/volume/filename.
+        /// Edits the trailing <c>hitSample</c> token ("normalSet:additionSet:index:volume:filename") in place,
+        /// preserving every sub-field the callback doesn't touch (and creating the token if the line omits it).
         /// </summary>
-        public static string SetSampleBanks(string raw, SampleBank normal, SampleBank addition)
+        private static string editHitSample(string raw, Action<string[]> mutate)
         {
             string[] parts = raw.Split(',');
             if (parts.Length < 5)
                 return raw;
 
-            // The hitSample field is the trailing colon-delimited token; add one if the line omits it.
+            // The hitSample field is the trailing colon-delimited token; add a default one if the line omits it.
             string last = parts[^1];
             string[] hs = last.Contains(':') ? last.Split(':') : new[] { "0", "0", "0", "0", "" };
             if (hs.Length < 5)
@@ -149,12 +149,29 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             for (int i = 0; i < hs.Length; i++)
                 hs[i] ??= string.Empty;
 
-            hs[0] = ((int)bankToSet(normal)).ToString(CultureInfo.InvariantCulture);
-            hs[1] = ((int)bankToSet(addition)).ToString(CultureInfo.InvariantCulture);
+            mutate(hs);
 
             parts[^1] = string.Join(':', hs);
             return string.Join(',', parts);
         }
+
+        /// <summary>
+        /// Sets the object's normal and addition sample banks in its <c>hitSample</c> field
+        /// (the trailing "normalSet:additionSet:index:volume:filename"), preserving index/volume/filename.
+        /// </summary>
+        public static string SetSampleBanks(string raw, SampleBank normal, SampleBank addition) => editHitSample(raw, hs =>
+        {
+            hs[0] = ((int)bankToSet(normal)).ToString(CultureInfo.InvariantCulture);
+            hs[1] = ((int)bankToSet(addition)).ToString(CultureInfo.InvariantCulture);
+        });
+
+        /// <summary>Sets the custom sample-bank index in the <c>hitSample</c> field (0 = inherit the timing point), preserving the rest.</summary>
+        public static string SetSampleIndex(string raw, int index) =>
+            editHitSample(raw, hs => hs[2] = Math.Max(0, index).ToString(CultureInfo.InvariantCulture));
+
+        /// <summary>Sets the sample volume override (1-100) in the <c>hitSample</c> field (0 = inherit the timing point), preserving the rest.</summary>
+        public static string SetSampleVolume(string raw, int volumePercent) =>
+            editHitSample(raw, hs => hs[3] = Math.Clamp(volumePercent, 0, 100).ToString(CultureInfo.InvariantCulture));
 
         /// <summary>
         /// Rewrites a slider's per-node hitsounds: <c>edgeSounds</c> (part 8) and <c>edgeSets</c> (part 9).
