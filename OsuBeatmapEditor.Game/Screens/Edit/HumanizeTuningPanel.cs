@@ -50,47 +50,35 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Padding = new MarginPadding(EditorTheme.Spacing.Md),
             };
 
-            group(list, "STACK");
-            row(list, "Stack range lo", 0, 40, () => HumanizeTuning.StackLo, v => HumanizeTuning.StackLo = v);
-            row(list, "Stack range hi", 0, 60, () => HumanizeTuning.StackHi, v => HumanizeTuning.StackHi = v);
-            row(list, "Stack hold start", 0, 1, () => HumanizeTuning.StackHoldStart, v => HumanizeTuning.StackHoldStart = v);
-
             group(list, "FLOW (stream vs jump)");
-            row(list, "Spatial flow lo", 0, 150, () => HumanizeTuning.SpatialFlowLo, v => HumanizeTuning.SpatialFlowLo = v);
-            row(list, "Spatial flow hi", 50, 300, () => HumanizeTuning.SpatialFlowHi, v => HumanizeTuning.SpatialFlowHi = v);
-            row(list, "Stream gap fast (ms)", 40, 200, () => HumanizeTuning.StreamGapFastMs, v => HumanizeTuning.StreamGapFastMs = v);
-            row(list, "Stream gap slow (ms)", 60, 320, () => HumanizeTuning.StreamGapSlowMs, v => HumanizeTuning.StreamGapSlowMs = v);
-            row(list, "Stream regular lo", 0, 1, () => HumanizeTuning.StreamRegularLo, v => HumanizeTuning.StreamRegularLo = v);
-            row(list, "Stream regular hi", 0, 1, () => HumanizeTuning.StreamRegularHi, v => HumanizeTuning.StreamRegularHi = v);
-
-            group(list, "OVERSHOOT");
-            row(list, "On lo", 0, 400, () => HumanizeTuning.OvershootOnLo, v => HumanizeTuning.OvershootOnLo = v);
-            row(list, "On hi", 0, 400, () => HumanizeTuning.OvershootOnHi, v => HumanizeTuning.OvershootOnHi = v);
-            row(list, "Off lo", 100, 800, () => HumanizeTuning.OvershootOffLo, v => HumanizeTuning.OvershootOffLo = v);
-            row(list, "Off hi", 200, 1200, () => HumanizeTuning.OvershootOffHi, v => HumanizeTuning.OvershootOffHi = v);
-            row(list, "Amount", 0, 3, () => HumanizeTuning.OvershootAmount, v => HumanizeTuning.OvershootAmount = v);
-            row(list, "Reversal gate", 0, 1, () => HumanizeTuning.OvershootReversalGate, v => HumanizeTuning.OvershootReversalGate = v);
+            row(list, "Flow fast gap (ms)", 40, 200, () => HumanizeTuning.FlowFastMs, v => HumanizeTuning.FlowFastMs = v);
+            row(list, "Flow slow gap (ms)", 60, 340, () => HumanizeTuning.FlowSlowMs, v => HumanizeTuning.FlowSlowMs = v);
+            row(list, "Straighten zig-zag", 0, 1, () => HumanizeTuning.StreamStraightenAmount, v => HumanizeTuning.StreamStraightenAmount = v);
+            row(list, "Straighten threshold (r)", 0, 2, () => HumanizeTuning.StreamStraightenThreshold, v => HumanizeTuning.StreamStraightenThreshold = v);
 
             group(list, "ARC (bow on jumps)");
-            row(list, "Turn threshold", 0, 1, () => HumanizeTuning.ArcTurnThreshold, v => HumanizeTuning.ArcTurnThreshold = v);
-            row(list, "Outside amount", 0, 0.5f, () => HumanizeTuning.ArcOutsideAmount, v => HumanizeTuning.ArcOutsideAmount = v);
-            row(list, "Figure-8 amount", 0, 0.5f, () => HumanizeTuning.ArcFigure8Amount, v => HumanizeTuning.ArcFigure8Amount = v);
-            row(list, "Max bow (px)", 50, 500, () => HumanizeTuning.ArcMaxPx, v => HumanizeTuning.ArcMaxPx = v);
+            row(list, "Arc amount", 0, 0.6f, () => HumanizeTuning.ArcAmount, v => HumanizeTuning.ArcAmount = v);
+            row(list, "Arc falloff (norm)", 30, 300, () => HumanizeTuning.ArcFalloffNorm, v => HumanizeTuning.ArcFalloffNorm = v);
+            row(list, "Hand pivot X", -300, 300, () => HumanizeTuning.HandPivotX, v => HumanizeTuning.HandPivotX = v);
+            row(list, "Hand pivot Y (below)", -200, 900, () => HumanizeTuning.HandPivotY, v => HumanizeTuning.HandPivotY = v);
 
-            group(list, "AIM / JITTER");
+            group(list, "AIM / TREMOR");
             row(list, "Aim error", 0, 1.5f, () => HumanizeTuning.AimErrorAmount, v => HumanizeTuning.AimErrorAmount = v);
-            row(list, "Jitter amount", 0, 4, () => HumanizeTuning.JitterAmount, v => HumanizeTuning.JitterAmount = v);
-            row(list, "Jitter steady damp", 0, 1, () => HumanizeTuning.JitterSteadyDamp, v => HumanizeTuning.JitterSteadyDamp = v);
+            row(list, "Tremor amount", 0, 4, () => HumanizeTuning.TremorAmount, v => HumanizeTuning.TremorAmount = v);
 
-            group(list, "SLIDERS");
+            group(list, "OVERSHOOT");
+            row(list, "Overshoot gain", 0, 0.4f, () => HumanizeTuning.OvershootGain, v => HumanizeTuning.OvershootGain = v);
+            row(list, "Overshoot peak (norm)", 60, 400, () => HumanizeTuning.OvershootPeakNorm, v => HumanizeTuning.OvershootPeakNorm = v);
+
+            group(list, "SLIDERS (lazy follow)");
+            row(list, "Cut window", 0, 0.6f, () => HumanizeTuning.SliderCutWindow, v => HumanizeTuning.SliderCutWindow = v);
+            row(list, "Laziness", 0, 1, () => HumanizeTuning.SliderLaziness, v => HumanizeTuning.SliderLaziness = v);
+            row(list, "Edge fade (ms)", 0, 150, () => HumanizeTuning.SliderEdgeFadeMs, v => HumanizeTuning.SliderEdgeFadeMs = v);
+            row(list, "Kick slider max (ms)", 0, 200, () => HumanizeTuning.KickSliderMaxMs, v => HumanizeTuning.KickSliderMaxMs = v);
+            row(list, "Flow release (momentum)", 0, 1, () => HumanizeTuning.SliderFlowRelease, v => HumanizeTuning.SliderFlowRelease = v);
+            row(list, "Reverse laziness", 0, 1, () => HumanizeTuning.ReverseLaziness, v => HumanizeTuning.ReverseLaziness = v);
             row(list, "Release frac", 0, 0.3f, () => HumanizeTuning.SliderReleaseFrac, v => HumanizeTuning.SliderReleaseFrac = v);
             row(list, "Release max (ms)", 0, 100, () => HumanizeTuning.SliderReleaseMaxMs, v => HumanizeTuning.SliderReleaseMaxMs = v);
-            row(list, "Laziness", 0, 1, () => HumanizeTuning.SliderLaziness, v => HumanizeTuning.SliderLaziness = v);
-
-            group(list, "LONG-PAUSE DRIFT");
-            row(list, "Slow lo (ms)", 0, 1000, () => HumanizeTuning.CentreDriftSlowLo, v => HumanizeTuning.CentreDriftSlowLo = v);
-            row(list, "Slow hi (ms)", 100, 2000, () => HumanizeTuning.CentreDriftSlowHi, v => HumanizeTuning.CentreDriftSlowHi = v);
-            row(list, "Amount", 0, 1, () => HumanizeTuning.CentreDriftAmount, v => HumanizeTuning.CentreDriftAmount = v);
 
             InternalChild = new Container
             {

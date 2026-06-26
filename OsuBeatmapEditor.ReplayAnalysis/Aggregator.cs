@@ -13,12 +13,16 @@ namespace OsuBeatmapEditor.ReplayAnalysis
         private readonly List<double>[] aim;
         private readonly List<double>[] arc;
         private readonly List<double>[] overshoot;
+        // Signed lateral bow at the arc apex, bucketed by the 8 movement-direction octants (osu! y-down): reveals
+        // whether the player has a consistent handedness curl (a fixed rotational/pivot bias) vs random flipping.
+        private readonly List<double>[] arcCurl = new List<double>[8];
         private readonly List<double> stackMove = new();
         private readonly List<double> sliderLeadMs = new();
         private readonly List<double> sliderLeadFrac = new();
         private readonly List<double> streamSpacing = new();
         private readonly List<double> streamAim = new();
         private readonly List<double> streamShake = new();
+        private readonly List<(double vel, double ratio, double dist)> sliderLazy = new();
 
         public Aggregator(double[] binEdges)
         {
@@ -27,6 +31,7 @@ namespace OsuBeatmapEditor.ReplayAnalysis
             aim = NewBuckets();
             arc = NewBuckets();
             overshoot = NewBuckets();
+            for (int i = 0; i < 8; i++) arcCurl[i] = new List<double>();
         }
 
         private List<double>[] NewBuckets()
@@ -46,12 +51,20 @@ namespace OsuBeatmapEditor.ReplayAnalysis
 
         public void AddAim(double dNorm, double fracOfRadius) => aim[BinOf(dNorm)].Add(fracOfRadius);
         public void AddArc(double dNorm, double fracOfDist) => arc[BinOf(dNorm)].Add(fracOfDist);
+
+        public void AddArcCurl(double angleRad, double signedFracOfDist)
+        {
+            double a = (angleRad % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+            int oct = (int)(a / (Math.PI / 4)) % 8;
+            arcCurl[oct].Add(signedFracOfDist);
+        }
         public void AddOvershoot(double dNorm, double fracOfDist) => overshoot[BinOf(dNorm)].Add(fracOfDist);
         public void AddStack(double fracOfRadius) => stackMove.Add(fracOfRadius);
         public void AddSliderLead(double ms, double frac) { sliderLeadMs.Add(ms); sliderLeadFrac.Add(frac); }
         public void AddStreamSpacing(double dNorm) => streamSpacing.Add(dNorm);
         public void AddStreamAim(double fracOfRadius) => streamAim.Add(fracOfRadius);
         public void AddStreamShake(double fracOfRadius) => streamShake.Add(fracOfRadius);
+        public void AddSliderLazy(double velNormPerMs, double travelRatio, double cursorBallDist) => sliderLazy.Add((velNormPerMs, travelRatio, cursorBallDist));
 
         public void Report()
         {
@@ -61,6 +74,20 @@ namespace OsuBeatmapEditor.ReplayAnalysis
             printTable("AIM ERROR (fraction of circle radius, by incoming jump)", aim, "median", "p90");
             printTable("ARC / lateral bow (fraction of jump distance)", arc, "median", "p90");
             printTable("OVERSHOOT past target (fraction of jump distance)", overshoot, "median", "p90");
+
+            Console.WriteLine("ARC CURL by movement direction (mean SIGNED bow, fraction of jump; sign = which side of the line)");
+            Console.WriteLine("  A consistent same-sign pattern (or a smooth + -> - sweep) = a fixed handedness/pivot; random signs = none.");
+            string[] dirs = { "E ", "SE", "S ", "SW", "W ", "NW", "N ", "NE" }; // osu! y-down: S = straight down, SE = down-right
+            for (int i = 0; i < 8; i++)
+            {
+                if (arcCurl[i].Count == 0) continue;
+                double mean = arcCurl[i].Average();
+                Console.WriteLine($"  {dirs[i]}  n={arcCurl[i].Count,-6} mean signed bow={mean,7:0.000}");
+            }
+            var allCurl = arcCurl.SelectMany(x => x).ToList();
+            if (allCurl.Count > 0)
+                Console.WriteLine($"  net curl (all dirs)  mean={allCurl.Average():0.000}  (=0 means no net clockwise/counter bias)");
+            Console.WriteLine();
 
             Console.WriteLine("STACK movement (cursor travel across a stacked pair, fraction of radius)");
             Console.WriteLine($"  n={stackMove.Count,-6} median={Program.Median(stackMove):0.000}  p90={P(stackMove, 0.90):0.000}");
@@ -77,7 +104,29 @@ namespace OsuBeatmapEditor.ReplayAnalysis
             Console.WriteLine($"  SHAKE (hi-freq dev)  : median={Program.Median(streamShake):0.000}  p90={P(streamShake, 0.90):0.000} x radius  (=> how much real streams actually wobble)");
             Console.WriteLine();
 
+            Console.WriteLine("SLIDER LAZINESS (how much a real cursor cuts the slider path)");
+            Console.WriteLine("  travel ratio = cursor path length / ball path length (1 = perfect trace, lower = lazier / more cut)");
+            Console.WriteLine("  cursor-ball dist = how far the cursor lags the ball (x radius; ~ the follow-circle slack used)");
+            reportSliderLazy("  all", sliderLazy);
+            reportSliderLazy("  slow <0.6", sliderLazy.Where(s => s.vel < 0.6).ToList());
+            reportSliderLazy("  med 0.6-1.2", sliderLazy.Where(s => s.vel >= 0.6 && s.vel < 1.2).ToList());
+            reportSliderLazy("  fast >=1.2", sliderLazy.Where(s => s.vel >= 1.2).ToList());
+            Console.WriteLine();
+
             suggest();
+        }
+
+        private void reportSliderLazy(string label, List<(double vel, double ratio, double dist)> s)
+        {
+            if (s.Count == 0)
+            {
+                Console.WriteLine($"  {label,-14} (none)");
+                return;
+            }
+            var ratios = s.Select(x => x.ratio).ToList();
+            var dists = s.Select(x => x.dist).ToList();
+            Console.WriteLine($"  {label,-14} n={s.Count,-5} travel ratio: median={Program.Median(ratios):0.000} p10={P(ratios, 0.10):0.000}" +
+                              $"   cursor-ball dist: median={Program.Median(dists):0.00} p90={P(dists, 0.90):0.00} x r");
         }
 
         private void printTable(string title, List<double>[] buckets, params string[] _)
@@ -113,6 +162,14 @@ namespace OsuBeatmapEditor.ReplayAnalysis
 
             Console.WriteLine($"slider release lead      ~ {Program.Median(sliderLeadMs):0}ms / {Program.Median(sliderLeadFrac):0.00} of duration (current: 0.15, <=70ms)");
             Console.WriteLine($"stack movement           ~ {Program.Median(stackMove):0.00} x radius (target ~0; current hold + 15% jitter)");
+
+            var lazyRatios = sliderLazy.Select(x => x.ratio).ToList();
+            var lazyDists = sliderLazy.Select(x => x.dist).ToList();
+            if (lazyRatios.Count > 0)
+            {
+                Console.WriteLine($"slider laziness (blend)  ~ {1 - Program.Median(lazyRatios):0.00}  (cursor travels {Program.Median(lazyRatios):0.00}x the ball path => cut that fraction toward the lazy line)");
+                Console.WriteLine($"slider follow radius     ~ {P(lazyDists, 0.90):0.0} x radius (p90 cursor-ball gap; osu! lazy model uses 1.8)");
+            }
             Console.WriteLine("============================================================");
         }
 

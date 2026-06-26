@@ -159,9 +159,64 @@ namespace OsuBeatmapEditor.ReplayAnalysis
 
             extractFeatures(objs, track, radius, diameter, scaling, agg);
             analyseStreams(objs, track, radius, diameter, scaling, agg);
+            analyseSliderLaziness(objs, track, radius, diameter, scaling, agg);
             frameCount = replay.Frames.Count;
             return true;
         }
+
+        /// <summary>
+        /// Measures how much the real cursor cuts each slider's path: the ratio of cursor travel to ball travel
+        /// (1 = perfect trace, lower = lazier) and how far the cursor lags the ball (x radius ~ follow-circle slack),
+        /// keyed by slider velocity. Only well-tracked sliders count (cursor inside the follow circle ~all the time).
+        /// </summary>
+        private static void analyseSliderLaziness(IReadOnlyList<HitObjectModel> objs, CursorTrack track, float radius, float diameter, float scaling, Aggregator agg)
+        {
+            foreach (var o in objs)
+            {
+                if (o.Kind != HitObjectKind.Slider || o.Path is not { Count: > 1 } || o.Duration < 60)
+                    continue;
+
+                double start = o.StartTime;
+                double dur = o.Duration;
+                double end = start + dur;
+                double step = Math.Clamp(dur / 40.0, 4, 12);
+
+                Vector2 prevBall = sliderBall(o, start, diameter);
+                Vector2 prevCur = smoothCursor(track, start);
+                double ballLen = 0, curLen = 0;
+                int tracked = 0, total = 0;
+                var dists = new List<double>();
+
+                for (double t = start; t <= end; t += step)
+                {
+                    Vector2 ball = sliderBall(o, t, diameter);
+                    Vector2 cur = smoothCursor(track, t); // light smoothing keeps tremor out of the travel length
+                    if (t > start)
+                    {
+                        ballLen += (ball - prevBall).Length;
+                        curLen += (cur - prevCur).Length;
+                    }
+                    prevBall = ball;
+                    prevCur = cur;
+
+                    double d = (track.PositionAt(t) - ball).Length;
+                    dists.Add(d / radius);
+                    total++;
+                    if (d <= radius * 2.4f)
+                        tracked++;
+                }
+
+                if (total < 4 || ballLen < radius || tracked < total * 0.8)
+                    continue;
+
+                double ratio = Math.Clamp(curLen / ballLen, 0, 2);
+                double vel = ballLen * scaling / dur; // normalised px per ms
+                agg.AddSliderLazy(vel, ratio, Median(dists));
+            }
+        }
+
+        private static Vector2 smoothCursor(CursorTrack track, double t)
+            => (track.PositionAt(t - 3) + track.PositionAt(t) + track.PositionAt(t + 3)) / 3f;
 
         /// <summary>
         /// Finds runs of ≥6 consecutive circles at near-constant small spacing/time (a stream) and measures how the
@@ -251,17 +306,23 @@ namespace OsuBeatmapEditor.ReplayAnalysis
                 if (dNorm < 30)
                     agg.AddStack(track.PathLength(from, to) / radius);
 
-                // Lateral arc: max perpendicular excursion off the straight line A->B over the gap.
-                float lateralMax = 0;
+                // Lateral arc: max perpendicular excursion off the straight line A->B over the gap (+ its sign).
+                float lateralMax = 0, signedAtApex = 0;
                 const int samples = 24;
                 for (int s = 1; s < samples; s++)
                 {
                     double t = from + (to - from) * s / samples;
                     Vector2 p = track.PositionAt(t);
-                    float lateral = Math.Abs(cross(u, p - a));
-                    if (lateral > lateralMax) lateralMax = lateral;
+                    float signed = cross(u, p - a);
+                    float lateral = Math.Abs(signed);
+                    if (lateral > lateralMax) { lateralMax = lateral; signedAtApex = signed; }
                 }
                 agg.AddArc(dNorm, lateralMax / dist);
+
+                // Handedness: which side the bow falls on, by movement direction. Only real jumps (skip tight spacing
+                // where the "bow" is really just heading to the next note).
+                if (dNorm > 60)
+                    agg.AddArcCurl(Math.Atan2(u.Y, u.X), signedAtApex / dist);
 
                 // Overshoot: furthest the cursor flies past B (along travel dir) around the moment it arrives.
                 float overMax = 0;
