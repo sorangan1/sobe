@@ -51,6 +51,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Drawable? sliderBall;
         private Drawable? followCircle;
 
+        // The slider tube. It is the ONLY per-object drawable that owns a GPU vertex buffer (it's a path); it is
+        // realized/released with the object's lifetime so off-screen sliders don't keep their geometry resident.
+        private SliderBodyPath? sliderBody;
+        private Color4 comboColour;
+
         // Reverse arrows at the slider ends; shown only while the ball is heading toward an end where a reverse
         // waits (lazer's per-repeat arrow), so the head arrow never overlaps the combo number at slider start.
         private Drawable? reverseArrowHead;
@@ -204,27 +209,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (hitObject.Kind == HitObjectKind.Slider && path is { Count: > 1 })
             {
                 buildArcLengths();
+                comboColour = combo;
 
-                // A single tube path that defines its own cross-section, a direct port of lazer's
-                // DefaultDrawableSliderPath: a white rim on the outer BORDER_PORTION of the radius, then a
-                // gradient body (brighter just inside the rim, fading toward the centre). Because it's one
-                // path the rim sits at the very outer edge with the body filling inside it - not a floating
-                // line over a flat fill.
-                var body = new SliderBodyPath
-                {
-                    PathRadius = diameter / 2f,
-                    BorderColour = Color4.White,
-                    AccentColour = combo,
-                    BodyOpacity = objectOpacity,
-                    // Rim thickness matches the hit-circle ring in osu!pixels (both = diameter·borderFactor),
-                    // so the one outline setting drives the circle and the slider body together.
-                    BorderPortion = Math.Clamp(2f * borderFactor, 0.02f, 0.9f),
-                };
-                body.Vertices = path;
-                // Align the path's local coordinate space with playfield (osu!pixel) coordinates.
-                body.Position = -body.PositionInBoundingBox(Vector2.Zero);
-
-                AddInternal(body);
+                sliderBody = buildSliderBody();
+                AddInternal(sliderBody);
 
                 // Slider ticks: small dots along the path at the tick-rate spacing (under the head/ball,
                 // over the body). Drawn once per span position - they repeat the same points each span.
@@ -275,6 +263,60 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 AddInternal(approachCircle = approach(pos, combo));
                 AddInternal(hitRing = hitExplosion(pos, combo));
                 AddInternal(flashLayer(pos));
+            }
+        }
+
+        /// <summary>
+        /// Builds the slider tube (a direct port of lazer's DefaultDrawableSliderPath: a white rim on the outer
+        /// <see cref="SliderBodyPath.BorderPortion"/> of the radius, then a gradient body filling inside it).
+        /// This is the only drawable here that owns a GPU vertex buffer, so it is created/destroyed on demand.
+        /// </summary>
+        private SliderBodyPath buildSliderBody()
+        {
+            var body = new SliderBodyPath
+            {
+                PathRadius = diameter / 2f,
+                BorderColour = Color4.White,
+                AccentColour = comboColour,
+                BodyOpacity = objectOpacity,
+                // Rim thickness matches the hit-circle ring in osu!pixels (both = diameter·borderFactor),
+                // so the one outline setting drives the circle and the slider body together.
+                BorderPortion = Math.Clamp(2f * borderFactor, 0.02f, 0.9f),
+                // Always behind the head circle / ticks / ball (which sit at depth 0).
+                Depth = 1f,
+            };
+            body.Vertices = path!;
+            // Align the path's local coordinate space with playfield (osu!pixel) coordinates.
+            body.Position = -body.PositionInBoundingBox(Vector2.Zero);
+            return body;
+        }
+
+        /// <summary>
+        /// Realizes or releases the slider body in step with the object's lifetime. The body owns a GPU vertex
+        /// buffer, so keeping every object's body resident for the whole map balloons GPU memory during playback.
+        /// The lifetime container (which already culls update/draw) disposes it when the object scrolls off and
+        /// rebuilds it when it scrolls back, bounding resident slider geometry to the visible window, like lazer.
+        /// </summary>
+        public void SetBodyRealized(bool realized)
+        {
+            if (hitObject.Kind != HitObjectKind.Slider || path is not { Count: > 1 } || !IsLoaded)
+                return;
+
+            if (realized)
+            {
+                if (sliderBody != null)
+                    return;
+
+                sliderBody = buildSliderBody();
+                AddInternal(sliderBody);
+            }
+            else
+            {
+                if (sliderBody == null)
+                    return;
+
+                RemoveInternal(sliderBody, true); // dispose frees the GPU vertex buffer
+                sliderBody = null;
             }
         }
 
