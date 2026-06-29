@@ -25,6 +25,7 @@ namespace OsuBeatmapEditor.Game.UI
 
         private Box background = null!;
         private SpriteText label = null!;
+        private Container content = null!;
 
         /// <summary>Font size of the button label.</summary>
         public float FontSize { get; init; } = 15;
@@ -56,8 +57,6 @@ namespace OsuBeatmapEditor.Game.UI
                 : accent.Equals(EditorTheme.Colours.Error) ? Kind.Danger
                 : Kind.Default;
 
-            Masking = true;
-            CornerRadius = EditorTheme.Radius.Md;
         }
 
         private Color4 idleColour => kind == Kind.Primary ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control;
@@ -111,14 +110,24 @@ namespace OsuBeatmapEditor.Game.UI
                 }
                 : label;
 
-            Children = new Drawable[]
+            // Background + content live in an inner wrapper so the hover/press scale can grow slightly past the
+            // button's layout box (the outer container isn't masked) without nudging neighbours in a row.
+            Child = this.content = new Container
             {
-                background = new Box
+                RelativeSizeAxes = Axes.Both,
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                Masking = true,
+                CornerRadius = EditorTheme.Radius.Md,
+                Children = new Drawable[]
                 {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = idleColour,
+                    background = new Box
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Colour = idleColour,
+                    },
+                    content,
                 },
-                content,
             };
 
             // Dim while disabled (ClickableContainer suppresses the Action automatically).
@@ -128,19 +137,28 @@ namespace OsuBeatmapEditor.Game.UI
         protected override bool OnHover(HoverEvent e)
         {
             background.FadeColour(hoverColour, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            content.ScaleTo(1.03f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             return base.OnHover(e);
         }
 
         protected override void OnHoverLost(HoverLostEvent e)
         {
             background.FadeColour(idleColour, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            content.ScaleTo(1f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             base.OnHoverLost(e);
         }
 
         protected override bool OnMouseDown(MouseDownEvent e)
         {
             background.FlashColour(pressColour, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            content.ScaleTo(0.96f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             return base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseUpEvent e)
+        {
+            content.ScaleTo(IsHovered ? 1.03f : 1f, EditorTheme.Motion.Normal, Easing.OutBack);
+            base.OnMouseUp(e);
         }
     }
 }

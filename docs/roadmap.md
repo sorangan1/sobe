@@ -1,7 +1,7 @@
 # Roadmap de sobe
 
 Editor de beatmaps para osu!
-Version actual: v0.9.61-beta
+Version actual: v0.9.64-beta
 
 Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 
@@ -48,6 +48,19 @@ Reescritura completa del sistema de hitsounds.
 - ✓ Invitaciones, timeline de revisiones y coloreado por autor
 - Aviso de cambios disponibles dentro del editor
 - Resolucion automatica de conflictos / merge
+
+### Modo Review (modding compartible) - 80%
+Capa de anotaciones que solo se ve dentro de sobe, exportable como archivo .sobemod.
+- ✓ Notas flotantes ancladas a tiempo y posicion, con autor y color
+- ✓ Cuatro tipos de nota (nota, praise, problem, suggestion) con icono propio
+- ✓ Herramientas Select, Note y Draw (dibujo libre con suavizado)
+- ✓ Control de duracion/inicio de cada trazo desde la timeline superior
+- ✓ Timestamps clicables dentro de las notas con preview de patron
+- ✓ Iconos en la timeline inferior cuando la nota esta fuera de tiempo
+- ✓ Guardado junto al mapa y export/import .sobemod
+- ✓ undo/redo sobre las anotaciones
+- Editor de texto multilinea propio para las notas
+- Sincronizacion de las revisiones con el backend para compartirlas online
 
 ### Rediseno estetico general - 60%
 - ✓ Barra superior y tarjeta de usuario del menu principal

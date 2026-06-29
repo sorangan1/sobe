@@ -226,8 +226,12 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
         private static (double beatLength, double sv) effectiveTiming(double time, List<TimingPoint> points)
         {
-            double beatLength = 500; // 120 BPM fallback if a map somehow has no uninherited point
-            double sv = 1;
+            // Times before the first timing point use the FIRST uninherited point's beat length, mirroring
+            // lazer's ControlPointInfo.TimingPointAt (which returns the first point as its fallback). Without
+            // this, an object even 1ms ahead of the opening red line fell back to 120 BPM (500ms), so its
+            // slider span was timed wrong (e.g. ADICTA's first slider sits at 6599, 1ms before the 6600 line).
+            double beatLength = firstBeatLength(points); // first uninherited beat length, or 500 if a map has none
+            double sv = 1;                               // SV defaults to 1 before the first inherited line (lazer)
 
             foreach (var p in points)
             {
@@ -246,6 +250,17 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             }
 
             return (beatLength, sv);
+        }
+
+        /// <summary>The first uninherited (red line) beat length, or a 120 BPM fallback if the map has none.</summary>
+        private static double firstBeatLength(List<TimingPoint> points)
+        {
+            foreach (var p in points)
+            {
+                if (p.Uninherited)
+                    return p.BeatLength;
+            }
+            return 500;
         }
 
 
@@ -413,7 +428,10 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             double spanDuration = pixelLength > 0 && sliderMultiplier > 0
                 ? pixelLength * beatLength / (sliderMultiplier * 100 * sv)
                 : 0;
-            double duration = Math.Max(60, spanDuration * slides); // floor so it stays briefly visible even if timing is odd
+            // Duration follows the timing exactly (lazer imposes no minimum); the 60ms fallback only guards the
+            // degenerate zero-length/zero-multiplier case so the object stays briefly visible.
+            double total = spanDuration * slides;
+            double duration = total > 0 ? total : 60;
 
             return (path, duration, slides);
         }

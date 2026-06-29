@@ -20,6 +20,7 @@ namespace OsuBeatmapEditor.Game.UI
     {
         private Box background = null!;
         private SpriteIcon iconSprite = null!;
+        private Container content = null!;
         private IconUsage icon;
         private string tooltip;
 
@@ -29,8 +30,6 @@ namespace OsuBeatmapEditor.Game.UI
             this.tooltip = tooltip;
             Action = onClick;
             Size = new Vector2(56);
-            Masking = true;
-            CornerRadius = EditorTheme.Radius.Md;
         }
 
         public LocalisableString TooltipText => tooltip;
@@ -47,16 +46,26 @@ namespace OsuBeatmapEditor.Game.UI
         [BackgroundDependencyLoader]
         private void load()
         {
-            Children = new Drawable[]
+            // Inner wrapper so the hover/press scale grows past the layout box (outer isn't masked) without
+            // shifting neighbouring buttons in the action row.
+            Child = content = new Container
             {
-                background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
-                iconSprite = new SpriteIcon
+                RelativeSizeAxes = Axes.Both,
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                Masking = true,
+                CornerRadius = EditorTheme.Radius.Md,
+                Children = new Drawable[]
                 {
-                    Anchor = Anchor.Centre,
-                    Origin = Anchor.Centre,
-                    Icon = icon,
-                    Size = new Vector2(20),
-                    Colour = EditorTheme.Colours.Text,
+                    background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
+                    iconSprite = new SpriteIcon
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Icon = icon,
+                        Size = new Vector2(20),
+                        Colour = EditorTheme.Colours.Text,
+                    },
                 },
             };
         }
@@ -64,10 +73,28 @@ namespace OsuBeatmapEditor.Game.UI
         protected override bool OnHover(HoverEvent e)
         {
             background.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            content.ScaleTo(1.06f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            iconSprite.ScaleTo(1.08f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             return true;
         }
 
-        protected override void OnHoverLost(HoverLostEvent e) =>
+        protected override void OnHoverLost(HoverLostEvent e)
+        {
             background.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            content.ScaleTo(1f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            iconSprite.ScaleTo(1f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+        }
+
+        protected override bool OnMouseDown(MouseDownEvent e)
+        {
+            content.ScaleTo(0.9f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            return base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseUpEvent e)
+        {
+            content.ScaleTo(IsHovered ? 1.06f : 1f, EditorTheme.Motion.Normal, Easing.OutBack);
+            base.OnMouseUp(e);
+        }
     }
 }

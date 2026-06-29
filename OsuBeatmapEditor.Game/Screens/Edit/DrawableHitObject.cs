@@ -192,6 +192,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return Vector2.Distance(p, new Vector2(hitObject.X, hitObject.Y)) <= r;
         }
 
+        /// <summary>
+        /// True if the position lies on a tappable circle of this object - a hit circle, or a slider's head/tail
+        /// node - as opposed to merely its slider body. Used to prefer circles over slider bodies when picking,
+        /// so an object tucked beneath a slider body can still be selected.
+        /// </summary>
+        public bool EndpointContains(Vector2 osuPosition)
+        {
+            float r = diameter / 2f;
+            Vector2 p = osuPosition - StackOffset;
+
+            if (hitObject.Kind == HitObjectKind.Spinner)
+                return false;
+
+            if (Vector2.Distance(p, new Vector2(hitObject.X, hitObject.Y)) <= r)
+                return true;
+
+            // Slider tail node.
+            if (hitObject.Kind == HitObjectKind.Slider && path is { Count: > 0 })
+                return Vector2.Distance(p, path[^1]) <= r;
+
+            return false;
+        }
+
         private static float pointSegmentDistance(Vector2 p, Vector2 a, Vector2 b)
         {
             Vector2 ab = b - a;

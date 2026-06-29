@@ -76,6 +76,34 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private readonly HitObjectLifetimeContainer hitObjectContainer;
         private readonly Container selectionLayer;
         private readonly Container overlayLayer;
+        private readonly AnnotationLayer annotationLayer;
+        private readonly Container annotationHighlightLayer;
+        // Persistent per-object highlight groups (so their alpha can be eased in sync with the note's fade rather
+        // than rebuilt on/off); rebuilt only when the set of highlighted objects or their colours changes.
+        private readonly Dictionary<int, Container> annotationHighlightGroups = new Dictionary<int, Container>();
+        private string annotationHighlightSig = "";
+
+        /// <summary>When true, the playfield is in Review mode: object editing is suppressed and clicks drop notes.</summary>
+        public bool ReviewMode;
+
+        /// <summary>The active Review tool (Select / Note / Line), driving what a playfield click does in Review mode.</summary>
+        public ReviewTool ReviewTool;
+
+        /// <summary>Raised when a click in Review mode should create a note at the given osu!pixel position.</summary>
+        public Action<Vector2>? OnReviewCreateNote;
+
+        /// <summary>Raised when a freehand Draw stroke is finished: the smoothed osu!pixel path.</summary>
+        public Action<IReadOnlyList<Vector2>>? OnReviewCreateStroke;
+
+        /// <summary>Supplies the modder's current colour, for the live draw preview.</summary>
+        public Func<Color4>? ReviewLineColour;
+
+        private bool drawingStroke;
+        private readonly List<Vector2> strokePoints = new List<Vector2>();
+        private SmoothPath? strokePreview;
+
+        /// <summary>The modding-annotation overlay (notes), driven by the editor's Review layer.</summary>
+        public AnnotationLayer Annotations => annotationLayer;
         private CircularContainer placementPreview = null!;
         private Box placementFill = null!;
         private SpriteText placementNumber = null!;
@@ -210,10 +238,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     // objects are realised/updated/drawn (like lazer's HitObjectContainer).
                     followPointContainer = new HitObjectLifetimeContainer { RelativeSizeAxes = Axes.Both },
                     hitObjectContainer = new HitObjectLifetimeContainer { RelativeSizeAxes = Axes.Both },
+                    // Review-mode highlights: outlines (in the note author's colour) of the objects a shown note refers to.
+                    annotationHighlightLayer = new Container { RelativeSizeAxes = Axes.Both },
                     // Persistent yellow selection outlines (always visible, independent of object fade).
                     selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
                     // Placement preview + rubber-band box.
                     overlayLayer = new Container { RelativeSizeAxes = Axes.Both, Child = buildPlacementPreview() },
+                    // Review-mode modding annotations (notes), above the objects/selection but below the AU cursor.
+                    annotationLayer = new AnnotationLayer { TimeSource = () => TimeSource?.Invoke() ?? 0 },
                     // Auto-mod preview cursor, on top of everything (osu!pixel space = the play area itself).
                     autoCursor = new AutoCursor { PositionSource = autoCursorPosition },
                 },
@@ -228,6 +260,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             selection.Changed += updateSelection;
             nodeSelection.Changed += updateSelection;
+
+            // Review notes drive the highlight outlines of the objects they reference.
+            annotationLayer.OnHighlightsChanged = SetAnnotationHighlights;
 
             // Rebuild all objects live when the relevant appearance settings change.
             settings.ObjectBackgroundOpacity.ValueChanged += _ => rebuildAppearance();
@@ -858,16 +893,33 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             return t >= o.StartTime - lastPreempt && t <= end + settings.ObjectFadeOut.Value;
         }
 
-        /// <summary>The top-most currently-visible object under an osu!pixel position, or null.</summary>
+        /// <summary>
+        /// The best currently-visible object to pick under an osu!pixel position, or null. Picking is tiered so
+        /// the obvious target wins: (1) an already-selected object under the cursor keeps priority - so you can
+        /// grab and move it even when another object sits on top; (2) an object whose head/tail circle is under
+        /// the cursor beats a mere slider body - so a note tucked beneath a slider body is still selectable;
+        /// (3) otherwise a plain body hit (slider path / spinner).
+        /// </summary>
         private DrawableHitObject? hittableAt(Vector2 osuPosition)
         {
+            DrawableHitObject? selectedHit = null;
+            DrawableHitObject? endpointHit = null;
+            DrawableHitObject? bodyHit = null;
+
             for (int i = objects.Count - 1; i >= 0; i--)
             {
-                if (objects[i].IsHittable && objects[i].BodyContains(osuPosition))
-                    return objects[i];
+                var o = objects[i];
+                if (!o.IsHittable || !o.BodyContains(osuPosition))
+                    continue;
+
+                if (selectedHit == null && selection.Contains(o.Id))
+                    selectedHit = o;
+                if (endpointHit == null && o.EndpointContains(osuPosition))
+                    endpointHit = o;
+                bodyHit ??= o;
             }
 
-            return null;
+            return selectedHit ?? endpointHit ?? bodyHit;
         }
 
         protected override bool OnMouseDown(MouseDownEvent e)
@@ -914,6 +966,29 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override bool OnClick(ClickEvent e)
         {
+            // Review mode: clicking an object toggles it into the selection (so it can be attached to a note's
+            // timestamp). On empty space the Note tool drops a note referencing the selection; the Select tool just
+            // clears it (Line is handled via drag, later). Clicks on a note are consumed by the note itself.
+            if (ReviewMode)
+            {
+                Vector2 reviewPos = playArea.ToLocalSpace(e.ScreenSpaceMousePosition);
+                var hitObj = hittableAt(reviewPos);
+                if (hitObj != null)
+                {
+                    selection.Toggle(hitObj.Id);
+                    nodeSelection.Clear();
+                }
+                else if (ReviewTool == ReviewTool.Note && insidePlayfield(reviewPos))
+                {
+                    OnReviewCreateNote?.Invoke(reviewPos);
+                }
+                else
+                {
+                    selection.Clear();
+                }
+                return true;
+            }
+
             // Slider tool: each left-click drops an anchor; a quick double-click turns the last one into a
             // sharp corner (red anchor), matching osu!lazer.
             if (SliderPlacementActive)
@@ -990,6 +1065,24 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             if (e.Button != MouseButton.Left)
                 return false;
 
+            // Review mode: the Draw tool drags out a freehand stroke; other tools don't drag (notes drag themselves).
+            if (ReviewMode)
+            {
+                if (ReviewTool == ReviewTool.Draw)
+                {
+                    strokePoints.Clear();
+                    strokePoints.Add(clampToPlayfield(playArea.ToLocalSpace(e.ScreenSpaceMouseDownPosition)));
+                    drawingStroke = true;
+                    overlayLayer.Add(strokePreview = new SmoothPath
+                    {
+                        PathRadius = 1.6f,
+                        Colour = ReviewLineColour?.Invoke() ?? Color4.White,
+                    });
+                    return true;
+                }
+                return false;
+            }
+
             // Slider tool: consume drags so they don't box-select; the anchor is added on release.
             if (SliderPlacementActive)
                 return true;
@@ -1035,6 +1128,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             Vector2 pos = playArea.ToLocalSpace(e.ScreenSpaceMousePosition);
 
+            if (drawingStroke && strokePreview != null)
+            {
+                Vector2 p = clampToPlayfield(pos);
+                if (strokePoints.Count == 0 || (p - strokePoints[^1]).LengthSquared >= 4f)
+                    strokePoints.Add(p);
+                if (strokePoints.Count >= 2)
+                {
+                    strokePreview.Vertices = strokePoints.ToArray();
+                    strokePreview.Position = -strokePreview.PositionInBoundingBox(Vector2.Zero);
+                }
+                return;
+            }
+
             if (SliderPlacementActive)
                 return; // preview tracks the cursor in Update(); the anchor commits on release
             if (moving)
@@ -1045,7 +1151,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void OnDragEnd(DragEndEvent e)
         {
-            if (SliderPlacementActive)
+            if (drawingStroke)
+            {
+                drawingStroke = false;
+                Vector2 end = clampToPlayfield(playArea.ToLocalSpace(e.ScreenSpaceMousePosition));
+                if (strokePoints.Count == 0 || (end - strokePoints[^1]).LengthSquared > 0.01f)
+                    strokePoints.Add(end);
+                strokePreview?.Expire();
+                strokePreview = null;
+
+                if (strokePoints.Count >= 2)
+                    OnReviewCreateStroke?.Invoke(StrokeSmoothing.Smooth(strokePoints));
+                strokePoints.Clear();
+            }
+            else if (SliderPlacementActive)
             {
                 addSliderAnchor(playArea.ToLocalSpace(e.ScreenSpaceMousePosition));
             }
@@ -1493,7 +1612,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             controlPoints?.Expire();
             controlPoints = null;
 
-            if (PlacementActive || SliderPlacementActive || selection.Selected.Count != 1)
+            // No slider-anchor editing while reviewing (selection there is only for attaching a note timestamp).
+            if (PlacementActive || SliderPlacementActive || ReviewMode || selection.Selected.Count != 1)
                 return;
 
             int id = selection.Selected.First();
@@ -1540,8 +1660,75 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Masking = true,
             BorderThickness = Math.Max(2.5f, currentDiameter * 0.06f),
             BorderColour = colour,
+            // A very soft glow so the selection reads as "lit" without a hard halo.
+            EdgeEffect = new osu.Framework.Graphics.Effects.EdgeEffectParameters
+            {
+                Type = osu.Framework.Graphics.Effects.EdgeEffectType.Glow,
+                Colour = new Color4(colour.R, colour.G, colour.B, 0.22f),
+                Radius = Math.Max(5f, currentDiameter * 0.13f),
+            },
             Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.Transparent, AlwaysPresent = true },
         };
+
+        /// <summary>
+        /// Draws Review-mode highlight outlines (in each note author's colour) around the hit objects a shown note
+        /// refers to - the same ring/body treatment as selection, so it reads as "these objects are what I mean".
+        /// Called every frame: the object/colour set only rebuilds when it changes, while each group's alpha is set
+        /// to the note's current fade so the highlight eases in/out together with the note instead of snapping.
+        /// </summary>
+        public void SetAnnotationHighlights(Dictionary<int, (Colour4 colour, float alpha)> highlights)
+        {
+            // Signature of which objects + colours are highlighted (order-independent): rebuild only when it changes.
+            string sig = "";
+            if (highlights.Count > 0)
+            {
+                var parts = new System.Collections.Generic.List<string>(highlights.Count);
+                foreach (var (id, hl) in highlights)
+                    parts.Add($"{id}:{hl.colour.ToHex()}");
+                parts.Sort();
+                sig = string.Join("|", parts);
+            }
+
+            if (sig != annotationHighlightSig)
+            {
+                annotationHighlightSig = sig;
+                annotationHighlightLayer.Clear();
+                annotationHighlightGroups.Clear();
+
+                foreach (var o in currentHitObjects)
+                {
+                    if (!highlights.TryGetValue(o.Id, out var hl))
+                        continue;
+
+                    Color4 c = new Color4(hl.colour.R, hl.colour.G, hl.colour.B, 1f);
+                    Vector2 stack = DrawableHitObject.StackOffsetFor(o.StackHeight, currentDiameter);
+                    var group = new Container { RelativeSizeAxes = Axes.Both };
+
+                    if (o.Kind == HitObjectKind.Slider && o.Path is { Count: > 1 })
+                    {
+                        var body = new SmoothPath
+                        {
+                            PathRadius = currentDiameter / 2f,
+                            Colour = new Color4(c.R, c.G, c.B, 0.25f),
+                        };
+                        body.Vertices = o.Path;
+                        body.Position = stack - body.PositionInBoundingBox(Vector2.Zero);
+                        group.Add(body);
+                    }
+
+                    group.Add(selectionRing(startPosition(o) + stack, c));
+                    if (o.Kind == HitObjectKind.Slider)
+                        group.Add(selectionRing(endPosition(o) + stack, c));
+
+                    annotationHighlightGroups[o.Id] = group;
+                    annotationHighlightLayer.Add(group);
+                }
+            }
+
+            // Drive each group's alpha from its note's current fade (no rebuild) so they fade in sync.
+            foreach (var (id, group) in annotationHighlightGroups)
+                group.Alpha = highlights.TryGetValue(id, out var hl) ? hl.alpha : 0f;
+        }
 
         /// <summary>
         /// Connects consecutive objects within the same combo (osu! draws no follow point across a new

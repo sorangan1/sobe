@@ -154,7 +154,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private double distanceSpacing = 1.0;
 
         /// <summary>An undo snapshot of the editable map state (objects + timing points).</summary>
-        private sealed record Snapshot(List<HitObjectModel> Objects, List<TimingPointModel> TimingPoints);
+        private sealed record Snapshot(List<HitObjectModel> Objects, List<TimingPointModel> TimingPoints, List<Annotations.Annotation> Annotations);
 
         private readonly Stack<Snapshot> undoStack = new Stack<Snapshot>();
         private readonly Stack<Snapshot> redoStack = new Stack<Snapshot>();
@@ -197,6 +197,25 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Modding Mode: review the beatmap's osu! discussion ("mod") entries. Discussion bubbles appear on the
         // top timeline; filters sit on the left, messages on the right; HD/HR are forced off (Auto-only).
         private readonly BindableBool moddingMode = new BindableBool();
+
+        // Review mode: the editor-only, shareable modding-annotation layer (notes/lines, persisted per difficulty
+        // and exportable as a .sobemod file). State + the in-memory document + its local store.
+        private readonly BindableBool reviewMode = new BindableBool();
+        private Annotations.AnnotationDocument reviewDoc = new Annotations.AnnotationDocument();
+        private Annotations.AnnotationStore reviewStore = null!;
+        private ReviewToolbar reviewToolbar = null!;
+        private ReviewToolPanel reviewToolPanel = null!;
+        private NoteEditPopover noteEditPopover = null!;
+        private Container patternPreviewBox = null!;
+        private Container patternPreviewContent = null!;
+        private FillFlowContainer reviewLeftPanel = null!;
+        private ReviewTool reviewTool = ReviewTool.Select;
+        // Default visible span of a freshly-drawn stroke (ms); the modder retimes it on the top timeline.
+        private const double default_stroke_duration_ms = 1000;
+        // A note being created isn't added to the document until its text is committed, so creation is one atomic
+        // (undoable) step and cancelling leaves nothing behind.
+        private Annotations.Annotation? pendingNewNote;
+        private Action<string>? reviewDragDropHandler;
         private ModToggleButton hiddenButton = null!;
         private ModToggleButton hardRockButton = null!;
         private ModToggleButton easyButton = null!;
@@ -508,8 +527,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         },
                     },
                 },
-                // Patterns + Modding moved to the bottom bar (bottom-left, right of the background-dim wheel) so they
-                // no longer flank the top timeline / hitsound lanes.
+                // Compact icon row in the bottom-left (right of the background-dim wheel): Patterns gallery + the
+                // Modding / Review mode toggles. Icons (not wide text chips) so they stay clear of the playfield.
                 new FillFlowContainer
                 {
                     Anchor = Anchor.BottomLeft,
@@ -520,14 +539,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     Spacing = new Vector2(6, 0),
                     Children = new Drawable[]
                     {
-                        new OsuButton("Patterns", OsuColour.Surface)
+                        new IconBarButton(FontAwesome.Solid.Shapes, $"Pattern gallery ({Shortcut.CommandName}+Shift+P)", () => patternGallery.ToggleVisibility())
                         {
-                            Size = new Vector2(80, 26),
-                            FontSize = 12,
-                            CornerRadius = 5,
-                            Action = () => patternGallery.ToggleVisibility(),
+                            Size = new Vector2(30),
                         },
-                        new ModdingModeButton(moddingMode, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
+                        new IconToggleButton(moddingMode, FontAwesome.Solid.Comments, $"Modding mode ({Shortcut.CommandName}+Shift+M) - review the map's osu! discussions"),
+                        new IconToggleButton(reviewMode, FontAwesome.Regular.StickyNote, $"Review mode ({Shortcut.CommandName}+Shift+A) - draw notes/annotations only visible in this editor, shareable as a .sobemod file"),
                     },
                 },
                 bottomTimeline = new EditorTimeline(track, parsed, () => VisualTime, rightInset: PlaybackControl.WIDTH) { Anchor = Anchor.BottomLeft, Origin = Anchor.BottomLeft },
@@ -682,6 +699,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         X = modding_panel_width, // start fully off the right edge
                     },
                 },
+                // Review mode: tool box + identity/export controls, docked on the LEFT (where the compose tools sit),
+                // shown only while reviewing so it doesn't cover the playfield.
+                reviewLeftPanel = new FillFlowContainer
+                {
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.CentreLeft,
+                    Margin = new MarginPadding { Left = 12 },
+                    AutoSizeAxes = Axes.Both,
+                    Direction = FillDirection.Vertical,
+                    Spacing = new Vector2(0, EditorTheme.Spacing.Md),
+                    Alpha = 0,
+                    Children = new Drawable[]
+                    {
+                        reviewToolPanel = new ReviewToolPanel { ToolSelected = applyReviewTool },
+                        reviewToolbar = new ReviewToolbar(settings.ReviewAuthorName, settings.ReviewAuthorColour, settings.ReviewShowAlways, loggedInModderName())
+                        {
+                            OnExport = exportReviewLayer,
+                            OnImport = importReviewLayerPrompt,
+                        },
+                    },
+                },
                 leftPanels = new FillFlowContainer
                 {
                     Anchor = Anchor.CentreLeft,
@@ -714,6 +752,27 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 rotationPopover = new RotationPopover
                 {
                     OnRotate = (degrees, aroundPlayfield) => RotateSelectionBy(degrees, aroundPlayfield),
+                },
+                noteEditPopover = new NoteEditPopover
+                {
+                    OnSaved = onNoteSaved,
+                    OnDeleted = onNoteDeleted,
+                },
+                // Hover-preview for inline timestamps in note text: a small black box showing the referenced pattern.
+                patternPreviewBox = new Container
+                {
+                    Size = new Vector2(172, 132),
+                    Origin = Anchor.BottomCentre,
+                    Masking = true,
+                    CornerRadius = EditorTheme.Radius.Md,
+                    BorderThickness = 1.5f,
+                    BorderColour = EditorTheme.Colours.Accent,
+                    Alpha = 0,
+                    Children = new Drawable[]
+                    {
+                        new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.Black },
+                        patternPreviewContent = new Container { RelativeSizeAxes = Axes.Both, Padding = new MarginPadding(8) },
+                    },
                 },
                 exportMenu = new ExportMenu
                 {
@@ -888,6 +947,473 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             topTimeline.ModBubbleClicked = SeekTo;
             // Selecting an object in the timeline switches back to the select tool.
             topTimeline.ObjectSelectedHere = () => applyTool(EditorTool.Selection);
+
+            setupReviewLayer(host);
+        }
+
+        // --- Review mode (modding-annotation layer) ---
+
+        /// <summary>Initialises the Review layer: load the saved annotations for this difficulty and wire the playfield + drag-import.</summary>
+        private void setupReviewLayer(GameHost host)
+        {
+            reviewStore = new Annotations.AnnotationStore(host.Storage);
+            reviewDoc = reviewStore.LoadLocal(reviewKey) ?? new Annotations.AnnotationDocument
+            {
+                OsuFileHash = difficulty.OsuFileHash,
+                SetOnlineId = set.OnlineID,
+                Difficulty = difficulty.DifficultyName,
+                Title = set.Title,
+                Artist = set.Artist,
+            };
+
+            playfield.OnReviewCreateNote = createNoteAt;
+            playfield.OnReviewCreateStroke = createReviewStroke;
+            playfield.ReviewLineColour = () => toColor4(settings.ReviewAuthorColour.Value);
+            playfield.Annotations.NoteActivated = a => noteEditPopover.OpenFor(a, isNew: false);
+            playfield.Annotations.NoteMoveStart = pushUndo;
+            playfield.Annotations.NoteMoved = _ => editable.IsDirty.Value = true;
+            playfield.Annotations.LineClicked = onLineClicked;
+            playfield.Annotations.OnTimestampActivated = onTimestampActivated;
+            playfield.Annotations.OnTextTimestampActivated = onTextTimestampActivated;
+            playfield.Annotations.OnTextTimestampHover = showPatternPreview;
+            playfield.Annotations.OnTextTimestampHoverLost = hidePatternPreview;
+            playfield.Annotations.TimestampFormatter = formatTimestamp;
+            refreshAnnotations();
+
+            reviewMode.BindValueChanged(v => onReviewModeChanged(v.NewValue));
+            // The "show always" toggle keeps notes visible on the playfield when not reviewing.
+            settings.ReviewShowAlways.BindValueChanged(_ => applyAnnotationVisibility(), true);
+
+            // One colour per modder: changing it recolours this modder's existing notes live (others' notes keep theirs).
+            settings.ReviewAuthorColour.BindValueChanged(c =>
+            {
+                string me = reviewAuthorName();
+                string hex = c.NewValue.ToHex();
+                bool changed = false;
+                foreach (var a in reviewDoc.Annotations)
+                {
+                    if (a.Author == me && a.Color != hex)
+                    {
+                        a.Color = hex;
+                        changed = true;
+                    }
+                }
+                if (changed)
+                {
+                    refreshAnnotations();
+                    editable.IsDirty.Value = true;
+                }
+            });
+
+            // Dropping a .sobemod file onto the editor window imports/merges it.
+            if (host.Window != null)
+            {
+                reviewDragDropHandler = path => Schedule(() => onReviewFileDropped(path));
+                host.Window.DragDrop += reviewDragDropHandler;
+            }
+        }
+
+        /// <summary>A stable key for this difficulty's local Review layer (survives saves that re-hash the .osu).</summary>
+        private string reviewKey => Annotations.AnnotationStore.KeyFor(set.Identity, difficulty.DifficultyName);
+
+        /// <summary>An osu!-style timestamp for a note: <c>mm:ss:fff (1,2,3)</c>, the numbers being the referenced objects' combo numbers in time order.</summary>
+        private string formatTimestamp(double time, System.Collections.Generic.List<int>? objects)
+        {
+            var t = TimeSpan.FromMilliseconds(Math.Max(0, time));
+            string ts = $"{(int)t.TotalMinutes:00}:{t.Seconds:00}:{t.Milliseconds:000}";
+
+            if (objects is { Count: > 0 })
+            {
+                var combos = objects
+                    .Select(id => parsed.HitObjects.FirstOrDefault(o => o.Id == id))
+                    .Where(o => o.Id >= 0)
+                    .OrderBy(o => o.StartTime)
+                    .Select(o => o.ComboNumber)
+                    .ToList();
+                if (combos.Count > 0)
+                    ts += $" ({string.Join(",", combos)})";
+            }
+
+            return ts;
+        }
+
+        /// <summary>Pushes the document's annotations to the playfield layer and the bottom-timeline markers.</summary>
+        private void refreshAnnotations()
+        {
+            playfield.Annotations.SetAnnotations(reviewDoc.Annotations);
+
+            var markers = new System.Collections.Generic.List<(double, Colour4, osu.Framework.Graphics.Sprites.IconUsage)>();
+            var ranges = new System.Collections.Generic.List<(string, double, double, Colour4)>();
+            foreach (var a in reviewDoc.Annotations)
+            {
+                Colour4 colour;
+                try { colour = Colour4.FromHex(a.Color); } catch { colour = EditorTheme.Colours.Accent; }
+
+                if (a.Kind == Annotations.Annotation.KindNote)
+                {
+                    markers.Add((a.Time, colour, ReviewIcons.For(a.Type)));
+                }
+                else // shape / stroke (freehand Draw)
+                {
+                    markers.Add((a.Time, colour, osu.Framework.Graphics.Sprites.FontAwesome.Solid.PenNib));
+                    // Only show the (interactive) time-range bars while reviewing, so they don't clutter editing.
+                    if (reviewMode.Value)
+                        ranges.Add((a.Id, a.Time, a.EndTime ?? a.Time + default_stroke_duration_ms, colour));
+                }
+            }
+            bottomTimeline.SetAnnotationMarkers(markers, SeekTo);
+            topTimeline.SetStrokeRanges(ranges, onStrokeRangeBegin, onStrokeRangeChanged, onStrokeRangeCommit, onStrokeRangeDelete);
+        }
+
+        /// <summary>Right-clicking a stroke's range bar on the top timeline removes the stroke.</summary>
+        private void onStrokeRangeDelete(string id)
+        {
+            var a = reviewDoc.Annotations.Find(x => x.Id == id);
+            if (a != null)
+                onLineClicked(a);
+        }
+
+        private void onStrokeRangeBegin() => pushUndo();
+
+        /// <summary>Live update while dragging a stroke's range bar on the top timeline (no rebuild, so the drag stays smooth).</summary>
+        private void onStrokeRangeChanged(string id, double start, double end)
+        {
+            var a = reviewDoc.Annotations.Find(x => x.Id == id);
+            if (a == null)
+                return;
+            a.Time = Math.Round(Math.Max(0, start));
+            a.EndTime = Math.Round(Math.Max(a.Time + 50, end));
+            editable.IsDirty.Value = true;
+        }
+
+        /// <summary>Commits a stroke-range drag: resync the markers/bars from the model.</summary>
+        private void onStrokeRangeCommit() => refreshAnnotations();
+
+        private void onReviewModeChanged(bool on)
+        {
+            // Auto-only (same as Modding mode): mod-preview toggles off + disabled while reviewing.
+            if (on)
+            {
+                hardRockMod.Value = false;
+                hiddenMod.Value = false;
+                easyMod.Value = false;
+                rateMod.Value = RateMod.Off;
+                applyTool(EditorTool.Selection); // drop any composing tool; clicks now drop notes
+            }
+            hardRockButton.SetEnabled(!on);
+            hiddenButton.SetEnabled(!on);
+            easyButton.SetEnabled(!on);
+            rateModButton.SetEnabled(!on);
+
+            playfield.ReviewMode = on;
+            if (on)
+                applyReviewTool(reviewTool); // re-assert the active review tool on entry
+            // The object selection is shared between normal and Review mode (so a Select-then-review flow keeps it).
+            reviewLeftPanel.FadeTo(on ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            bottomTimeline.SetReviewMode(on);
+            applyAnnotationVisibility();
+            refreshAnnotations(); // show/hide the stroke time-range bars on the top timeline
+            updateLeftChrome();
+        }
+
+        /// <summary>Switches the active Review tool (Select / Note / Line) and reflects it on the playfield + panel.</summary>
+        private void applyReviewTool(ReviewTool tool)
+        {
+            reviewTool = tool;
+            playfield.ReviewTool = tool;
+            reviewToolPanel.SetActive(tool);
+            // The object selection is kept across tool switches so a Select-then-Note flow can attach a timestamp.
+        }
+
+        /// <summary>Shows the playfield notes when reviewing (editable) or when the "show always" toggle is on (read-only).</summary>
+        private void applyAnnotationVisibility()
+        {
+            bool show = reviewMode.Value || settings.ReviewShowAlways.Value;
+            playfield.Annotations.Active = show;
+            playfield.Annotations.Editable = reviewMode.Value;
+            playfield.Annotations.FadeTo(show ? 1 : 0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+        }
+
+        /// <summary>Creates a note at the clicked playfield position and opens the editor to type its text.</summary>
+        private void createNoteAt(Vector2 osuPosition)
+        {
+            // Capture any objects the modder selected as the note's timestamp reference, then clear the selection.
+            var refs = selection.Selected.Count > 0 ? new System.Collections.Generic.List<int>(selection.Selected) : null;
+
+            var note = new Annotations.Annotation
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Kind = Annotations.Annotation.KindNote,
+                Time = Math.Round(CurrentTime),
+                X = osuPosition.X,
+                Y = osuPosition.Y,
+                Author = reviewAuthorName(),
+                Color = settings.ReviewAuthorColour.Value.ToHex(),
+                Objects = refs,
+            };
+            // Held provisionally; only added to the document (as one undo step) once its text is committed.
+            pendingNewNote = note;
+            selection.Clear();
+            noteEditPopover.OpenFor(note, isNew: true);
+        }
+
+        /// <summary>The logged-in osu! username, or null when offline (so the modder identity can be edited).</summary>
+        private string? loggedInModderName()
+            => auth?.IsLoggedIn == true && !string.IsNullOrWhiteSpace(auth.User.Value?.Username)
+                ? auth!.User.Value!.Username
+                : null;
+
+        private string reviewAuthorName()
+        {
+            // Logged in: always the osu! account name (not editable). Offline: the typed Review name, else the
+            // mapper name from settings, else a placeholder.
+            string? locked = loggedInModderName();
+            if (locked != null)
+                return locked;
+
+            string name = settings.ReviewAuthorName.Value.Trim();
+            if (name.Length > 0)
+                return name;
+            name = settings.DefaultCreator.Value.Trim();
+            return name.Length > 0 ? name : "Anon";
+        }
+
+        private void onNoteSaved(Annotations.Annotation note, string text, string type)
+        {
+            text = text.Trim();
+            if (text.Length == 0)
+            {
+                onNoteDeleted(note); // an empty note is discarded (new) or removed (existing)
+                return;
+            }
+
+            bool isNew = note == pendingNewNote;
+
+            // Snapshot BEFORE mutating/adding so a single Ctrl+Z reverts the whole create/edit.
+            pushUndo();
+            note.Text = text;
+            note.Type = type;
+            note.Author = reviewAuthorName();
+            note.Color = settings.ReviewAuthorColour.Value.ToHex();
+
+            if (isNew)
+            {
+                reviewDoc.Annotations.Add(note);
+                pendingNewNote = null;
+            }
+
+            refreshAnnotations();
+            editable.IsDirty.Value = true;
+        }
+
+        private void onNoteDeleted(Annotations.Annotation note)
+        {
+            // A provisional (never-added) note just gets dropped - no undo step needed.
+            if (note == pendingNewNote)
+            {
+                pendingNewNote = null;
+                refreshAnnotations();
+                return;
+            }
+
+            pushUndo();
+            reviewDoc.Annotations.RemoveAll(a => a.Id == note.Id);
+            refreshAnnotations();
+            editable.IsDirty.Value = true;
+        }
+
+        /// <summary>Creates a static freehand stroke from a Draw-tool gesture, visible across a time range you can tune on the top timeline.</summary>
+        private void createReviewStroke(System.Collections.Generic.IReadOnlyList<Vector2> points)
+        {
+            var pts = new System.Collections.Generic.List<float[]>(points.Count);
+            foreach (var p in points)
+                pts.Add(new[] { p.X, p.Y });
+
+            double start = Math.Round(CurrentTime);
+            var stroke = new Annotations.Annotation
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Kind = Annotations.Annotation.KindShape,
+                Time = start,
+                EndTime = start + default_stroke_duration_ms,
+                X = points[0].X,
+                Y = points[0].Y,
+                Author = reviewAuthorName(),
+                Color = settings.ReviewAuthorColour.Value.ToHex(),
+                Points = pts,
+                Thickness = 3f,
+            };
+            pushUndo();
+            reviewDoc.Annotations.Add(stroke);
+            refreshAnnotations();
+            editable.IsDirty.Value = true;
+        }
+
+        /// <summary>Clicking a stroke in Review mode removes it.</summary>
+        private void onLineClicked(Annotations.Annotation stroke)
+        {
+            pushUndo();
+            reviewDoc.Annotations.RemoveAll(a => a.Id == stroke.Id);
+            refreshAnnotations();
+            editable.IsDirty.Value = true;
+            toasts?.Push("Stroke removed", EditorTheme.Colours.TextMuted);
+        }
+
+        // --- Timestamp navigation: clicking a note's timestamp seeks there and briefly selects its objects ---
+
+        private long selectFlashToken;
+
+        /// <summary>Selects the given objects, then clears the selection after a short beat (a visual "here it is" flash).</summary>
+        private void flashSelectObjects(System.Collections.Generic.IReadOnlyCollection<int> ids)
+        {
+            if (ids.Count == 0)
+                return;
+
+            selection.SetRange(new System.Collections.Generic.HashSet<int>(ids));
+            long token = ++selectFlashToken;
+            Scheduler.AddDelayed(() =>
+            {
+                if (token == selectFlashToken)
+                    selection.Clear();
+            }, 1300);
+        }
+
+        /// <summary>A note's own timestamp chip: seek to it and flash-select the objects it references.</summary>
+        private void onTimestampActivated(Annotations.Annotation a)
+        {
+            SeekTo(a.Time);
+            if (a.Objects != null)
+                flashSelectObjects(a.Objects);
+        }
+
+        /// <summary>An inline timestamp in note text: seek to its time and flash-select the objects with those combo numbers.</summary>
+        private void onTextTimestampActivated(double time, System.Collections.Generic.List<int> combos)
+        {
+            SeekTo(time);
+            flashSelectObjects(resolveComboObjects(time, combos));
+        }
+
+        /// <summary>Hovering an inline timestamp: pop a small black box previewing the objects it points at.</summary>
+        private void showPatternPreview(double time, System.Collections.Generic.List<int> combos, Vector2 screenPos)
+        {
+            var objs = new System.Collections.Generic.List<HitObjectModel>();
+            foreach (int id in resolveComboObjects(time, combos))
+            {
+                var o = parsed.HitObjects.Find(x => x.Id == id);
+                if (o.Id >= 0)
+                    objs.Add(o);
+            }
+
+            if (objs.Count == 0)
+            {
+                hidePatternPreview();
+                return;
+            }
+
+            patternPreviewContent.Clear();
+            patternPreviewContent.Add(new UI.PatternPreview(objs) { RelativeSizeAxes = Axes.Both });
+
+            // Sit the box just above the hovered timestamp.
+            Vector2 local = ToLocalSpace(screenPos);
+            patternPreviewBox.Position = new Vector2(local.X, local.Y - 6);
+            patternPreviewBox.Alpha = 1;
+        }
+
+        private void hidePatternPreview()
+        {
+            patternPreviewBox.Alpha = 0;
+            patternPreviewContent.Clear();
+        }
+
+        /// <summary>Resolves combo numbers near a time to object ids (the first forward object per requested combo number).</summary>
+        private System.Collections.Generic.List<int> resolveComboObjects(double time, System.Collections.Generic.List<int> combos)
+        {
+            var result = new System.Collections.Generic.List<int>();
+            if (combos.Count == 0 || parsed.HitObjects.Count == 0)
+                return result;
+
+            // parsed.HitObjects is kept time-sorted; start from the object nearest the timestamp time.
+            int start = 0;
+            double best = double.MaxValue;
+            for (int i = 0; i < parsed.HitObjects.Count; i++)
+            {
+                double d = Math.Abs(parsed.HitObjects[i].StartTime - time);
+                if (d < best) { best = d; start = i; }
+            }
+
+            var need = new System.Collections.Generic.HashSet<int>(combos);
+            for (int i = start; i < parsed.HitObjects.Count && need.Count > 0; i++)
+            {
+                if (need.Remove(parsed.HitObjects[i].ComboNumber))
+                    result.Add(parsed.HitObjects[i].Id);
+            }
+            return result;
+        }
+
+        /// <summary>Saves the Review layer locally (called from the map save). No-op when there's nothing to keep.</summary>
+        private void saveReviewLayer()
+        {
+            reviewDoc.OsuFileHash = difficulty.OsuFileHash;
+            reviewDoc.SetOnlineId = set.OnlineID;
+            reviewDoc.Difficulty = difficulty.DifficultyName;
+            reviewDoc.Title = set.Title;
+            reviewDoc.Artist = set.Artist;
+            reviewDoc.Author = reviewAuthorName();
+            reviewDoc.AuthorColor = settings.ReviewAuthorColour.Value.ToHex();
+            reviewStore.SaveLocal(reviewKey, reviewDoc);
+        }
+
+        /// <summary>Exports the Review layer to a shareable .sobemod file and reveals it.</summary>
+        private void exportReviewLayer()
+        {
+            if (reviewDoc.Annotations.Count == 0)
+            {
+                toasts?.Push("Nothing to export - add some notes first", EditorTheme.Colours.Warning);
+                return;
+            }
+
+            saveReviewLayer();
+            string exportsDir = host.Storage.GetFullPath("exports");
+            string name = $"{set.Artist} - {set.Title} [{difficulty.DifficultyName}] {reviewAuthorName()}";
+            string? path = Annotations.AnnotationStore.ExportToFile(reviewDoc, exportsDir, name);
+            if (path != null)
+            {
+                toasts?.Push($"Exported {System.IO.Path.GetFileName(path)}", EditorTheme.Colours.Success);
+                host.PresentFileExternally(path);
+            }
+            else
+            {
+                toasts?.Push("Export failed", EditorTheme.Colours.Error);
+            }
+        }
+
+        private void importReviewLayerPrompt()
+            => toasts?.Push("Drag a .sobemod file onto the window to import it", EditorTheme.Colours.Info);
+
+        private void onReviewFileDropped(string path)
+        {
+            if (!this.IsCurrentScreen() || System.IO.Path.GetExtension(path).ToLowerInvariant() != Annotations.AnnotationStore.FileExtension)
+                return;
+
+            var imported = Annotations.AnnotationStore.ImportFromFile(path);
+            if (imported == null)
+            {
+                toasts?.Push("Couldn't read that .sobemod file", EditorTheme.Colours.Error);
+                return;
+            }
+
+            pushUndo();
+            int added = reviewDoc.Merge(imported);
+            refreshAnnotations();
+            editable.IsDirty.Value = true;
+
+            if (!reviewMode.Value)
+                reviewMode.Value = true;
+
+            string warn = !string.IsNullOrEmpty(imported.OsuFileHash) && imported.OsuFileHash != difficulty.OsuFileHash
+                ? " (note: it was authored on a different version of this map)" : string.Empty;
+            toasts?.Push($"Imported {added} annotation{(added == 1 ? "" : "s")} from {imported.Author}{warn}",
+                added > 0 ? EditorTheme.Colours.Success : EditorTheme.Colours.Info);
         }
 
         private static Color4 toColor4(Colour4 c) => new Color4(c.R, c.G, c.B, c.A);
@@ -919,8 +1445,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             bool lanes = hitsoundMode.Value;
             bool modding = moddingMode.Value;
-            leftPanels.FadeTo(modding || lanes ? 0 : 1, 150, Easing.OutQuad);
-            hitsoundControlsBlock.FadeTo(!modding && lanes ? 1 : 0, 150, Easing.OutQuad);
+            bool review = reviewMode.Value;
+            leftPanels.FadeTo(modding || lanes || review ? 0 : 1, 150, Easing.OutQuad);
+            hitsoundControlsBlock.FadeTo(!modding && !review && lanes ? 1 : 0, 150, Easing.OutQuad);
         }
 
         /// <summary>Entering/leaving Modding Mode: force Auto-only, reserve the right panel, fetch discussions once.</summary>
@@ -1095,6 +1622,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             updatePlacementComboPreview();
+            tickRotationAnimation();
 
             if (spinnerBuilding)
                 updateSpinnerPreview();
@@ -2073,7 +2601,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             double sv = velocityAt(time);
             double mult = parsed.SliderMultiplier;
             double span = mult > 0 ? pixelLength * beatLength / (mult * 100 * sv) : 0;
-            return Math.Max(60, span * slides);
+
+            // Duration follows the (already tick-snapped) pixel length exactly - no artificial floor. A fixed
+            // minimum (the old Math.Max(60, ...)) inflated short sliders past their tick: a 1/8 tick at >125 BPM,
+            // or 1/6 at >166 BPM, is shorter than 60ms, so the tail always overshot the beat-snap tick. The
+            // pixel length is already gated to >=1 tick at placement, so span is naturally positive; the 60ms
+            // fallback only guards the degenerate mult<=0 case.
+            double total = span * slides;
+            return total > 0 ? total : 60;
         }
 
         /// <summary>
@@ -3807,6 +4342,83 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             transformUndo = null;
         }
 
+        // --- Quick eased rotation (the Ctrl/Cmd +,/. shortcuts spin the selection into place instead of snapping) ---
+        private bool rotationAnimating;
+        private double rotationElapsed;
+        private float rotationTarget;
+        private Vector2 rotationCentre;
+        private const double rotation_anim_duration = 120;
+
+        /// <summary>
+        /// Rotates the selection by a fixed angle with a quick eased spin (the Ctrl/Cmd +,/. shortcuts). Drives the
+        /// same live transform pipeline as the Shift-box rotate, re-rendering each frame from the pre-spin snapshot,
+        /// then commits a single undo step when the spin lands. Blocked (and flashed) if the final angle won't fit.
+        /// </summary>
+        public void RotateSelectionAnimated(float degrees, bool aroundPlayfieldCentre)
+        {
+            // A second press mid-spin commits the current one first, so rapid taps stack cleanly.
+            if (rotationAnimating)
+                finishRotationAnimation();
+
+            if (!prepareTransform())
+                return;
+
+            Vector2 centre = aroundPlayfieldCentre
+                ? new Vector2(ParsedBeatmap.PLAYFIELD_WIDTH / 2f, ParsedBeatmap.PLAYFIELD_HEIGHT / 2f)
+                : transformQuad.Centre;
+
+            // Block (and flash) a rotation that wouldn't fit - checked against the final angle, like the instant path.
+            if (!transformStaysInBounds(p => rotateAround(p, centre, degrees)))
+            {
+                playfield.FlashSelectionBlocked();
+                transformSnapshot = null;
+                return;
+            }
+
+            transformUndo = takeSnapshot();
+            transformChanged = false;
+
+            rotationCentre = centre;
+            rotationTarget = degrees;
+            rotationElapsed = 0;
+            rotationAnimating = true;
+        }
+
+        /// <summary>Advances the in-flight rotation spin one frame (called from <see cref="Update"/>).</summary>
+        private void tickRotationAnimation()
+        {
+            if (!rotationAnimating)
+                return;
+
+            rotationElapsed += Time.Elapsed;
+            double t = Math.Clamp(rotationElapsed / rotation_anim_duration, 0, 1);
+            float angle = rotationTarget * (float)Interpolation.ApplyEasing(Easing.OutQuint, t);
+            applySelectionMap(p => rotateAround(p, rotationCentre, angle));
+
+            if (t >= 1)
+                finishRotationAnimation();
+        }
+
+        /// <summary>Lands the spin exactly on the target angle and commits it as a single undo step.</summary>
+        private void finishRotationAnimation()
+        {
+            if (!rotationAnimating)
+                return;
+
+            rotationAnimating = false;
+            applySelectionMap(p => rotateAround(p, rotationCentre, rotationTarget));
+
+            if (transformChanged && transformUndo != null)
+            {
+                undoStack.Push(transformUndo);
+                redoStack.Clear();
+                afterEdit();
+            }
+
+            transformSnapshot = null;
+            transformUndo = null;
+        }
+
         public void FlipSelection(bool horizontal)
         {
             if (!prepareTransform())
@@ -4469,7 +5081,10 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // --- Undo / redo: snapshots of the hit-object list ---
 
         private Snapshot takeSnapshot() =>
-            new Snapshot(new List<HitObjectModel>(parsed.HitObjects), new List<TimingPointModel>(parsed.TimingPointModels));
+            new Snapshot(
+                new List<HitObjectModel>(parsed.HitObjects),
+                new List<TimingPointModel>(parsed.TimingPointModels),
+                reviewDoc.Annotations.ConvertAll(a => a.Clone()));
 
         private void pushUndo()
         {
@@ -4549,6 +5164,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             parsed.TimingPointModels.Clear();
             parsed.TimingPointModels.AddRange(snapshot.TimingPoints);
             parsed.RebuildTimingDerived();
+
+            // Restore the Review layer too (deep-copied so the live doc never shares state with the stack).
+            reviewDoc.Annotations.Clear();
+            reviewDoc.Annotations.AddRange(snapshot.Annotations.ConvertAll(a => a.Clone()));
+            refreshAnnotations();
 
             selection.Clear();
             applyStacking();
@@ -4940,6 +5560,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // Ctrl+Shift+A toggles Review mode (the modding-annotation layer).
+            if (settings.ReviewModeKey.Value.Matches(e) && !e.Repeat && !confirmExit.State.Value.Equals(Visibility.Visible))
+            {
+                reviewMode.Value = !reviewMode.Value;
+                return true;
+            }
+
             // Let open dialogs handle their own keys.
             if (anyOverlayOpen())
                 return base.OnKeyDown(e);
@@ -5066,6 +5693,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return true;
             }
 
+            // While reviewing, the number keys pick the Review tools (1 select, 2 note, 3 line) instead of the
+            // composing tools (which are suppressed in Review mode anyway).
+            if (reviewMode.Value && !e.Repeat && e.Key is Key.Number1 or Key.Number2 or Key.Number3)
+            {
+                applyReviewTool(e.Key switch { Key.Number2 => ReviewTool.Note, Key.Number3 => ReviewTool.Draw, _ => ReviewTool.Select });
+                return true;
+            }
+
             // Tools: (1) select, (2) circle, (3) slider, (4) spinner - matching osu!lazer's toolbox shortcuts.
             // Routed through applyTool so each one fully disarms the others (e.g. 1 also clears the spinner).
             if (e.Key == Key.Number1 && !e.Repeat)
@@ -5118,6 +5753,14 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 if (selection.Selected.Count > 0)
                     rotationPopover.Show();
+                return true;
+            }
+
+            // Ctrl/Cmd+. rotates the selection 90 deg clockwise, Ctrl/Cmd+, 90 deg counter-clockwise (around the
+            // selection's centre, matching the Ctrl+scroll rotate). Shift is reserved for the playback-speed binding below.
+            if (cmd && !e.ShiftPressed && !e.Repeat && (e.Key == Key.Comma || e.Key == Key.Period))
+            {
+                RotateSelectionAnimated(e.Key == Key.Period ? 90f : -90f, aroundPlayfieldCentre: false);
                 return true;
             }
 
@@ -5189,6 +5832,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             || timingPointsOverlay.State.Value == Visibility.Visible
             || confirmExit.State.Value == Visibility.Visible
             || rotationPopover.State.Value == Visibility.Visible
+            || noteEditPopover.State.Value == Visibility.Visible
             || timingPillPopover.State.Value == Visibility.Visible
             || collabOverlay.State.Value == Visibility.Visible;
 
@@ -5294,6 +5938,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 editable.IsDirty.Value = false;
                 DidSave = true;
+                // Persist the Review layer alongside the map (the .osu re-hashes on save; the layer is keyed by a
+                // stable per-difficulty key, and stamps the new hash so an export reflects the saved version).
+                saveReviewLayer();
                 toasts?.Push("Beatmap saved", EditorTheme.Colours.Success, osu.Framework.Graphics.Sprites.FontAwesome.Solid.Save);
 
                 // Saving no longer auto-pushes a collab revision - the mapper uploads progress on demand from the
@@ -5588,6 +6235,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         protected override void Dispose(bool isDisposing)
         {
+            if (reviewDragDropHandler != null && host?.Window != null)
+                host.Window.DragDrop -= reviewDragDropHandler;
             stopAllLoops();
             track?.Dispose();
             trackStore?.Dispose();

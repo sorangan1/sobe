@@ -47,6 +47,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Rebuilds the seek-bar markers (kiai bands, timing-point ticks) after a timing edit.</summary>
         public void Rebuild() => seekBar.Rebuild();
 
+        /// <summary>Sets the Review-layer note markers (icon per note) shown on the seek bar; click seeks to one.</summary>
+        public void SetAnnotationMarkers(System.Collections.Generic.IReadOnlyList<(double time, Colour4 colour, IconUsage icon)> markers, Action<double> onSeek)
+            => seekBar.SetAnnotations(markers, onSeek);
+
+        /// <summary>Dims the regular seek-bar content (line/timing/kiai) so the Review note markers stand out.</summary>
+        public void SetReviewMode(bool on) => seekBar.SetReviewMode(on);
+
         [BackgroundDependencyLoader]
         private void load()
         {
@@ -139,8 +146,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             private Container kiaiLayer = null!;
             private Container markers = null!;
+            private Container annotationMarkers = null!;
+            private Box lineBox = null!;
             private Box playhead = null!;
             private bool markersBuilt;
+
+            // Review-layer note markers: kept as raw data and (re)built once the track length is known.
+            private System.Collections.Generic.IReadOnlyList<(double time, Colour4 colour, IconUsage icon)> annotations
+                = System.Array.Empty<(double, Colour4, IconUsage)>();
+            private Action<double>? annotationSeek;
+            private bool annotationsDirty;
 
             public SeekBar(Track? track, ParsedBeatmap? beatmap, Func<double> timeSource)
             {
@@ -156,7 +171,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 Children = new Drawable[]
                 {
                     // The horizontal time line itself.
-                    new Box
+                    lineBox = new Box
                     {
                         RelativeSizeAxes = Axes.X,
                         Height = 3,
@@ -167,6 +182,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     // Kiai bands sit above the horizontal bar in z-order.
                     kiaiLayer = new Container { RelativeSizeAxes = Axes.Both },
                     markers = new Container { RelativeSizeAxes = Axes.Both },
+                    // Review note markers sit above everything so they stay readable when the rest is dimmed.
+                    // Hidden outside Review mode so they don't clutter normal editing.
+                    annotationMarkers = new Container { RelativeSizeAxes = Axes.Both, Alpha = 0 },
                     playhead = new Box
                     {
                         RelativeSizeAxes = Axes.Y,
@@ -189,7 +207,52 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (!markersBuilt)
                     buildMarkers();
 
+                if (annotationsDirty)
+                    buildAnnotationMarkers();
+
                 playhead.X = (float)(timeSource() / track.Length);
+            }
+
+            /// <summary>Stores the Review note markers; the visuals rebuild on the next frame (track length needed).</summary>
+            public void SetAnnotations(System.Collections.Generic.IReadOnlyList<(double time, Colour4 colour, IconUsage icon)> markerData, Action<double> onSeek)
+            {
+                annotations = markerData;
+                annotationSeek = onSeek;
+                annotationsDirty = true;
+            }
+
+            public void SetReviewMode(bool on)
+            {
+                float dim = on ? 0.28f : 1f;
+                lineBox.FadeTo(dim, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                kiaiLayer.FadeTo(dim, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                markers.FadeTo(dim, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                annotationMarkers.FadeTo(on ? 1f : 0f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+            }
+
+            private void buildAnnotationMarkers()
+            {
+                if (track == null || track.Length <= 0)
+                    return;
+
+                annotationsDirty = false;
+                annotationMarkers.Clear();
+                double length = track.Length;
+
+                foreach (var (time, colour, icon) in annotations)
+                    annotationMarkers.Add(annotationMarker(time / length, time, colour, icon));
+            }
+
+            private Drawable annotationMarker(double fraction, double time, Colour4 colour, IconUsage icon)
+            {
+                return new AnnotationMarker(icon, colour, () => annotationSeek?.Invoke(time))
+                {
+                    RelativePositionAxes = Axes.X,
+                    X = (float)Math.Clamp(fraction, 0, 1),
+                    // Fraction measured from the left edge (like the playhead), vertically centred on the line.
+                    Anchor = Anchor.CentreLeft,
+                    Origin = Anchor.Centre,
+                };
             }
 
             /// <summary>Clears and rebuilds the kiai bands and markers from the (possibly edited) beatmap.</summary>
@@ -314,6 +377,60 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 float fraction = Math.Clamp(ToLocalSpace(e.ScreenSpaceMousePosition).X / DrawWidth, 0, 1);
                 track.Seek(fraction * track.Length);
+            }
+
+            /// <summary>A small clickable icon pill on the seek bar marking a Review note (coloured by its author).</summary>
+            private partial class AnnotationMarker : CompositeDrawable
+            {
+                private readonly IconUsage icon;
+                private readonly Colour4 colour;
+                private readonly Action onClick;
+
+                public AnnotationMarker(IconUsage icon, Colour4 colour, Action onClick)
+                {
+                    this.icon = icon;
+                    this.colour = colour;
+                    this.onClick = onClick;
+                    Size = new Vector2(18);
+                }
+
+                [BackgroundDependencyLoader]
+                private void load()
+                {
+                    InternalChildren = new Drawable[]
+                    {
+                        new CircularContainer
+                        {
+                            RelativeSizeAxes = Axes.Both,
+                            Masking = true,
+                            BorderThickness = 1.5f,
+                            BorderColour = colour,
+                            Child = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Sunken },
+                        },
+                        new SpriteIcon
+                        {
+                            Anchor = Anchor.Centre,
+                            Origin = Anchor.Centre,
+                            Icon = icon,
+                            Size = new Vector2(9),
+                            Colour = colour,
+                        },
+                    };
+                }
+
+                protected override bool OnClick(ClickEvent e)
+                {
+                    onClick();
+                    return true;
+                }
+
+                protected override bool OnHover(HoverEvent e)
+                {
+                    this.ScaleTo(1.25f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+                    return true;
+                }
+
+                protected override void OnHoverLost(HoverLostEvent e) => this.ScaleTo(1f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
             }
         }
     }

@@ -413,6 +413,10 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 return;
             }
 
+            // .sobemod (Review-layer) files are only meaningful inside the editor; ignore them on song select.
+            if (ext == ".sobemod")
+                return;
+
             if (!NewBeatmapOverlay.AudioExtensions.Contains(ext))
             {
                 toasts?.Push("Drop an .osz to import, or an mp3/ogg/wav to start a new beatmap", EditorTheme.Colours.Warning);

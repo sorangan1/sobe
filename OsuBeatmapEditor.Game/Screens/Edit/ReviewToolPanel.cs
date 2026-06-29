@@ -7,39 +7,35 @@ using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
-using osuTK.Graphics;
 
 namespace OsuBeatmapEditor.Game.Screens.Edit
 {
-    /// <summary>The editor's composing tools (mirrors osu!lazer's left-hand toolbox).</summary>
-    public enum EditorTool
+    /// <summary>The tools available while in Review mode.</summary>
+    public enum ReviewTool
     {
-        Selection,
-        Circle,
-        Slider,
-        Spinner,
+        Select,
+        Note,
+        Draw,
     }
 
     /// <summary>
-    /// A vertical toolbox on the left of the editor that shows - and lets the user pick - the active
-    /// composing tool, highlighting the current one. Spinner is shown for completeness but not yet placeable.
+    /// The Review-mode tool box on the left of the editor (mirrors <see cref="ToolPanel"/>): pick Select / Note /
+    /// Line, highlighting the active one. Shown only while Review mode is on (in place of the composing tools).
     /// </summary>
-    public partial class ToolPanel : CompositeDrawable
+    public partial class ReviewToolPanel : CompositeDrawable
     {
-        /// <summary>Raised when a tool row is clicked.</summary>
-        public Action<EditorTool>? ToolSelected;
+        public Action<ReviewTool>? ToolSelected;
 
-        private readonly Dictionary<EditorTool, ToolRow> rows = new Dictionary<EditorTool, ToolRow>();
+        private readonly Dictionary<ReviewTool, ToolRow> rows = new Dictionary<ReviewTool, ToolRow>();
 
-        private static readonly (EditorTool tool, int key, string label, IconUsage icon)[] entries =
+        private static readonly (ReviewTool tool, int key, string label, IconUsage icon)[] entries =
         {
-            (EditorTool.Selection, 1, "Select", FontAwesome.Solid.MousePointer),
-            (EditorTool.Circle, 2, "Circle", FontAwesome.Regular.Circle),
-            (EditorTool.Slider, 3, "Slider", FontAwesome.Solid.BezierCurve),
-            (EditorTool.Spinner, 4, "Spinner", FontAwesome.Solid.Asterisk),  // placeable: click to start, scrub forward, click to end
+            (ReviewTool.Select, 1, "Select", FontAwesome.Solid.MousePointer),
+            (ReviewTool.Note, 2, "Note", FontAwesome.Regular.StickyNote),
+            (ReviewTool.Draw, 3, "Draw", FontAwesome.Solid.PenNib),
         };
 
-        public ToolPanel()
+        public ReviewToolPanel()
         {
             AutoSizeAxes = Axes.Both;
 
@@ -52,7 +48,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             foreach (var (tool, key, label, icon) in entries)
             {
-                var row = new ToolRow(key, label, icon, disabled: false, () => ToolSelected?.Invoke(tool));
+                var row = new ToolRow(key, label, icon, () => ToolSelected?.Invoke(tool));
                 rows[tool] = row;
                 flow.Add(row);
             }
@@ -61,7 +57,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>Highlights the row for the active tool.</summary>
-        public void SetActive(EditorTool tool)
+        public void SetActive(ReviewTool tool)
         {
             foreach (var (key, row) in rows)
                 row.SetActive(key == tool);
@@ -69,7 +65,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private partial class ToolRow : ClickableContainer
         {
-            private readonly bool disabled;
             private Box background = null!;
             private SpriteText label = null!;
             private SpriteIcon iconSprite = null!;
@@ -78,18 +73,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             private readonly IconUsage icon;
             private bool active;
 
-            public ToolRow(int key, string label, IconUsage icon, bool disabled, Action onClick)
+            public ToolRow(int key, string label, IconUsage icon, Action onClick)
             {
                 this.key = key;
                 text = label;
                 this.icon = icon;
-                this.disabled = disabled;
                 Action = onClick;
 
                 Size = new Vector2(124, EditorTheme.Sizing.RowHeight);
                 Masking = true;
                 CornerRadius = EditorTheme.Radius.Md;
-                Alpha = disabled ? 0.55f : 1f;
 
                 Children = new Drawable[]
                 {
@@ -110,7 +103,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         X = 32,
                         Size = new Vector2(13),
                         Icon = icon,
-                        Colour = disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.TextMuted,
+                        Colour = EditorTheme.Colours.TextMuted,
                     },
                     this.label = new SpriteText
                     {
@@ -118,67 +111,37 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         Origin = Anchor.CentreLeft,
                         X = 54,
                         Text = text,
-                        Colour = disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text,
+                        Colour = EditorTheme.Colours.Text,
                         Font = EditorTheme.Type.BodyStrong(),
                     },
                 };
             }
 
-            public void SetActive(bool active)
+            public void SetActive(bool value)
             {
-                this.active = active;
-                // Active tool = the sanctioned solid-accent case (a persistent selected state, dark-on-accent).
+                active = value;
                 background.FadeColour(active ? EditorTheme.Colours.Accent : EditorTheme.Colours.Control, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                label.FadeColour(active ? EditorTheme.Colours.Sunken : (disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text), EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                iconSprite.FadeColour(active ? EditorTheme.Colours.Sunken : (disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.TextMuted), EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                // The little numeral keeps a touch more contrast when active, but isn't part of the hover/press feedback.
+                label.FadeColour(active ? EditorTheme.Colours.Sunken : EditorTheme.Colours.Text, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
+                iconSprite.FadeColour(active ? EditorTheme.Colours.Sunken : EditorTheme.Colours.TextMuted, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             }
 
             protected override bool OnHover(HoverEvent e)
             {
-                if (!disabled && !active)
+                if (!active)
                 {
                     background.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                    label.FadeColour(EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                    iconSprite.FadeColour(EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                }
-
-                // The icon + label slide in a touch on hover (active or not) for a bit of life; the row is masked,
-                // so we nudge the contents rather than scaling the whole row.
-                if (!disabled)
-                {
                     iconSprite.MoveToX(36, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
                     label.MoveToX(58, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
                 }
-
-                return base.OnHover(e);
+                return true;
             }
 
             protected override void OnHoverLost(HoverLostEvent e)
             {
                 if (!active)
-                {
                     background.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                    label.FadeColour(disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                    iconSprite.FadeColour(disabled ? EditorTheme.Colours.TextFaint : EditorTheme.Colours.TextMuted, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                }
-
                 iconSprite.MoveToX(32, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
                 label.MoveToX(54, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
-                base.OnHoverLost(e);
-            }
-
-            protected override bool OnMouseDown(MouseDownEvent e)
-            {
-                if (!disabled)
-                    iconSprite.ScaleTo(0.8f, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-                return base.OnMouseDown(e);
-            }
-
-            protected override void OnMouseUp(MouseUpEvent e)
-            {
-                iconSprite.ScaleTo(1f, EditorTheme.Motion.Normal, Easing.OutBack);
-                base.OnMouseUp(e);
             }
         }
     }

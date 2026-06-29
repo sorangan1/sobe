@@ -1,50 +1,52 @@
-using System;
+using osu.Framework.Allocation;
+using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
+using osu.Framework.Graphics.Cursor;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
 using osu.Framework.Input.Events;
 using osu.Framework.Localisation;
-using osu.Framework.Graphics.Cursor;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
 
 namespace OsuBeatmapEditor.Game.UI
 {
     /// <summary>
-    /// A compact square icon button for the editor's top-left bar (e.g. the settings gear), styled to match the
-    /// neutral text buttons next to it: a rounded surface that lightens on hover. Shows a tooltip for its label.
+    /// A compact square icon button bound to a <see cref="BindableBool"/> toggle: neutral at rest, lit in the
+    /// accent colour while active, with hover/press feedback and a tooltip. Used for the editor's bottom-left
+    /// mode toggles (Modding / Review) so they read as icons rather than wide text chips.
     /// </summary>
-    public partial class IconBarButton : ClickableContainer, IHasTooltip
+    public partial class IconToggleButton : ClickableContainer, IHasTooltip
     {
+        private readonly BindableBool active;
         private readonly IconUsage icon;
-        private readonly string tooltip;
+
         private Box background = null!;
         private SpriteIcon iconSprite = null!;
         private Container content = null!;
+        private bool hovered;
 
-        public IconBarButton(IconUsage icon, string tooltip, Action onClick)
+        public LocalisableString TooltipText { get; }
+
+        public IconToggleButton(BindableBool active, IconUsage icon, string tooltip, float size = 30)
         {
+            this.active = active;
             this.icon = icon;
-            this.tooltip = tooltip;
-            Action = onClick;
-            Size = new Vector2(24);
+            TooltipText = tooltip;
+            Size = new Vector2(size);
         }
 
-        public LocalisableString TooltipText => tooltip;
-
-        [osu.Framework.Allocation.BackgroundDependencyLoader]
+        [BackgroundDependencyLoader]
         private void load()
         {
-            // The content lives in an inner wrapper so the hover/press scale can grow past the button's layout box
-            // (the outer container isn't masked) without nudging its neighbours.
             Child = content = new Container
             {
                 RelativeSizeAxes = Axes.Both,
                 Anchor = Anchor.Centre,
                 Origin = Anchor.Centre,
                 Masking = true,
-                CornerRadius = 5,
+                CornerRadius = EditorTheme.Radius.Md,
                 Children = new Drawable[]
                 {
                     background = new Box { RelativeSizeAxes = Axes.Both, Colour = EditorTheme.Colours.Control },
@@ -53,25 +55,41 @@ namespace OsuBeatmapEditor.Game.UI
                         Anchor = Anchor.Centre,
                         Origin = Anchor.Centre,
                         Icon = icon,
-                        Size = new Vector2(13),
+                        Size = new Vector2(14),
                         Colour = EditorTheme.Colours.TextMuted,
                     },
                 },
             };
+
+            active.BindValueChanged(_ => updateState(), true);
+        }
+
+        private void updateState()
+        {
+            background.FadeColour(active.Value ? EditorTheme.Colours.Accent
+                : hovered ? EditorTheme.Colours.ControlHover : EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            iconSprite.FadeColour(active.Value ? EditorTheme.Colours.Sunken
+                : hovered ? EditorTheme.Colours.Text : EditorTheme.Colours.TextMuted, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+        }
+
+        protected override bool OnClick(ClickEvent e)
+        {
+            active.Value = !active.Value;
+            return true;
         }
 
         protected override bool OnHover(HoverEvent e)
         {
-            background.FadeColour(EditorTheme.Colours.ControlHover, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-            iconSprite.FadeColour(EditorTheme.Colours.Text, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            hovered = true;
+            updateState();
             content.ScaleTo(1.1f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
             return true;
         }
 
         protected override void OnHoverLost(HoverLostEvent e)
         {
-            background.FadeColour(EditorTheme.Colours.Control, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
-            iconSprite.FadeColour(EditorTheme.Colours.TextMuted, EditorTheme.Motion.Fast, EditorTheme.Motion.Ease);
+            hovered = false;
+            updateState();
             content.ScaleTo(1f, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
         }
 

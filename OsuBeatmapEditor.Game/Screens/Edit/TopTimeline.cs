@@ -104,7 +104,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private Container objectLayer = null!;
         private Container modLayer = null!;
         private Container selectionLayer = null!;
+        private Container annotationRangeLayer = null!;
         private Container previewLayer = null!;
+        private readonly List<StrokeRangeBar> strokeRangeBars = new List<StrokeRangeBar>();
         private readonly List<Box> gridPool = new List<Box>();
 
         // Shift-hover "add SV point" affordance: a gray pill below the nearest tick in the timing-pill band.
@@ -231,6 +233,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                         modLayer = new Container { RelativeSizeAxes = Axes.Both },
                         gridLayer = new Container { RelativeSizeAxes = Axes.Both },
                         selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
+                        // Review "Draw" stroke time-range bars (draggable to set when/how long a stroke shows).
+                        annotationRangeLayer = new Container { RelativeSizeAxes = Axes.Both },
                         // Live slider-length preview (during placement / reshape), drawn on top.
                         previewLayer = new Container { RelativeSizeAxes = Axes.Both },
                     },
@@ -334,6 +338,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             updateGrid();
             updateLaneLayout();
+            updateStrokeRangeBars();
             updateVisibleObjects();
             updateVisibleTimingPoints();
             updateSvHoverPill();
@@ -355,6 +360,144 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             }
 
             return (float)(endMs * pixelsPerMs) + 4000;
+        }
+
+        /// <summary>
+        /// Sets the Review "Draw" stroke time-range bars: each is draggable (move = retime where it starts,
+        /// right edge = how long it stays). Callbacks let the editor snapshot for undo + apply the new range.
+        /// </summary>
+        public void SetStrokeRanges(
+            System.Collections.Generic.IReadOnlyList<(string Id, double Start, double End, Colour4 Colour)> ranges,
+            Action onBegin, Action<string, double, double> onChanged, Action onCommit, Action<string> onDelete)
+        {
+            // Can be called before this timeline's own load runs (the editor refreshes annotations during its
+            // BDL); the layer doesn't exist yet, and there are no ranges to show until Review mode anyway.
+            if (annotationRangeLayer == null)
+                return;
+
+            annotationRangeLayer.Clear();
+            strokeRangeBars.Clear();
+
+            foreach (var r in ranges)
+            {
+                var bar = new StrokeRangeBar(r.Id, r.Start, r.End, r.Colour, () => pixelsPerMs)
+                {
+                    OnBegin = onBegin,
+                    OnChanged = onChanged,
+                    OnCommit = onCommit,
+                    OnDelete = onDelete,
+                };
+                strokeRangeBars.Add(bar);
+                annotationRangeLayer.Add(bar);
+            }
+        }
+
+        private void updateStrokeRangeBars()
+        {
+            foreach (var bar in strokeRangeBars)
+            {
+                bar.X = (float)(bar.Start * pixelsPerMs);
+                bar.Width = (float)Math.Max(4, (bar.End - bar.Start) * pixelsPerMs);
+            }
+        }
+
+        /// <summary>
+        /// A draggable bar on the timeline marking a Draw stroke's visible time range. Dragging the body retimes
+        /// where it starts (keeping its length); dragging the right edge changes how long it stays. Position/width
+        /// are driven by the parent each frame (<see cref="updateStrokeRangeBars"/>); this just edits Start/End.
+        /// </summary>
+        private partial class StrokeRangeBar : Container
+        {
+            public readonly string Id;
+            public double Start;
+            public double End;
+
+            public Action? OnBegin;
+            public Action<string, double, double>? OnChanged;
+            public Action? OnCommit;
+            public Action<string>? OnDelete;
+
+            private readonly Colour4 colour;
+            private readonly Func<float> pixelsPerMs;
+            private bool resizing;
+            private double grabTime, origStart, origEnd;
+
+            public StrokeRangeBar(string id, double start, double end, Colour4 colour, Func<float> pixelsPerMs)
+            {
+                Id = id;
+                Start = start;
+                End = end;
+                this.colour = colour;
+                this.pixelsPerMs = pixelsPerMs;
+
+                Height = 9;
+                Anchor = Anchor.BottomLeft;
+                Origin = Anchor.BottomLeft;
+                Y = -3;
+                Masking = true;
+                CornerRadius = 3;
+            }
+
+            [BackgroundDependencyLoader]
+            private void load()
+            {
+                Children = new Drawable[]
+                {
+                    new Box { RelativeSizeAxes = Axes.Both, Colour = new Color4(colour.R, colour.G, colour.B, 0.5f) },
+                    // Right-edge resize grip.
+                    new Box
+                    {
+                        Anchor = Anchor.CentreRight,
+                        Origin = Anchor.CentreRight,
+                        RelativeSizeAxes = Axes.Y,
+                        Width = 5,
+                        Colour = new Color4(colour.R, colour.G, colour.B, 0.95f),
+                    },
+                };
+            }
+
+            /// <summary>The map time under a screen position (the layer's local X maps to time via pixelsPerMs).</summary>
+            private double timeAt(Vector2 screenSpacePos) => Parent!.ToLocalSpace(screenSpacePos).X / Math.Max(1e-4f, pixelsPerMs());
+
+            // Right-click on the bar deletes the stroke (same as right-click on the stroke in the playfield).
+            protected override bool OnMouseDown(MouseDownEvent e)
+            {
+                if (e.Button == osuTK.Input.MouseButton.Right)
+                {
+                    OnDelete?.Invoke(Id);
+                    return true;
+                }
+                return base.OnMouseDown(e);
+            }
+
+            protected override bool OnDragStart(DragStartEvent e)
+            {
+                if (e.Button != osuTK.Input.MouseButton.Left)
+                    return false;
+
+                OnBegin?.Invoke();
+                origStart = Start;
+                origEnd = End;
+                grabTime = timeAt(e.ScreenSpaceMouseDownPosition);
+                // Grab within the right grip = resize; otherwise move the whole range. Tiny bars are move-only.
+                resizing = DrawWidth > 16 && ToLocalSpace(e.ScreenSpaceMouseDownPosition).X >= DrawWidth - 8;
+                return true;
+            }
+
+            protected override void OnDrag(DragEvent e)
+            {
+                double delta = timeAt(e.ScreenSpaceMousePosition) - grabTime;
+                if (resizing)
+                    End = Math.Max(origStart + 50, origEnd + delta);
+                else
+                {
+                    Start = origStart + delta;
+                    End = origEnd + delta;
+                }
+                OnChanged?.Invoke(Id, Start, End);
+            }
+
+            protected override void OnDragEnd(DragEndEvent e) => OnCommit?.Invoke();
         }
 
         /// <summary>Rebuilds the object markers (e.g. after a deletion changes the hit-object list).</summary>

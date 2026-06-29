@@ -133,6 +133,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Toggles the editor's Modding Mode (discussion bubbles + filters/messages panels).</summary>
         public readonly Bindable<Shortcut> ModdingModeKey = new Bindable<Shortcut>(new Shortcut(Key.M, Ctrl: true, Shift: true));
 
+        /// <summary>Toggles Review mode (the shareable modding-annotation layer).</summary>
+        public readonly Bindable<Shortcut> ReviewModeKey = new Bindable<Shortcut>(new Shortcut(Key.A, Ctrl: true, Shift: true));
+
         /// <summary>Toggles the Pattern Gallery (saved selections).</summary>
         public readonly Bindable<Shortcut> PatternGalleryKey = new Bindable<Shortcut>(new Shortcut(Key.P));
 
@@ -158,6 +161,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Default beatmap creator name, auto-filled into new/edited beatmaps.</summary>
         public readonly Bindable<string> DefaultCreator = new Bindable<string>(string.Empty);
+
+        /// <summary>Review mode: the modder's display name, stamped on annotations they author.</summary>
+        public readonly Bindable<string> ReviewAuthorName = new Bindable<string>(string.Empty);
+
+        /// <summary>Review mode: the modder's personal colour for their notes/strokes.</summary>
+        public readonly Bindable<Colour4> ReviewAuthorColour = new Bindable<Colour4>(Colour4.FromHex("FF66AB"));
+
+        /// <summary>Review mode: keep showing the annotation notes on the playfield even when Review mode is off.</summary>
+        public readonly BindableBool ReviewShowAlways = new BindableBool();
 
         /// <summary>The settings section last opened, so the overlay reopens where the user left off.</summary>
         public readonly Bindable<string> LastSection = new Bindable<string>();
@@ -191,6 +203,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["combo3"] = ComboColour3,
                 ["combo4"] = ComboColour4,
                 ["autocursor"] = AutoCursorColour,
+                ["reviewauthor"] = ReviewAuthorColour,
             };
 
             keys = new Dictionary<string, Bindable<Shortcut>>
@@ -204,6 +217,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ["distancesnap"] = DistanceSnapKey,
                 ["convertstream"] = ConvertStreamKey,
                 ["moddingmode"] = ModdingModeKey,
+                ["reviewmode"] = ReviewModeKey,
                 ["patterngallery"] = PatternGalleryKey,
                 ["addbpmpoint"] = AddBpmPointKey,
                 ["addsvpoint"] = AddSvPointKey,
@@ -232,6 +246,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var f in floats.Values)
                 f.ValueChanged += _ => save();
             DefaultCreator.ValueChanged += _ => save();
+            ReviewAuthorName.ValueChanged += _ => save();
             ModdingMutedTypes.ValueChanged += _ => save();
             ShowBetaPopup.ValueChanged += _ => save();
             UseMapColours.ValueChanged += _ => save();
@@ -241,6 +256,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             PowerSaving.ValueChanged += _ => save();
             AutoKeyOverlay.ValueChanged += _ => save();
             AutoHumanize.ValueChanged += _ => save();
+            ReviewShowAlways.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
             // the loading guard is clear.
@@ -280,6 +296,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (data.TryGetValue("moddingMutedTypes", out string? muted))
                     ModdingMutedTypes.Value = muted;
 
+                if (data.TryGetValue("reviewAuthorName", out string? reviewAuthor))
+                    ReviewAuthorName.Value = reviewAuthor;
+
                 if (data.TryGetValue("showBetaPopup", out string? showBeta) && bool.TryParse(showBeta, out bool showBetaValue))
                     ShowBetaPopup.Value = showBetaValue;
 
@@ -303,6 +322,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("autoHumanize", out string? humanize) && bool.TryParse(humanize, out bool humanizeValue))
                     AutoHumanize.Value = humanizeValue;
+
+                if (data.TryGetValue("reviewShowAlways", out string? reviewShow) && bool.TryParse(reviewShow, out bool reviewShowValue))
+                    ReviewShowAlways.Value = reviewShowValue;
 
                 // Humanize tuning: apply any stored per-field overrides onto the live HumanizeTuning statics.
                 foreach (var f in humanizeTuningFields())
@@ -358,6 +380,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 foreach (var (key, bindable) in floats)
                     data["f_" + key] = bindable.Value.ToString();
                 data["defaultCreator"] = DefaultCreator.Value;
+                data["reviewAuthorName"] = ReviewAuthorName.Value;
                 data["moddingMutedTypes"] = ModdingMutedTypes.Value;
                 data["showBetaPopup"] = ShowBetaPopup.Value.ToString();
                 data["useMapColours"] = UseMapColours.Value.ToString();
@@ -367,6 +390,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["powerSaving"] = PowerSaving.Value.ToString();
                 data["autoKeyOverlay"] = AutoKeyOverlay.Value.ToString();
                 data["autoHumanize"] = AutoHumanize.Value.ToString();
+                data["reviewShowAlways"] = ReviewShowAlways.Value.ToString();
 
                 // Humanize tuning: persist every HumanizeTuning static field so dialled-in values survive a restart.
                 foreach (var f in humanizeTuningFields())

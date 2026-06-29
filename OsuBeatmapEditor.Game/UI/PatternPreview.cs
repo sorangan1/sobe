@@ -4,6 +4,7 @@ using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
+using osu.Framework.Graphics.Sprites;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
 using osuTK;
@@ -73,6 +74,19 @@ namespace OsuBeatmapEditor.Game.UI
             // A nominal hit-circle radius (~32 osu!px), clamped so it reads at any scale.
             float circleRadius = System.Math.Clamp(32f * scale, 2.5f, 14f);
 
+            // Faint follow points between consecutive objects in the same combo (skipped across a new combo /
+            // to-from spinners), drawn first so the rings + numbers sit on top.
+            for (int i = 0; i + 1 < objects.Count; i++)
+            {
+                var cur = objects[i];
+                var next = objects[i + 1];
+                if (cur.Kind == HitObjectKind.Spinner || next.Kind == HitObjectKind.Spinner || next.ComboNumber <= 1)
+                    continue;
+
+                Vector2 from = cur.Kind == HitObjectKind.Slider && cur.Path is { Count: > 0 } cp ? cp[^1] : new Vector2(cur.X, cur.Y);
+                AddInternal(followLine(map(from), map(new Vector2(next.X, next.Y)), circleRadius));
+            }
+
             foreach (var o in objects)
             {
                 if (o.Kind == HitObjectKind.Slider && o.Path is { Count: > 1 } path)
@@ -91,8 +105,35 @@ namespace OsuBeatmapEditor.Game.UI
                 if (o.Kind == HitObjectKind.Spinner)
                     continue;
 
-                AddInternal(ring(map(new Vector2(o.X, o.Y)), circleRadius));
+                Vector2 head = map(new Vector2(o.X, o.Y));
+                AddInternal(ring(head, circleRadius));
+
+                // Combo number on top of the head (only when the pattern carries combo info).
+                if (o.ComboNumber > 0)
+                    AddInternal(new SpriteText
+                    {
+                        Position = head,
+                        Origin = Anchor.Centre,
+                        Text = o.ComboNumber.ToString(),
+                        Font = FontUsage.Default.With(size: System.Math.Max(7f, circleRadius * 1.4f), weight: "SemiBold"),
+                        Colour = EditorTheme.Colours.Text,
+                    });
             }
+        }
+
+        /// <summary>A faint thin line between two points (a simplified follow point).</summary>
+        private static Drawable followLine(Vector2 a, Vector2 b, float circleRadius)
+        {
+            Vector2 d = b - a;
+            return new Box
+            {
+                Position = a,
+                Origin = Anchor.CentreLeft,
+                Width = d.Length,
+                Height = System.Math.Max(1f, circleRadius * 0.12f),
+                Rotation = (float)(System.Math.Atan2(d.Y, d.X) * 180.0 / System.Math.PI),
+                Colour = new Color4(EditorTheme.Colours.Text.R, EditorTheme.Colours.Text.G, EditorTheme.Colours.Text.B, 0.22f),
+            };
         }
 
         private static Drawable ring(Vector2 centre, float radius) => new CircularContainer
