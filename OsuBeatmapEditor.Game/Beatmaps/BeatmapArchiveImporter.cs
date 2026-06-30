@@ -30,8 +30,12 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             public static Result Fail(string error) => new Result(false, error);
         }
 
-        /// <summary>Imports a <c>.osz</c> archive. The archive's entries become the set's files verbatim.</summary>
-        public static Result ImportOsz(string oszPath)
+        /// <summary>
+        /// Imports a <c>.osz</c> archive. The archive's entries become the set's files verbatim.
+        /// <paramref name="dataDir"/> overrides the target osu!lazer data directory (used by offline
+        /// verification against a throwaway realm copy); when null the live install is located automatically.
+        /// </summary>
+        public static Result ImportOsz(string oszPath, string? dataDir = null)
         {
             if (!File.Exists(oszPath))
                 return Result.Fail("The .osz file could not be found.");
@@ -59,11 +63,11 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 return Result.Fail("The .osz archive could not be read (is it a valid osu! beatmap?).");
             }
 
-            return Import(files);
+            return Import(files, dataDir);
         }
 
         /// <summary>Imports an extracted beatmap folder, using each file's path relative to the folder as its name.</summary>
-        public static Result ImportFolder(string dir)
+        public static Result ImportFolder(string dir, string? dataDir = null)
         {
             if (!Directory.Exists(dir))
                 return Result.Fail("The folder could not be found.");
@@ -84,14 +88,14 @@ namespace OsuBeatmapEditor.Game.Beatmaps
                 return Result.Fail("The beatmap folder could not be read.");
             }
 
-            return Import(files);
+            return Import(files, dataDir);
         }
 
         /// <summary>
         /// Imports a flat list of (filename, bytes). Creates one <c>BeatmapSet</c> with a <c>Beatmap</c> per
         /// osu!-Standard <c>.osu</c> file and a file usage for every file. Returns the result.
         /// </summary>
-        public static Result Import(IReadOnlyList<(string filename, byte[] bytes)> files)
+        public static Result Import(IReadOnlyList<(string filename, byte[] bytes)> files, string? dataDir = null)
         {
             if (files.Count == 0)
                 return Result.Fail("The beatmap is empty.");
@@ -136,7 +140,7 @@ namespace OsuBeatmapEditor.Game.Beatmaps
 
             string displayTitle = $"{difficulties[0].Parsed.Artist} - {difficulties[0].Parsed.Title}";
 
-            string? error = mutate(LazerStorage.FindDataDirectory(), (realm, dataDir) =>
+            string? error = mutate(dataDir ?? LazerStorage.FindDataDirectory(), (realm, dataDir) =>
             {
                 // Dedup: if any of these .osu files is already in the (non-deleted) library, treat as a no-op.
                 var diffHashes = new HashSet<string>(difficulties.Select(d => d.Sha));

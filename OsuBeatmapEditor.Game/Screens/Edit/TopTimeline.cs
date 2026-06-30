@@ -141,6 +141,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         // Band tints/separators (fixed, drawn behind the cells); the scrolling cells; the left tag gutter (on top).
         private Container laneChrome = null!;
         private Container laneCellsRoot = null!;
+        private Box laneColumnHighlight = null!;
         private Container laneLabels = null!;
         private Container laneEffects = null!;
         private readonly Container[] laneCellContainers = new Container[3];
@@ -771,12 +772,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 float x = (float)(time * pixelsPerMs);
                 // Effective volume: the object's explicit override, else the timing point's volume at this column.
                 float volume = o.SampleVolume > 0 ? o.SampleVolume : (TimingVolume?.Invoke(time) ?? 1f);
+                // The lit cell shows the bank that actually drives this addition: the addition bank, or the
+                // normal bank when the addition bank is Auto (osu! inherits it then). The hitnormal bank
+                // itself lives in the bank bar, not on these whistle/finish/clap lanes.
+                SampleBank additionBank = sample.AdditionBank != SampleBank.Auto ? sample.AdditionBank : sample.NormalBank;
                 for (int lane = 0; lane < 3; lane++)
                 {
                     var def = hitsoundLaneDefs[lane];
                     bool on = (sample.HitSound & def.Bit) != 0;
-                    // The cell's letter shows the note's NORMAL bank; the addition bank lives in the bank bar.
-                    var cell = makeCell(x, def.Colour, on, sample.NormalBank, volume);
+                    var cell = new LaneCell(x, time, def.Colour, on, bankLetter(additionBank), volume, hoverColumn);
                     laneCellContainers[lane].Add(cell);
                     cells.Add(cell);
                 }
@@ -813,6 +817,18 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// thirds so it follows the lane region as the timeline expands (see <see cref="updateLaneLayout"/>).</summary>
         private void buildLaneChrome()
         {
+            // A faint full-height column highlight that follows the hovered cell (drawn first, behind the cells).
+            laneCellsRoot.Add(laneColumnHighlight = new Box
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.Centre,
+                RelativeSizeAxes = Axes.Y,
+                Height = 1f,
+                Width = cell_size + 6,
+                Colour = EditorTheme.Colours.Text,
+                Alpha = 0,
+            });
+
             for (int i = 0; i < 3; i++)
             {
                 var def = hitsoundLaneDefs[i];
@@ -953,38 +969,64 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             _ => 'A', // Auto
         };
 
-        /// <summary>One hitsound cell: a filled lane-coloured chip with the addition-bank letter when the addition
-        /// is on, or a faint hollow slot when off. A lit cell dims with its <paramref name="volume"/> (0..1) so quiet
-        /// notes read as fainter than loud ones.</summary>
-        private Drawable makeCell(float x, Color4 colour, bool on, SampleBank bank, float volume = 1f) => new Container
+        /// <summary>
+        /// One hitsound lane cell: a filled lane-coloured chip with the addition-bank letter when the addition is
+        /// on, or a faint hollow slot when off. A lit cell dims with its volume (0..1) so quiet notes read fainter.
+        /// On hover it brightens and pops, and lights its whole time column (via the <c>onHoverColumn</c> callback)
+        /// so node-by-node aiming is easier.
+        /// </summary>
+        private partial class LaneCell : Container
         {
-            Anchor = Anchor.CentreLeft,
-            Origin = Anchor.Centre,
-            X = x,
-            Size = new Vector2(cell_size),
-            Masking = true,
-            CornerRadius = 6,
-            BorderThickness = on ? 0 : 1.5f,
-            BorderColour = on ? colour : EditorTheme.Colours.BorderStrong,
-            Children = new Drawable[]
+            private readonly Box fill;
+            private readonly bool on;
+            private readonly float baseAlpha;
+            private readonly double columnTime;
+            private readonly Action<double, bool> onHoverColumn;
+
+            public LaneCell(float x, double columnTime, Color4 colour, bool on, char letter, float volume, Action<double, bool> onHoverColumn)
             {
-                new Box
+                this.on = on;
+                this.columnTime = columnTime;
+                this.onHoverColumn = onHoverColumn;
+                baseAlpha = on ? 0.4f + 0.6f * Math.Clamp(volume, 0f, 1f) : 0.35f;
+
+                Anchor = Anchor.CentreLeft;
+                Origin = Anchor.Centre;
+                X = x;
+                Size = new Vector2(cell_size);
+                Masking = true;
+                CornerRadius = 6;
+                BorderThickness = on ? 0 : 1.5f;
+                BorderColour = on ? colour : EditorTheme.Colours.BorderStrong;
+                Children = new Drawable[]
                 {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = on ? colour : EditorTheme.Colours.Surface,
-                    // Lit cells fade toward ~40% at silence; off cells keep their faint hollow look.
-                    Alpha = on ? 0.4f + 0.6f * Math.Clamp(volume, 0f, 1f) : 0.35f,
-                },
-                new SpriteText
-                {
-                    Anchor = Anchor.Centre,
-                    Origin = Anchor.Centre,
-                    Text = on ? bankLetter(bank).ToString() : string.Empty,
-                    Colour = OsuColour.BackgroundDark,
-                    Font = FontUsage.Default.With(size: 15, weight: "Bold"),
-                },
-            },
-        };
+                    fill = new Box { RelativeSizeAxes = Axes.Both, Colour = on ? colour : EditorTheme.Colours.Surface, Alpha = baseAlpha },
+                    new SpriteText
+                    {
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Text = on ? letter.ToString() : string.Empty,
+                        Colour = OsuColour.BackgroundDark,
+                        Font = FontUsage.Default.With(size: 15, weight: "Bold"),
+                    },
+                };
+            }
+
+            protected override bool OnHover(HoverEvent e)
+            {
+                this.ScaleTo(1.12f, 90, Easing.OutQuint);
+                fill.FadeTo(on ? 1f : 0.6f, 90, Easing.OutQuint);
+                onHoverColumn(columnTime, true);
+                return false; // visual only - don't block paint/toggle on the timeline
+            }
+
+            protected override void OnHoverLost(HoverLostEvent e)
+            {
+                this.ScaleTo(1f, 150, Easing.OutQuint);
+                fill.FadeTo(baseAlpha, 150, Easing.OutQuint);
+                onHoverColumn(columnTime, false);
+            }
+        }
 
         /// <summary>
         /// Plays a brief action-feedback burst on a lane cell: a soft flash plus an expanding (or, when
@@ -1039,6 +1081,89 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             ring.FadeTo(0.9f).FadeOut(300, Easing.OutQuint);
             ring.ScaleTo(1f).ScaleTo(positive ? 1.7f : 0.5f, 300, Easing.OutQuint);
             fx.Delay(320).Expire();
+        }
+
+        /// <summary>
+        /// Rhythm feedback during playback: as the playhead crosses a node, the lane cells whose addition
+        /// (whistle/finish/clap) actually sounds give a quick brightness pulse - no ring (that signals an edit).
+        /// No-op unless the lanes editor is open. Called from the editor's hitsound playback loop.
+        /// </summary>
+        public void PulseHitsound(double columnTime, int hitSound)
+        {
+            if (laneEffects == null || !hitsoundMode.Value)
+                return;
+
+            // Every node gets a faint full-height column pulse, so you see the beat land even on a note with no
+            // additions (which has no lit cell to flash). Lit whistle/finish/clap cells additionally pop white.
+            pulseColumn(columnTime);
+
+            for (int lane = 0; lane < 3; lane++)
+            {
+                if ((hitSound & hitsoundLaneDefs[lane].Bit) != 0)
+                    pulseCell(columnTime, lane, hitsoundLaneDefs[lane].Colour);
+            }
+        }
+
+        /// <summary>A faint full-height beat pulse over a column during playback (independent of the hover highlight).</summary>
+        private void pulseColumn(double columnTime)
+        {
+            var col = new Box
+            {
+                Anchor = Anchor.CentreLeft,
+                Origin = Anchor.Centre,
+                RelativeSizeAxes = Axes.Y,
+                Height = 1f,
+                Width = cell_size + 6,
+                X = (float)(columnTime * pixelsPerMs),
+                Colour = EditorTheme.Colours.Text,
+            };
+
+            laneEffects.Add(col);
+            col.FadeTo(0.13f).FadeOut(220, Easing.OutQuint);
+            col.Delay(240).Expire();
+        }
+
+        /// <summary>
+        /// A quick pop over one lane cell (the playback pulse). Flashes WHITE, not the lane colour - the cell is
+        /// already lit in its lane colour during playback, so a same-colour flash would be invisible; white reads
+        /// clearly. A small scale-out makes the beat pop. Lighter/shorter than an edit burst (no ring).
+        /// </summary>
+        private void pulseCell(double columnTime, int lane, Color4 colour)
+        {
+            float x = (float)(columnTime * pixelsPerMs);
+            var flash = new Container
+            {
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.Centre,
+                RelativePositionAxes = Axes.Y,
+                Position = new Vector2(x, (lane + 0.5f) / 3f),
+                Size = new Vector2(cell_size),
+                Masking = true,
+                CornerRadius = 6,
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White },
+            };
+
+            laneEffects.Add(flash);
+            flash.FadeTo(0.85f).FadeOut(230, Easing.OutQuint);
+            flash.ScaleTo(1f).ScaleTo(1.35f, 230, Easing.OutQuint);
+            flash.Delay(250).Expire();
+        }
+
+        /// <summary>Shows/moves the faint full-height column highlight under a hovered lane cell (or hides it).</summary>
+        private void hoverColumn(double columnTime, bool entered)
+        {
+            if (laneColumnHighlight == null)
+                return;
+
+            if (entered)
+            {
+                laneColumnHighlight.X = (float)(columnTime * pixelsPerMs);
+                laneColumnHighlight.FadeTo(0.08f, 90, Easing.OutQuint);
+            }
+            else
+            {
+                laneColumnHighlight.FadeOut(150, Easing.OutQuint);
+            }
         }
 
         // --- Hitsound-lane input (paint / toggle / bank cycle) ---

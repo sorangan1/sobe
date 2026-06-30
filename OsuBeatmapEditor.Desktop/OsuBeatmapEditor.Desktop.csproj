@@ -11,6 +11,11 @@
   <ItemGroup Label="Project References">
     <ProjectReference Include="..\OsuBeatmapEditor.Game\OsuBeatmapEditor.Game.csproj" />
   </ItemGroup>
+  <ItemGroup Label="Packages">
+    <!-- Discord Rich Presence over the local Discord client IPC (desktop-only; not referenced by Game so the
+         iOS build stays clean). Same library osu!lazer uses. -->
+    <PackageReference Include="DiscordRichPresence" Version="1.2.1.24" />
+  </ItemGroup>
   <ItemGroup Label="Resources">
     <EmbeddedResource Include="game.ico" />
   </ItemGroup>

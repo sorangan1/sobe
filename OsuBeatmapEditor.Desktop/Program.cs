@@ -1,6 +1,5 @@
 ﻿using osu.Framework.Platform;
 using osu.Framework;
-using OsuBeatmapEditor.Game;
 
 namespace OsuBeatmapEditor.Desktop
 {
@@ -9,7 +8,7 @@ namespace OsuBeatmapEditor.Desktop
         public static void Main()
         {
             using (GameHost host = Host.GetSuitableDesktopHost(@"OsuBeatmapEditor"))
-            using (osu.Framework.Game game = new OsuBeatmapEditorGame())
+            using (osu.Framework.Game game = new OsuBeatmapEditorGameDesktop())
                 host.Run(game);
         }
     }

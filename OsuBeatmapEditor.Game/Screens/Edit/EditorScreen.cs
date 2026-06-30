@@ -356,7 +356,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         {
             var deps = new DependencyContainer(parent);
 
-            settings = new EditorSettings(parent.Get<GameHost>().Storage);
+            // Reuse the app-wide settings instance cached by the game root when present (so toggles sync live);
+            // fall back to a fresh one under the standalone test browser, where no game root is loaded.
+            settings = parent.Get<EditorSettings>() ?? new EditorSettings(parent.Get<GameHost>().Storage);
 
             string? osuPath = LazerFileStore.ResolvePath(set.DataDirectory, difficulty.OsuFileHash);
             if (osuPath != null)
@@ -409,6 +411,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 : null;
 
             hitsounds = new HitsoundPlayer(skinSampleStore, beatmapSampleStore);
+            // "Ignore beatmap hitsounds" (like osu!lazer): play the default skin samples, not the map's custom ones.
+            settings.IgnoreBeatmapHitsounds.BindValueChanged(e => hitsounds.IgnoreBeatmapSamples = e.NewValue, true);
             rebuildSampleEvents();
 
             InternalChildren = new Drawable[]
@@ -1865,7 +1869,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     if (e.Kind == SampleEventKind.SliderTick)
                         hitsounds.PlaySliderTick(e.Normal, e.Volume, e.Index);
                     else
+                    {
                         hitsounds.Play(e.HitSound, e.Normal, e.Addition, e.Volume, e.Index, e.Filename);
+                        // Pulse the lit lane cells in time (no-op unless the hitsound lanes editor is open).
+                        topTimeline.PulseHitsound(e.Time, e.HitSound);
+                    }
                     hitsoundIndex++;
                 }
             }

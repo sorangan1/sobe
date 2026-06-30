@@ -17,6 +17,25 @@ namespace OsuBeatmapEditor.Game.UI
         private readonly ISampleStore skin;
         private readonly ISampleStore? beatmap;
         private readonly Dictionary<string, ISample?> cache = new Dictionary<string, ISample?>();
+        private bool ignoreBeatmapSamples;
+
+        /// <summary>
+        /// When true, the beatmap's own (custom) samples and per-object custom filenames are ignored and the
+        /// bundled default-skin samples play instead - osu!lazer's "beatmap hitsounds" toggle. Flipping it
+        /// clears the resolve cache so samples are re-looked-up against the new source set.
+        /// </summary>
+        public bool IgnoreBeatmapSamples
+        {
+            get => ignoreBeatmapSamples;
+            set
+            {
+                if (ignoreBeatmapSamples == value)
+                    return;
+
+                ignoreBeatmapSamples = value;
+                cache.Clear();
+            }
+        }
 
         /// <param name="skin">The bundled default-skin sample store (always present, the fallback).</param>
         /// <param name="beatmap">The current map's own sample store (its packed .wav/.mp3/.ogg), consulted first; may be null.</param>
@@ -39,7 +58,8 @@ namespace OsuBeatmapEditor.Game.UI
         public void Play(int hitSound, SampleBank normalBank, SampleBank additionBank, float volume, int index = 0, string filename = "")
         {
             // A custom file sample replaces the object's normal hitsound; the bank additions still play on top.
-            if (!string.IsNullOrEmpty(filename))
+            // When ignoring beatmap samples, the custom file is skipped too - just the plain normal bank plays.
+            if (!ignoreBeatmapSamples && !string.IsNullOrEmpty(filename))
                 playLookup(filename, volume);
             else
                 playSample(normalBank, "hitnormal", index, volume);
@@ -109,7 +129,8 @@ namespace OsuBeatmapEditor.Game.UI
             {
                 // Beatmap's own samples take priority (looked up by their packed filename), then the default skin
                 // (under the "Gameplay/" namespace). Either store appends wav/mp3/ogg extensions itself.
-                sample = beatmap?.Get(name) ?? skin.Get($"Gameplay/{name}");
+                // With IgnoreBeatmapSamples set, the beatmap store is skipped so only the default skin sounds.
+                sample = (ignoreBeatmapSamples ? null : beatmap?.Get(name)) ?? skin.Get($"Gameplay/{name}");
 
                 // The default concurrency (2) drops rapidly-repeated hits, so dense streams fall silent.
                 // Allow many overlapping plays of the same sample, like a real osu! gameplay sample pool.

@@ -44,7 +44,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             description("Auto-filled into the creator field of new and edited beatmaps."),
             divider(),
             toggleRow("Show beta notice on open", settings.ShowBetaPopup),
-            description("Shows the welcome / beta disclaimer each time the editor opens."));
+            description("Shows the welcome / beta disclaimer each time the editor opens."),
+            divider(),
+            toggleRow("Discord Rich Presence", settings.DiscordRichPresence),
+            description("Shows your current activity (the map you're editing, or browsing) on your Discord profile. "
+                       + "Requires the Discord desktop client to be running."));
 
         private Drawable buildPerformanceSection() => section(
             toggleRow("Power saving (cap to refresh rate)", settings.PowerSaving),
@@ -142,7 +146,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             SettingsLayout.LabeledRow("Output device", new AudioDeviceSetting()),
             heightRow("Audio offset (ms)", settings.AudioOffset),
             description("Shifts the playhead during playback to match output latency (e.g. Bluetooth headphones). "
-                       + "A negative value delays the visuals so what you see lines up with what you hear."));
+                       + "A negative value delays the visuals so what you see lines up with what you hear."),
+            divider(),
+            toggleRow("Ignore beatmap hitsounds", settings.IgnoreBeatmapHitsounds),
+            description("Plays the default skin samples instead of the map's own custom hitsounds, so you hear "
+                       + "the plain normal/whistle/finish/clap sounds - like osu!lazer's beatmap-hitsounds toggle."));
 
         private Drawable buildObjectsSection() => section(
             colourRow("Combo colour 1", settings.ComboColour1),

@@ -1,7 +1,7 @@
 # Roadmap de sobe
 
 Editor de beatmaps para osu!
-Version actual: v0.9.64-beta
+Version actual: v0.9.65-beta
 
 Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 
@@ -20,19 +20,10 @@ Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 - ✓ Login con osu! (OAuth) y sincronizacion de estadisticas
 - ✓ Modo modding: burbujas de discusion de osu! en la timeline, con filtros y mensajes
 - ✓ Cursor "Humanize" del modo Auto, que imita el movimiento de un jugador real
+- ✓ Hitsounds completos: reproduccion con samples del mapa y skin, loops de slider/spinner, sample sets e index, samples y volumen por objeto, copiar/pegar, editor de lanes en la timeline (pintar, atajos W/E/R, hover, feedback de reproduccion) y opcion de ignorar los hitsounds del mapa
+- ✓ Discord Rich Presence en escritorio (muestra editando/navegando, activable desde ajustes)
 
 ## En desarrollo
-
-### Hitsounds - 80%
-Reescritura completa del sistema de hitsounds.
-- ✓ Reproduccion correcta usando los samples del mapa y la skin por defecto
-- ✓ Loops de slider y spinner durante la reproduccion
-- ✓ Sample index y sample sets personalizados
-- ✓ Samples personalizados por objeto
-- ✓ Volumen editable por objeto
-- ✓ Copiar y pegar hitsounds
-- ✓ Integracion en la propia timeline de hitsounding, sin depender del panel lateral
-- Pulido visual final y mas comodidad al hitsoundear nodo a nodo
 
 ### Pattern Gallery - 70%
 - ✓ Guardar una seleccion de objetos como patron reutilizable

@@ -37,7 +37,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private Box swatch = null!;
 
-        /// <param name="lockedName">The osu! account name when logged in (shown read-only); null = offline, editable.</param>
+        /// <summary>
+        /// The Review toolbar: author-name field, colour picker and a "show always" toggle. The lockedName
+        /// argument is the osu! account name when logged in (shown read-only); null means offline, so the name
+        /// stays editable.
+        /// </summary>
         public ReviewToolbar(Bindable<string> authorName, Bindable<Colour4> authorColour, BindableBool showAlways, string? lockedName)
         {
             this.authorName = authorName;

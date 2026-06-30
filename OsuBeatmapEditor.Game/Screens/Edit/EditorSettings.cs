@@ -100,6 +100,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         public readonly BindableBool AutoUpdate = new BindableBool(true);
 
         /// <summary>
+        /// Whether Discord Rich Presence is published while the editor runs, showing your current activity
+        /// (editing a map / browsing) on your Discord profile. Desktop-only; requires the Discord client running.
+        /// </summary>
+        public readonly BindableBool DiscordRichPresence = new BindableBool(true);
+
+        /// <summary>
         /// Power-saving mode: caps the frame rate to the monitor's refresh rate (VSync) instead of the
         /// default 2x-refresh. Roughly halves GPU/CPU draw work on high-refresh displays, at the cost of a
         /// little input latency while scrubbing. Applied to the framework's global frame-sync setting.
@@ -170,6 +176,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Review mode: keep showing the annotation notes on the playfield even when Review mode is off.</summary>
         public readonly BindableBool ReviewShowAlways = new BindableBool();
+
+        /// <summary>
+        /// Ignore the beatmap's own (custom) hitsound samples and play the default skin samples instead, like
+        /// osu!lazer's "beatmap hitsounds" toggle. Lets you hear the plain normal/whistle/finish/clap sounds.
+        /// </summary>
+        public readonly BindableBool IgnoreBeatmapHitsounds = new BindableBool(false);
 
         /// <summary>The settings section last opened, so the overlay reopens where the user left off.</summary>
         public readonly Bindable<string> LastSection = new Bindable<string>();
@@ -252,11 +264,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             UseMapColours.ValueChanged += _ => save();
             BackgroundDim.ValueChanged += _ => save();
             AutoUpdate.ValueChanged += _ => save();
+            DiscordRichPresence.ValueChanged += _ => save();
             AutoUpdatePrompted.ValueChanged += _ => save();
             PowerSaving.ValueChanged += _ => save();
             AutoKeyOverlay.ValueChanged += _ => save();
             AutoHumanize.ValueChanged += _ => save();
             ReviewShowAlways.ValueChanged += _ => save();
+            IgnoreBeatmapHitsounds.ValueChanged += _ => save();
 
             // Persist any one-time migration applied during load() (and the bumped version) once, now that
             // the loading guard is clear.
@@ -311,6 +325,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 if (data.TryGetValue("autoUpdate", out string? autoUp) && bool.TryParse(autoUp, out bool autoUpValue))
                     AutoUpdate.Value = autoUpValue;
 
+                if (data.TryGetValue("discordRichPresence", out string? discord) && bool.TryParse(discord, out bool discordValue))
+                    DiscordRichPresence.Value = discordValue;
+
                 if (data.TryGetValue("autoUpdatePrompted", out string? prompted) && bool.TryParse(prompted, out bool promptedValue))
                     AutoUpdatePrompted.Value = promptedValue;
 
@@ -325,6 +342,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("reviewShowAlways", out string? reviewShow) && bool.TryParse(reviewShow, out bool reviewShowValue))
                     ReviewShowAlways.Value = reviewShowValue;
+
+                if (data.TryGetValue("ignoreBeatmapHitsounds", out string? ignoreHs) && bool.TryParse(ignoreHs, out bool ignoreHsValue))
+                    IgnoreBeatmapHitsounds.Value = ignoreHsValue;
 
                 // Humanize tuning: apply any stored per-field overrides onto the live HumanizeTuning statics.
                 foreach (var f in humanizeTuningFields())
@@ -386,11 +406,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 data["useMapColours"] = UseMapColours.Value.ToString();
                 data["backgroundDim"] = BackgroundDim.Value.ToString();
                 data["autoUpdate"] = AutoUpdate.Value.ToString();
+                data["discordRichPresence"] = DiscordRichPresence.Value.ToString();
                 data["autoUpdatePrompted"] = AutoUpdatePrompted.Value.ToString();
                 data["powerSaving"] = PowerSaving.Value.ToString();
                 data["autoKeyOverlay"] = AutoKeyOverlay.Value.ToString();
                 data["autoHumanize"] = AutoHumanize.Value.ToString();
                 data["reviewShowAlways"] = ReviewShowAlways.Value.ToString();
+                data["ignoreBeatmapHitsounds"] = IgnoreBeatmapHitsounds.Value.ToString();
 
                 // Humanize tuning: persist every HumanizeTuning static field so dialled-in values survive a restart.
                 foreach (var f in humanizeTuningFields())

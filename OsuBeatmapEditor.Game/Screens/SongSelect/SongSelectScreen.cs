@@ -73,7 +73,10 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         protected override IReadOnlyDependencyContainer CreateChildDependencies(IReadOnlyDependencyContainer parent)
         {
             dependencies = new DependencyContainer(parent);
-            dependencies.CacheAs(editorSettings = new EditorSettings(parent.Get<GameHost>().Storage));
+            // Reuse the app-wide settings instance cached by the game root when present (so toggles sync live);
+            // fall back to a fresh one under the standalone test browser, where no game root is loaded.
+            editorSettings = parent.Get<EditorSettings>() ?? new EditorSettings(parent.Get<GameHost>().Storage);
+            dependencies.CacheAs(editorSettings);
             return dependencies;
         }
 
