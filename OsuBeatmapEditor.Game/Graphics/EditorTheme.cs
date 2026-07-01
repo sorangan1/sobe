@@ -107,6 +107,9 @@ namespace OsuBeatmapEditor.Game.Graphics
             /// <summary>Bookmarks / informational markers (#4FB3FF).</summary>
             public static readonly Color4 Bookmark = hex(0x4FB3FF);
 
+            /// <summary>Default (no-skin) slider-body fill: a fixed dark grey, so the body doesn't take the combo colour (#37373D).</summary>
+            public static readonly Color4 SliderBodyDefault = hex(0x37373D);
+
             // --- Status (toasts, validation, confirmations). ---
 
             /// <summary>Success / confirmation (#46C77F).</summary>

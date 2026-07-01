@@ -14,6 +14,13 @@ using osuTK.Graphics;
 
 namespace OsuBeatmapEditor.Game.UI
 {
+    /// <summary>Handle to a persistent toast (from <see cref="ToastOverlay.PushLoading"/>) so the caller can dismiss it.</summary>
+    public interface IDismissableToast
+    {
+        /// <summary>Dismisses the toast (fades it out). Safe to call from the update thread.</summary>
+        void Dismiss();
+    }
+
     /// <summary>
     /// A lightweight transient-notification layer: brief "toasts" that slide in at the top of the screen to confirm
     /// an action, then auto-dismiss. Each carries an icon identifying the action and an accent colour for its type.
@@ -74,8 +81,25 @@ namespace OsuBeatmapEditor.Game.UI
             };
 
             flow.Add(toast);
+            capStack();
+        }
 
-            // Cap the stack: dismiss the oldest still-present toasts beyond the limit.
+        /// <summary>
+        /// Shows a persistent "in progress" toast that does NOT auto-expire; it stays until the returned handle is
+        /// dismissed. Use for slow actions (e.g. importing a skin): show it, do the work off-thread, then dismiss
+        /// it and push a result toast. Not spam-guarded (each call is its own toast).
+        /// </summary>
+        public IDismissableToast PushLoading(string message, IconUsage? icon = null)
+        {
+            var toast = new Toast(message, EditorTheme.Colours.Info, icon ?? FontAwesome.Solid.Spinner, persistent: true);
+            flow.Add(toast);
+            capStack();
+            return toast;
+        }
+
+        /// <summary>Cap the stack: dismiss the oldest still-present toasts beyond the limit.</summary>
+        private void capStack()
+        {
             var live = flow.Children.OfType<Toast>().ToList();
             for (int i = 0; i < live.Count - max_toasts; i++)
                 live[i].DismissNow();
@@ -90,7 +114,7 @@ namespace OsuBeatmapEditor.Game.UI
             return FontAwesome.Solid.InfoCircle;
         }
 
-        private partial class Toast : CompositeDrawable
+        private partial class Toast : CompositeDrawable, IDismissableToast
         {
             public string Message { get; }
 
@@ -102,21 +126,28 @@ namespace OsuBeatmapEditor.Game.UI
             private readonly Color4 accent;
             private readonly IconUsage icon;
 
+            // A persistent toast never schedules its own auto-dismiss; it stays until DismissNow() is called.
+            private readonly bool persistent;
+
             private SpriteText countText = null!;
             private int count = 1;
             private ScheduledDelegate? dismiss;
             private bool dismissing;
 
-            public Toast(string message, Color4 accent, IconUsage icon)
+            public Toast(string message, Color4 accent, IconUsage icon, bool persistent = false)
             {
                 Message = message;
                 this.accent = accent;
                 this.icon = icon;
+                this.persistent = persistent;
 
                 Anchor = Anchor.TopCentre;
                 Origin = Anchor.TopCentre;
                 AutoSizeAxes = Axes.Both;
             }
+
+            /// <summary>Handle dismissal for callers holding an <see cref="IDismissableToast"/> (a loading toast).</summary>
+            void IDismissableToast.Dismiss() => DismissNow();
 
             [BackgroundDependencyLoader]
             private void load()
@@ -199,11 +230,13 @@ namespace OsuBeatmapEditor.Game.UI
             {
                 base.LoadComplete();
 
-                // Slide down + fade in, then schedule the auto-dismiss.
+                // Slide down + fade in, then schedule the auto-dismiss (unless this is a persistent loading toast,
+                // which stays until its handle is dismissed).
                 this.FadeInFromZero(EditorTheme.Motion.Normal, EditorTheme.Motion.Ease)
                     .MoveToY(-6).MoveToY(0, EditorTheme.Motion.Normal, EditorTheme.Motion.Ease);
 
-                scheduleDismiss();
+                if (!persistent)
+                    scheduleDismiss();
             }
 
             /// <summary>Re-show of the same message: bump the counter, give a little pulse, and reset the timer.</summary>

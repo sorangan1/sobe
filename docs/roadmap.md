@@ -1,7 +1,7 @@
 # Roadmap de sobe
 
 Editor de beatmaps para osu!
-Version actual: v0.9.65-beta
+Version actual: v0.9.66-beta
 
 Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 
@@ -24,6 +24,17 @@ Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 - ✓ Discord Rich Presence en escritorio (muestra editando/navegando, activable desde ajustes)
 
 ## En desarrollo
+
+### Soporte de skins (.osk) - 75%
+Mapea con tu propia skin de osu!: las texturas y hitsounds del skin reemplazan el dibujo por defecto.
+- ✓ Importar un .osk arrastrandolo a la ventana (con toast de progreso hasta terminar)
+- ✓ Seleccionar el skin activo desde Ajustes, persistente entre sesiones y con cambio en vivo dentro del editor
+- ✓ Lectura del skin.ini (prefijo y solapamiento de numeros, colores del slider, tinte de la bola)
+- ✓ Render con texturas del skin: hitcircle y overlay, numeros de combo, approach circle, bola y follow circle, flecha de repeticion y ticks del slider; lo que falte cae al dibujo procedural
+- ✓ Hitsounds del skin como sonido por defecto cuando el mapa no trae los suyos
+- Textura completa del cuerpo del slider (ahora es procedural tintado con los colores del skin)
+- Spinner, cursor y demas elementos secundarios
+- Selector/importador de skins dentro de la app (sin tener que arrastrar el archivo)
 
 ### Pattern Gallery - 70%
 - ✓ Guardar una seleccion de objetos como patron reutilizable

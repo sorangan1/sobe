@@ -53,6 +53,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved]
         private EditableBeatmap editable { get; set; } = null!;
 
+        // Active skin (cached at the game root; absent under the test browser). Lets the placement preview match a
+        // committed slider's skin-aware body colours.
+        [Resolved(CanBeNull = true)]
+        private Skinning.SkinManager? skinManager { get; set; }
+
         private bool moving;
         private Vector2 moveStart;
 
@@ -1199,14 +1204,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // The body uses the same SliderBodyPath + appearance settings as a committed slider, so the
                 // preview is the finished slider rather than a flat trace.
                 Color4 combo = previewCombo().colour;
-                overlayLayer.Add(sliderPreview = new SliderBodyPath
+                sliderPreview = new SliderBodyPath
                 {
                     PathRadius = currentDiameter / 2f,
-                    BorderColour = Color4.White,
-                    AccentColour = combo,
                     BodyOpacity = settings.ObjectBackgroundOpacity.Value,
                     BorderPortion = Math.Clamp(2f * settings.ObjectBorderThickness.Value, 0.02f, 0.9f),
-                });
+                };
+                // Same skin-aware body colours a committed slider gets, so the preview doesn't recolour on commit.
+                sliderPreview.ApplySkinAppearance(skinManager?.Current.Value, combo);
+                overlayLayer.Add(sliderPreview);
                 // A ghost tail ring (matching the head ghost) sits at the slider's finalized end.
                 overlayLayer.Add(sliderTailPreview = ghostRing(combo));
                 // Node markers sit on top of the trace so the anchors stay visible as the slider is drawn.

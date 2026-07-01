@@ -168,6 +168,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// <summary>Default beatmap creator name, auto-filled into new/edited beatmaps.</summary>
         public readonly Bindable<string> DefaultCreator = new Bindable<string>(string.Empty);
 
+        /// <summary>
+        /// Folder name of the active imported osu! skin (under <c>storage/skins/</c>). Empty means no skin: hit
+        /// objects render with the editor's built-in procedural look. See <see cref="Skinning.SkinManager"/>.
+        /// </summary>
+        public readonly Bindable<string> SkinName = new Bindable<string>(string.Empty);
+
         /// <summary>Review mode: the modder's display name, stamped on annotations they author.</summary>
         public readonly Bindable<string> ReviewAuthorName = new Bindable<string>(string.Empty);
 
@@ -258,6 +264,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             foreach (var f in floats.Values)
                 f.ValueChanged += _ => save();
             DefaultCreator.ValueChanged += _ => save();
+            SkinName.ValueChanged += _ => save();
             ReviewAuthorName.ValueChanged += _ => save();
             ModdingMutedTypes.ValueChanged += _ => save();
             ShowBetaPopup.ValueChanged += _ => save();
@@ -306,6 +313,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
                 if (data.TryGetValue("defaultCreator", out string? creator))
                     DefaultCreator.Value = creator;
+
+                if (data.TryGetValue("skinName", out string? skin))
+                    SkinName.Value = skin;
 
                 if (data.TryGetValue("moddingMutedTypes", out string? muted))
                     ModdingMutedTypes.Value = muted;
@@ -400,6 +410,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 foreach (var (key, bindable) in floats)
                     data["f_" + key] = bindable.Value.ToString();
                 data["defaultCreator"] = DefaultCreator.Value;
+                data["skinName"] = SkinName.Value;
                 data["reviewAuthorName"] = ReviewAuthorName.Value;
                 data["moddingMutedTypes"] = ModdingMutedTypes.Value;
                 data["showBetaPopup"] = ShowBetaPopup.Value.ToString();

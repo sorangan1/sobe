@@ -66,7 +66,11 @@ namespace OsuBeatmapEditor.Game
             // One app-wide editor-settings instance, so a setting toggled in any screen's settings overlay is
             // seen everywhere at once (e.g. the desktop Discord Rich Presence component). Screens reuse this
             // when present instead of constructing their own.
-            deps.CacheAs(new Screens.Edit.EditorSettings(host.Storage));
+            var editorSettings = new Screens.Edit.EditorSettings(host.Storage);
+            deps.CacheAs(editorSettings);
+            // App-wide skin manager: owns imported .osk skins and tracks the active one (EditorSettings.SkinName).
+            // The playfield renderer and hitsound player resolve it to texture/sound hit objects with the user's skin.
+            deps.CacheAs(new Skinning.SkinManager(host, editorSettings));
             // Local "git checkout HEAD" pointers for collab difficulties; no per-frame work, so not in the tree.
             deps.CacheAs(new Online.CollabSession(host.Storage));
             // On-disk cache of the user's saved patterns, so the gallery doesn't re-hit the backend each open.

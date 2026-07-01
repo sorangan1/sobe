@@ -6,8 +6,10 @@ using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Lines;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
+using osu.Framework.Graphics.Textures;
 using OsuBeatmapEditor.Game.Beatmaps;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.Skinning;
 using osuTK;
 using osuTK.Graphics;
 
@@ -87,6 +89,13 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         [Resolved]
         private EditableBeatmap editable { get; set; } = null!;
+
+        // The active osu! skin (null = none). When present, hit-object pieces are drawn from its textures and
+        // the procedural fallbacks below are skipped per-element. Resolved before the BDL builds the visuals.
+        [Resolved(CanBeNull = true)]
+        private SkinManager? skinManager { get; set; }
+
+        private Skin? skin => skinManager?.Current.Value;
 
         /// <summary>Configurable opacity for object fills/bodies.</summary>
         private float objectOpacity => settings.ObjectBackgroundOpacity.Value;
@@ -299,8 +308,6 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             var body = new SliderBodyPath
             {
                 PathRadius = diameter / 2f,
-                BorderColour = Color4.White,
-                AccentColour = comboColour,
                 BodyOpacity = objectOpacity,
                 // Rim thickness matches the hit-circle ring in osu!pixels (both = diameter·borderFactor),
                 // so the one outline setting drives the circle and the slider body together.
@@ -308,6 +315,8 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 // Always behind the head circle / ticks / ball (which sit at depth 0).
                 Depth = 1f,
             };
+            // Border/track colours + gradient opacity from the active skin (or the built-in dark-grey look).
+            body.ApplySkinAppearance(skin, comboColour);
             body.Vertices = path!;
             // Align the path's local coordinate space with playfield (osu!pixel) coordinates.
             body.Position = -body.PositionInBoundingBox(Vector2.Zero);
@@ -377,33 +386,90 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         }
 
         /// <summary>A small dot marking a slider tick, sitting on the body beneath the head circle and ball.</summary>
-        private Drawable tickDot(Vector2 position, Color4 combo) => new CircularContainer
+        private Drawable tickDot(Vector2 position, Color4 combo)
         {
-            Position = position,
-            Origin = Anchor.Centre,
-            Size = new Vector2(diameter * settings.SliderTickSize.Value),
-            Alpha = tick_base_alpha,
-            Masking = true,
-            BorderThickness = Math.Max(1f, diameter * 0.02f),
-            BorderColour = new Color4(combo.R * 0.6f, combo.G * 0.6f, combo.B * 0.6f, 1f),
-            Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White },
-        };
-
-        private Drawable circle(Vector2 position, Color4 fill) => new CircularContainer
-        {
-            Position = position,
-            Origin = Anchor.Centre,
-            Size = new Vector2(diameter),
-            Masking = true,
-            BorderThickness = diameter * borderFactor,
-            BorderColour = Color4.White,
-            Child = new Box
+            // Skinned slider tick (sliderscorepoint); falls back to the procedural ringed dot.
+            var tex = skin?.GetTexture("sliderscorepoint");
+            if (tex != null)
             {
-                RelativeSizeAxes = Axes.Both,
-                Colour = fill,
-                Alpha = objectOpacity,
-            },
-        };
+                return new Sprite
+                {
+                    Position = position,
+                    Origin = Anchor.Centre,
+                    Size = new Vector2(diameter * settings.SliderTickSize.Value),
+                    Alpha = tick_base_alpha,
+                    FillMode = FillMode.Fit,
+                    Texture = tex,
+                };
+            }
+
+            return new CircularContainer
+            {
+                Position = position,
+                Origin = Anchor.Centre,
+                Size = new Vector2(diameter * settings.SliderTickSize.Value),
+                Alpha = tick_base_alpha,
+                Masking = true,
+                BorderThickness = Math.Max(1f, diameter * 0.02f),
+                BorderColour = new Color4(combo.R * 0.6f, combo.G * 0.6f, combo.B * 0.6f, 1f),
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White },
+            };
+        }
+
+        private Drawable circle(Vector2 position, Color4 fill)
+        {
+            // Skinned: hitcircle tinted by the combo colour, with the (untinted) overlay on top. Falls back to
+            // the procedural ring when the skin doesn't ship a hitcircle.
+            var hitTex = skin?.GetTexture("hitcircle");
+            if (hitTex != null)
+            {
+                var container = new Container
+                {
+                    Position = position,
+                    Origin = Anchor.Centre,
+                    Size = new Vector2(diameter),
+                };
+                container.Add(new Sprite
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Anchor = Anchor.Centre,
+                    Origin = Anchor.Centre,
+                    Texture = hitTex,
+                    Colour = fill,
+                    Alpha = objectOpacity,
+                });
+
+                var overlayTex = skin!.GetTexture("hitcircleoverlay");
+                if (overlayTex != null)
+                {
+                    container.Add(new Sprite
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Texture = overlayTex,
+                    });
+                }
+
+                return container;
+            }
+
+            return new CircularContainer
+            {
+                Position = position,
+                Origin = Anchor.Centre,
+                Size = new Vector2(diameter),
+                Masking = true,
+                BorderThickness = diameter * borderFactor,
+                BorderColour = Color4.White,
+                Child = new Box
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Colour = fill,
+                    Alpha = objectOpacity,
+                },
+            };
+        }
 
         /// <summary>A white disc filling the head circle, normally invisible; pulsed at the object's start time as a hit flash.</summary>
         private Drawable flashLayer(Vector2 position) => new CircularContainer
@@ -423,47 +489,142 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         private const double flash_duration = 620;
 
-        private Drawable numberText(Vector2 position) => new SpriteText
+        private Drawable numberText(Vector2 position)
         {
-            Position = position,
-            Anchor = Anchor.TopLeft,
-            Origin = Anchor.Centre,
-            Text = hitObject.ComboNumber.ToString(),
-            Colour = Color4.White,
-            // Counter-flip when HardRock flips the whole play area, so the number stays upright.
-            Scale = new Vector2(1, flipText ? -1 : 1),
-            Font = FontUsage.Default.With(size: diameter * 0.5f, weight: "Bold"),
-        };
+            // Skinned digits ({prefix}-0..9) laid out horizontally with the skin's overlap, centred on the circle.
+            var skinned = skin != null ? skinnedNumber(position) : null;
+            if (skinned != null)
+                return skinned;
 
-        // A real (equilateral) triangle shape instead of a ">" glyph: perfectly centred on the node and
-        // sized to the circle. The shape points up by default, so +90 aligns its apex with the travel angle.
-        private Drawable reverseArrow(Vector2 position, float rotation) => new Triangle
-        {
-            Position = position,
-            Anchor = Anchor.TopLeft,
-            Origin = Anchor.Centre,
-            Rotation = rotation + 90,
-            Size = new Vector2(diameter * 0.3f),
-            Colour = Color4.White,
-        };
-
-        private Container approach(Vector2 position, Color4 colour) => new CircularContainer
-        {
-            Position = position,
-            Origin = Anchor.Centre,
-            Size = new Vector2(diameter),
-            Masking = true,
-            BorderThickness = diameter * 0.06f,
-            BorderColour = colour,
-            Alpha = 0,
-            Child = new Box
+            return new SpriteText
             {
-                RelativeSizeAxes = Axes.Both,
+                Position = position,
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.Centre,
+                Text = hitObject.ComboNumber.ToString(),
                 Colour = Color4.White,
+                // Counter-flip when HardRock flips the whole play area, so the number stays upright.
+                Scale = new Vector2(1, flipText ? -1 : 1),
+                Font = FontUsage.Default.With(size: diameter * 0.5f, weight: "Bold"),
+            };
+        }
+
+        /// <summary>
+        /// Builds the combo number from the skin's digit textures (<c>{HitCirclePrefix}-N</c>), or null if the
+        /// skin has no digit font. Digits are sized to ~45% of the circle and overlapped by the skin's
+        /// HitCircleOverlap (scaled to that size), matching osu!'s legacy number layout.
+        /// </summary>
+        private Drawable? skinnedNumber(Vector2 position)
+        {
+            string prefix = skin!.Config.HitCirclePrefix;
+            string digits = hitObject.ComboNumber.ToString();
+
+            float height = diameter * 0.45f;
+
+            var flow = new FillFlowContainer
+            {
+                Position = position,
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.Centre,
+                AutoSizeAxes = Axes.Both,
+                Direction = FillDirection.Horizontal,
+                // Counter-flip when HardRock flips the whole play area, so the number stays upright.
+                Scale = new Vector2(1, flipText ? -1 : 1),
+            };
+
+            foreach (char d in digits)
+            {
+                var tex = skin.GetTexture($"{prefix}-{d}");
+                if (tex == null)
+                    return null; // incomplete digit font: fall back to the text glyphs
+
+                float aspect = tex.DisplayHeight > 0 ? tex.DisplayWidth / tex.DisplayHeight : 1f;
+                // Overlap is authored against the texture's own pixel height; scale it to our render height.
+                float overlap = skin.Config.HitCircleOverlap * (height / Math.Max(1f, tex.DisplayHeight));
+
+                flow.Add(new Sprite
+                {
+                    Texture = tex,
+                    Size = new Vector2(height * aspect, height),
+                    Margin = new MarginPadding { Horizontal = -overlap / 2f },
+                });
+            }
+
+            return flow;
+        }
+
+        // Reverse arrow at a slider end. Skinned: the reversearrow texture (points right at 0°, so it rotates by
+        // the raw travel angle). Procedural fallback: an equilateral triangle that points up, hence the +90.
+        private Drawable reverseArrow(Vector2 position, float rotation)
+        {
+            var tex = skin?.GetTexture("reversearrow");
+            if (tex != null)
+            {
+                return new Sprite
+                {
+                    Position = position,
+                    Anchor = Anchor.TopLeft,
+                    Origin = Anchor.Centre,
+                    Rotation = rotation,
+                    Size = new Vector2(diameter * 0.7f),
+                    FillMode = FillMode.Fit,
+                    Texture = tex,
+                };
+            }
+
+            return new Triangle
+            {
+                Position = position,
+                Anchor = Anchor.TopLeft,
+                Origin = Anchor.Centre,
+                Rotation = rotation + 90,
+                Size = new Vector2(diameter * 0.3f),
+                Colour = Color4.White,
+            };
+        }
+
+        private Container approach(Vector2 position, Color4 colour)
+        {
+            // Skinned approachcircle, tinted by the combo colour; sized to the circle so its 4x->1x shrink lands
+            // exactly on the hit circle. Falls back to the procedural ring.
+            var tex = skin?.GetTexture("approachcircle");
+            if (tex != null)
+            {
+                return new Container
+                {
+                    Position = position,
+                    Origin = Anchor.Centre,
+                    Size = new Vector2(diameter),
+                    Alpha = 0,
+                    Child = new Sprite
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Texture = tex,
+                        Colour = colour,
+                    },
+                };
+            }
+
+            return new CircularContainer
+            {
+                Position = position,
+                Origin = Anchor.Centre,
+                Size = new Vector2(diameter),
+                Masking = true,
+                BorderThickness = diameter * 0.06f,
+                BorderColour = colour,
                 Alpha = 0,
-                AlwaysPresent = true,
-            },
-        };
+                Child = new Box
+                {
+                    RelativeSizeAxes = Axes.Both,
+                    Colour = Color4.White,
+                    Alpha = 0,
+                    AlwaysPresent = true,
+                },
+            };
+        }
 
         /// <summary>
         /// An outlined ring that sits exactly on the circle, then expands outward and fades as the object is
@@ -538,32 +699,80 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             Origin = Anchor.Centre,
             Size = new Vector2(diameter * follow_scale),
             Alpha = 0,
-            Children = new Drawable[]
+            Children = new[]
             {
                 // Follow circle. Stored so it can "pop" outward when the ball passes a tick.
-                followCircle = new CircularContainer
+                followCircle = buildFollowCircle(colour),
+                // Inner ball.
+                buildInnerBall(colour),
+            },
+        };
+
+        /// <summary>The follow circle: the skin's sliderfollowcircle if present, else the procedural ring.</summary>
+        private Drawable buildFollowCircle(Color4 colour)
+        {
+            var tex = skin?.GetTexture("sliderfollowcircle");
+            if (tex != null)
+            {
+                return new Container
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
                     RelativeSizeAxes = Axes.Both,
-                    Masking = true,
-                    BorderThickness = diameter * borderFactor,
-                    BorderColour = new Color4(colour.R, colour.G, colour.B, 0.8f),
-                    Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White, Alpha = 0, AlwaysPresent = true },
-                },
-                // Inner ball.
-                new CircularContainer
+                    Child = new Sprite
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Anchor = Anchor.Centre,
+                        Origin = Anchor.Centre,
+                        Texture = tex,
+                    },
+                };
+            }
+
+            return new CircularContainer
+            {
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                RelativeSizeAxes = Axes.Both,
+                Masking = true,
+                BorderThickness = diameter * borderFactor,
+                BorderColour = new Color4(colour.R, colour.G, colour.B, 0.8f),
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.White, Alpha = 0, AlwaysPresent = true },
+            };
+        }
+
+        /// <summary>The slider ball: the skin's sliderb (tinted only when AllowSliderBallTint), else procedural.</summary>
+        private Drawable buildInnerBall(Color4 colour)
+        {
+            var tex = skin?.GetTexture("sliderb") ?? skin?.GetTexture("sliderb0");
+            if (tex != null)
+            {
+                Color4 ballColour = skin!.Config.AllowSliderBallTint
+                    ? colour
+                    : (skin.Config.SliderBall is { } sb ? new Color4(sb.R, sb.G, sb.B, sb.A) : Color4.White);
+
+                return new Sprite
                 {
                     Anchor = Anchor.Centre,
                     Origin = Anchor.Centre,
                     Size = new Vector2(diameter),
-                    Masking = true,
-                    BorderThickness = diameter * borderFactor,
-                    BorderColour = Color4.White,
-                    Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour, Alpha = 0.95f },
-                },
-            },
-        };
+                    FillMode = FillMode.Fit,
+                    Texture = tex,
+                    Colour = ballColour,
+                };
+            }
+
+            return new CircularContainer
+            {
+                Anchor = Anchor.Centre,
+                Origin = Anchor.Centre,
+                Size = new Vector2(diameter),
+                Masking = true,
+                BorderThickness = diameter * borderFactor,
+                BorderColour = Color4.White,
+                Child = new Box { RelativeSizeAxes = Axes.Both, Colour = colour, Alpha = 0.95f },
+            };
+        }
 
         private static float angleDeg(Vector2 from, Vector2 to)
         {

@@ -1,11 +1,15 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using osu.Framework.Allocation;
 using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Shapes;
 using osu.Framework.Graphics.Sprites;
+using osu.Framework.Platform;
 using OsuBeatmapEditor.Game.Graphics;
+using OsuBeatmapEditor.Game.Skinning;
 using OsuBeatmapEditor.Game.UI;
 using OsuBeatmapEditor.Game.Updates;
 using osuTK;
@@ -23,12 +27,19 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private UpdateManager? updates { get; set; }
 
+        [Resolved(CanBeNull = true)]
+        private SkinManager? skinManager { get; set; }
+
+        [Resolved(CanBeNull = true)]
+        private GameHost? host { get; set; }
+
         protected override string Heading => "Settings";
         protected override Bindable<string>? LastSectionStore => settings.LastSection;
 
         protected override (string name, IconUsage icon, Func<Drawable> content)[] CreateSections() => new (string, IconUsage, Func<Drawable>)[]
         {
             ("General", FontAwesome.Solid.Cog, buildGeneralSection),
+            ("Skins", FontAwesome.Solid.PaintBrush, buildSkinsSection),
             ("Appearance", FontAwesome.Solid.Palette, buildColourSection),
             ("Objects", FontAwesome.Solid.Bullseye, buildObjectsSection),
             ("Timeline", FontAwesome.Solid.RulerHorizontal, buildTimelineSection),
@@ -49,6 +60,45 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             toggleRow("Discord Rich Presence", settings.DiscordRichPresence),
             description("Shows your current activity (the map you're editing, or browsing) on your Discord profile. "
                        + "Requires the Discord desktop client to be running."));
+
+        private const string skin_none_label = "(None)";
+
+        private Drawable buildSkinsSection()
+        {
+            string[] installed = skinManager?.AvailableSkins() ?? Array.Empty<string>();
+
+            var items = new List<string> { skin_none_label };
+            items.AddRange(installed);
+
+            var dropdown = new ThemedDropdown<string>
+            {
+                RelativeSizeAxes = Axes.X,
+                Items = items,
+            };
+
+            // Reflect the persisted selection (falling back to None if it points at a since-removed skin), and
+            // push changes back to the setting (the SkinManager rebuilds the active skin off SkinName).
+            dropdown.Current.Value = installed.Contains(settings.SkinName.Value) ? settings.SkinName.Value : skin_none_label;
+            dropdown.Current.BindValueChanged(e =>
+                settings.SkinName.Value = e.NewValue == skin_none_label ? string.Empty : e.NewValue);
+
+            var openFolder = new OsuButton("Open skins folder", OsuColour.Surface) { Size = new Vector2(190, 36) };
+            openFolder.Action = () =>
+            {
+                if (skinManager != null)
+                    host?.PresentFileExternally(skinManager.SkinsPath);
+            };
+
+            return section(
+                fieldLabel("Active skin"),
+                dropdown,
+                description("Draws hit objects with your osu! skin's textures and plays its hitsounds. Anything the "
+                           + "skin doesn't include falls back to the editor's built-in look."),
+                divider(),
+                description("To import a skin, drag a .osk file onto the window. Imported skins are unpacked into the "
+                           + "skins folder below; changes there appear after reopening this list."),
+                openFolder);
+        }
 
         private Drawable buildPerformanceSection() => section(
             toggleRow("Power saving (cap to refresh rate)", settings.PowerSaving),

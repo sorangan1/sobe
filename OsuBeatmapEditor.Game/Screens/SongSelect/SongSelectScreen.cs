@@ -84,6 +84,10 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
         [Resolved(CanBeNull = true)]
         private ToastOverlay? toasts { get; set; }
 
+        // Active-skin manager (cached at the game root; absent under the test browser). Lets a dropped .osk import.
+        [Resolved(CanBeNull = true)]
+        private Skinning.SkinManager? skinManager { get; set; }
+
         // Online login session + local collab links (cached at the game root; absent under the test browser).
         [Resolved(CanBeNull = true)]
         private Online.AuthManager? auth { get; set; }
@@ -416,13 +420,19 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                 return;
             }
 
+            if (ext == ".osk")
+            {
+                importOsk(path);
+                return;
+            }
+
             // .sobemod (Review-layer) files are only meaningful inside the editor; ignore them on song select.
             if (ext == ".sobemod")
                 return;
 
             if (!NewBeatmapOverlay.AudioExtensions.Contains(ext))
             {
-                toasts?.Push("Drop an .osz to import, or an mp3/ogg/wav to start a new beatmap", EditorTheme.Colours.Warning);
+                toasts?.Push("Drop an .osz (map), .osk (skin), or an mp3/ogg/wav to start a new beatmap", EditorTheme.Colours.Warning);
                 return;
             }
 
@@ -467,6 +477,38 @@ namespace OsuBeatmapEditor.Game.Screens.SongSelect
                     {
                         toasts?.Push($"Imported {result.Message}", EditorTheme.Colours.Success);
                         reloadBeatmaps();
+                    }
+                    else
+                    {
+                        toasts?.Push(result.Message, EditorTheme.Colours.Error);
+                    }
+                });
+            });
+        }
+
+        /// <summary>
+        /// Imports a dropped <c>.osk</c> skin and makes it active. Unpacking a skin (many textures/sounds) can take
+        /// a moment, so it runs off-thread behind a persistent "Importing..." toast that only clears once the work
+        /// finishes - otherwise a transient toast would vanish mid-import and look like nothing happened.
+        /// </summary>
+        private void importOsk(string oskPath)
+        {
+            if (skinManager == null)
+                return;
+
+            var loading = toasts?.PushLoading($"Importing skin {Path.GetFileNameWithoutExtension(oskPath)}...");
+
+            Task.Run(() =>
+            {
+                var result = skinManager.ExtractOsk(oskPath);
+                Schedule(() =>
+                {
+                    loading?.Dismiss();
+
+                    if (result.Success)
+                    {
+                        skinManager.Activate(result.Message);
+                        toasts?.Push($"Skin imported: {result.Message}", EditorTheme.Colours.Success);
                     }
                     else
                     {

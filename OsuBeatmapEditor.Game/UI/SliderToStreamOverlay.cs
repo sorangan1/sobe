@@ -32,12 +32,23 @@ namespace OsuBeatmapEditor.Game.UI
         public Action? Cancelled;
 
         private Container panel = null!;
-        private SpriteText countValue = null!;
-        private SpriteText curveValue = null!;
+        private StreamCountBox countBox = null!;
+        private AccelBox curveBox = null!;
         private SpriteText curveCaption = null!;
 
-        private readonly BindableInt count = new BindableInt(8) { MinValue = 2, MaxValue = 128 };
-        private readonly BindableFloat curve = new BindableFloat(0) { MinValue = -3f, MaxValue = 3f, Precision = 0.05f };
+        // The true circle count (hard limits). The bar only spans a slider-sized sub-range (countBar); to go
+        // beyond it you type the number into countBox, which writes straight to count.
+        private readonly BindableInt count = new BindableInt(8) { MinValue = 2, MaxValue = 256 };
+        private readonly BindableInt countBar = new BindableInt(8) { MinValue = 2, MaxValue = 32 };
+        private bool syncingCount;
+
+        // Acceleration intensity as a fraction: 0 = even, ±1 = the bar's ends (ratio 5^1 = 5x last/first gap; see
+        // EditorScreen.streamSpacing). The bar only spans ±1; to push harder - useful for dense streams, where 5x
+        // spread across many gaps reads as weak - you type a larger percentage into curveBox, which writes
+        // straight to curve (hard cap ±3 = 125x). curveBar is the ±1 proxy the drag bar binds to.
+        private readonly BindableFloat curve = new BindableFloat(0) { MinValue = -3f, MaxValue = 3f, Precision = 0.02f };
+        private readonly BindableFloat curveBar = new BindableFloat(0) { MinValue = -1f, MaxValue = 1f, Precision = 0.02f };
+        private bool syncingCurve;
 
         private bool committing;
 
@@ -110,19 +121,63 @@ namespace OsuBeatmapEditor.Game.UI
                                 Spacing = new Vector2(0, EditorTheme.Spacing.Sm),
                                 Children = new Drawable[]
                                 {
-                                    headerRow("Circles", countValue = valueText()),
+                                    new Container
+                                    {
+                                        RelativeSizeAxes = Axes.X,
+                                        Height = 26,
+                                        Margin = new MarginPadding { Top = EditorTheme.Spacing.Xs },
+                                        Children = new Drawable[]
+                                        {
+                                            new SpriteText
+                                            {
+                                                Text = "Circles",
+                                                Anchor = Anchor.CentreLeft,
+                                                Origin = Anchor.CentreLeft,
+                                                Colour = EditorTheme.Colours.TextMuted,
+                                                Font = EditorTheme.Type.Body(),
+                                            },
+                                            countBox = new StreamCountBox(count)
+                                            {
+                                                Anchor = Anchor.CentreRight,
+                                                Origin = Anchor.CentreRight,
+                                                Size = new Vector2(58, 24),
+                                            },
+                                        },
+                                    },
                                     sliderRow(new BasicSliderBar<int>
                                     {
                                         RelativeSizeAxes = Axes.Both,
-                                        Current = count,
+                                        Current = countBar,
                                         BackgroundColour = EditorTheme.Colours.Sunken,
                                         SelectionColour = EditorTheme.Colours.Selection,
                                     }),
-                                    headerRow("Spacing curve", curveValue = valueText()),
+                                    new Container
+                                    {
+                                        RelativeSizeAxes = Axes.X,
+                                        Height = 26,
+                                        Margin = new MarginPadding { Top = EditorTheme.Spacing.Xs },
+                                        Children = new Drawable[]
+                                        {
+                                            new SpriteText
+                                            {
+                                                Text = "Acceleration",
+                                                Anchor = Anchor.CentreLeft,
+                                                Origin = Anchor.CentreLeft,
+                                                Colour = EditorTheme.Colours.TextMuted,
+                                                Font = EditorTheme.Type.Body(),
+                                            },
+                                            curveBox = new AccelBox(curve)
+                                            {
+                                                Anchor = Anchor.CentreRight,
+                                                Origin = Anchor.CentreRight,
+                                                Size = new Vector2(58, 24),
+                                            },
+                                        },
+                                    },
                                     sliderRow(new BasicSliderBar<float>
                                     {
                                         RelativeSizeAxes = Axes.Both,
-                                        Current = curve,
+                                        Current = curveBar,
                                         BackgroundColour = EditorTheme.Colours.Sunken,
                                         SelectionColour = EditorTheme.Colours.Selection,
                                     }),
@@ -161,20 +216,64 @@ namespace OsuBeatmapEditor.Game.UI
                 },
             };
 
-            count.BindValueChanged(c => { countValue.Text = c.NewValue.ToString(); firePreview(); }, true);
+            // Two-way sync between the true count and the (slider-sized) bar proxy, guarded against feedback.
+            // The number box binds straight to `count`, so typing a value beyond the bar's range just works.
+            count.BindValueChanged(c =>
+            {
+                if (!syncingCount)
+                {
+                    syncingCount = true;
+                    countBar.Value = Math.Clamp(c.NewValue, countBar.MinValue, countBar.MaxValue);
+                    syncingCount = false;
+                }
+                firePreview();
+            }, true);
+            countBar.BindValueChanged(c =>
+            {
+                if (syncingCount)
+                    return;
+                syncingCount = true;
+                count.Value = c.NewValue; // fires count's handler, which previews
+                syncingCount = false;
+            });
+            // Same two-way sync for acceleration: the ±1 bar proxy (curveBar) drives the drag bar, while the box
+            // types straight into `curve` and can push past ±1.
             curve.BindValueChanged(c =>
             {
-                curveValue.Text = describeCurve(c.NewValue);
+                if (!syncingCurve)
+                {
+                    syncingCurve = true;
+                    curveBar.Value = Math.Clamp(c.NewValue, curveBar.MinValue, curveBar.MaxValue);
+                    syncingCurve = false;
+                }
                 curveCaption.Text = captionFor(c.NewValue);
                 firePreview();
             }, true);
+            curveBar.BindValueChanged(c =>
+            {
+                if (syncingCurve)
+                    return;
+                syncingCurve = true;
+                curve.Value = c.NewValue;
+                syncingCurve = false;
+            });
         }
 
-        /// <summary>Opens the panel, seeding the circle count with the beat-snap default and resetting the curve.</summary>
-        public void Show(int defaultCount)
+        /// <summary>
+        /// Opens the panel, seeding the circle count with the beat-snap default and resetting the curve.
+        /// <paramref name="barMax"/> caps the drag bar to the slider's own capacity (a comfortable range); larger
+        /// counts are still reachable by typing into the number box.
+        /// </summary>
+        public void Show(int defaultCount, int barMax)
         {
             committing = false;
+
+            syncingCount = true;
+            countBar.MaxValue = Math.Max(barMax, countBar.MinValue + 1);
             count.Value = Math.Clamp(defaultCount, count.MinValue, count.MaxValue);
+            countBar.Value = Math.Clamp(count.Value, countBar.MinValue, countBar.MaxValue);
+            syncingCount = false;
+
             curve.Value = 0;
             Show();
             firePreview();
@@ -194,40 +293,10 @@ namespace OsuBeatmapEditor.Game.UI
                 Preview?.Invoke(count.Value, curve.Value);
         }
 
-        private static string describeCurve(float v) =>
-            Math.Abs(v) < 0.025f ? "even" : (v > 0 ? $"+{v:0.00}" : $"{v:0.00}");
-
         private static string captionFor(float v) =>
             Math.Abs(v) < 0.025f ? "evenly spaced"
             : v > 0 ? "accelerates - packed at the start"
             : "decelerates - packed at the end";
-
-        private static SpriteText valueText() => new SpriteText
-        {
-            Anchor = Anchor.CentreRight,
-            Origin = Anchor.CentreRight,
-            Colour = EditorTheme.Colours.TextMuted,
-            Font = EditorTheme.Type.Caption(numeric: true),
-        };
-
-        private static Container headerRow(string text, SpriteText value) => new Container
-        {
-            RelativeSizeAxes = Axes.X,
-            Height = 18,
-            Margin = new MarginPadding { Top = EditorTheme.Spacing.Xs },
-            Children = new Drawable[]
-            {
-                new SpriteText
-                {
-                    Text = text,
-                    Anchor = Anchor.CentreLeft,
-                    Origin = Anchor.CentreLeft,
-                    Colour = EditorTheme.Colours.TextMuted,
-                    Font = EditorTheme.Type.Body(),
-                },
-                value,
-            },
-        };
 
         private static Container sliderRow(Drawable slider) => new Container
         {
@@ -260,6 +329,82 @@ namespace OsuBeatmapEditor.Game.UI
             protected override bool OnClick(ClickEvent e) => true;
             protected override bool OnHover(HoverEvent e) => true;
             protected override bool OnScroll(ScrollEvent e) => true;
+        }
+
+        /// <summary>
+        /// A compact numeric box for the circle count, bound to a <see cref="BindableInt"/>. Digits only; commits
+        /// on Enter / focus loss, clamping to the bindable's (hard) range, and reflects external changes (the drag
+        /// bar). Lets the mapper type an exact count past the drag bar's slider-sized cap.
+        /// </summary>
+        private partial class StreamCountBox : BasicTextBox
+        {
+            private readonly BindableInt bindable;
+
+            public StreamCountBox(BindableInt bindable)
+            {
+                this.bindable = bindable;
+                CommitOnFocusLost = true;
+                LengthLimit = 3;
+            }
+
+            [BackgroundDependencyLoader]
+            private void load()
+            {
+                updateText();
+                bindable.BindValueChanged(_ => updateText());
+            }
+
+            protected override bool CanAddCharacter(char character) => char.IsDigit(character);
+
+            private void updateText() => Text = bindable.Value.ToString();
+
+            protected override void Commit()
+            {
+                if (int.TryParse(Text, out int value))
+                    bindable.Value = Math.Clamp(value, bindable.MinValue, bindable.MaxValue);
+
+                updateText();
+                base.Commit();
+            }
+        }
+
+        /// <summary>
+        /// A compact box for the acceleration intensity, shown and edited as a percentage (e.g. "60%", "-40%")
+        /// that maps to the underlying curve fraction (percent / 100). Digits and a leading minus; commits on
+        /// Enter / focus loss, clamping to the bindable's hard range. Lets the mapper type past the drag bar's
+        /// ±100% for stronger bunching on dense streams.
+        /// </summary>
+        private partial class AccelBox : BasicTextBox
+        {
+            private readonly BindableFloat bindable;
+
+            public AccelBox(BindableFloat bindable)
+            {
+                this.bindable = bindable;
+                CommitOnFocusLost = true;
+                LengthLimit = 5;
+            }
+
+            [BackgroundDependencyLoader]
+            private void load()
+            {
+                updateText();
+                bindable.BindValueChanged(_ => updateText());
+            }
+
+            protected override bool CanAddCharacter(char character) => char.IsDigit(character) || character == '-';
+
+            private void updateText() => Text = $"{bindable.Value * 100:0}%";
+
+            protected override void Commit()
+            {
+                string digits = Text.Replace("%", string.Empty).Trim();
+                if (int.TryParse(digits, out int percent))
+                    bindable.Value = Math.Clamp(percent / 100f, bindable.MinValue, bindable.MaxValue);
+
+                updateText();
+                base.Commit();
+            }
         }
 
         /// <summary>A header strip that drags its owning panel around by reporting pointer deltas.</summary>

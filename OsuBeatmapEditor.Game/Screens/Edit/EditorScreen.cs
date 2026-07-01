@@ -68,6 +68,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         [Resolved(CanBeNull = true)]
         private Statistics.StatisticsTracker? statistics { get; set; }
 
+        // Active imported osu! skin (cached by the game root; absent under the test browser). Used to source the
+        // skin's hitsound samples for playback feedback.
+        [Resolved(CanBeNull = true)]
+        private Skinning.SkinManager? skinManager { get; set; }
+
         /// <summary>Stable per-map key for the statistics tracker (independent of the .osu hash).</summary>
         private string statisticsKey => Statistics.StatisticsTracker.MapKey(set.Artist, set.Title, set.Author, difficulty.DifficultyName);
 
@@ -307,6 +312,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private FramedOffsetClock? visualClock;
         private HitsoundPlayer? hitsounds;
         private int hitsoundIndex;
+
+        // Kept from the BDL so a live skin change can rebuild the skin's hitsound sample store on the fly.
+        private AudioManager audioManager = null!;
         private double lastHitsoundTime;
         private bool needHitsoundResync = true;
 
@@ -379,6 +387,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private void load(AudioManager audio, GameHost host)
         {
             this.host = host;
+            audioManager = audio;
             statistics?.EnterMap(statisticsKey);
             track = loadTrack(audio, host);
             backgroundTexture = loadBackgroundTexture(host);
@@ -410,9 +419,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 ? audio.GetSampleStore(new BeatmapSampleStore(set.Files, set.DataDirectory))
                 : null;
 
-            hitsounds = new HitsoundPlayer(skinSampleStore, beatmapSampleStore);
+            // The active imported skin's own hitsounds (its .wav at the folder root), played when the map doesn't
+            // override them. Built over the same skin folder the playfield textures come from.
+            hitsounds = new HitsoundPlayer(skinSampleStore, beatmapSampleStore, skinSampleStoreForActive());
             // "Ignore beatmap hitsounds" (like osu!lazer): play the default skin samples, not the map's custom ones.
             settings.IgnoreBeatmapHitsounds.BindValueChanged(e => hitsounds.IgnoreBeatmapSamples = e.NewValue, true);
+
+            // Live skin switching: when the active skin changes while the editor is open, swap the hitsound source
+            // and rebuild the hit objects so their textures (and the skin-aware circle diameter) update in place.
+            skinManager?.Current.BindValueChanged(_ => onActiveSkinChanged());
+
             rebuildSampleEvents();
 
             InternalChildren = new Drawable[]
@@ -2090,14 +2106,39 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             playfield.SetHitObjects(parsed.HitObjects, circleDiameter(), effectivePreempt());
         }
 
-        /// <summary>
-        /// Hit-circle diameter in osu!pixels for the current CS (standard formula <c>(54.4 - 4.48·CS)·2</c>),
-        /// minus a manual visual override so our circles match osu!lazer's editor, which renders them a few
-        /// pixels smaller than the raw formula gives.
-        /// </summary>
-        private float circleDiameter() => (54.4f - 4.48f * effectiveCs()) * 2 - circle_diameter_override;
+        /// <summary>A sample store over the active skin's folder (its hitsounds), or null when no skin is active.</summary>
+        private ISampleStore? skinSampleStoreForActive()
+        {
+            var activeSkin = skinManager?.Current.Value;
+            return activeSkin != null ? audioManager.GetSampleStore(activeSkin.Resources) : null;
+        }
 
-        /// <summary>osu!pixels shaved off the hit-circle diameter to match lazer's editor (see <see cref="circleDiameter"/>).</summary>
+        /// <summary>
+        /// Reacts to the active skin changing while the editor is open: repoints hitsound feedback at the new
+        /// skin and rebuilds the hit objects so their textures and the skin-aware circle size take effect at once.
+        /// </summary>
+        private void onActiveSkinChanged()
+        {
+            if (hitsounds != null)
+                hitsounds.UserSkinSamples = skinSampleStoreForActive();
+
+            rebuildHitObjects();
+        }
+
+        /// <summary>
+        /// Hit-circle diameter in osu!pixels for the current CS. The raw formula <c>(54.4 - 4.48·CS)·2</c> is
+        /// exactly lazer's gameplay diameter (identical to <c>OBJECT_RADIUS·2·scale</c>). We shave a few pixels
+        /// off it for our <b>procedural</b> circles, which calibrates their filled disc to read like lazer's.
+        /// A skin's textures already encode the true gameplay size, so when a skin is active we use the raw,
+        /// un-shaved diameter - otherwise the skin would render a few pixels too small.
+        /// </summary>
+        private float circleDiameter()
+        {
+            float raw = (54.4f - 4.48f * effectiveCs()) * 2;
+            return skinManager?.Current.Value != null ? raw : raw - circle_diameter_override;
+        }
+
+        /// <summary>osu!pixels shaved off the procedural hit-circle diameter (see <see cref="circleDiameter"/>).</summary>
         private const float circle_diameter_override = 5f;
 
         // --- IEditorActions: editing operations invoked by the timeline/playfield ---
@@ -3385,9 +3426,12 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
             double step = beatLengthAt(slider.StartTime) / beatDivisor.Value.Value;
             int defaultCount = step > 0 ? Math.Clamp((int)Math.Round(slider.Duration / step) + 1, 2, 128) : 8;
+            // Cap the drag bar near the slider's own tick capacity (with a little headroom) so it's comfortable to
+            // fine-tune; larger streams are still reachable by typing the number.
+            int barMax = Math.Clamp(defaultCount + Math.Max(4, defaultCount / 4), 8, 256);
 
             streamOriginal = slider;
-            sliderToStreamOverlay.Show(defaultCount); // fires Preview -> refreshStreamPreview builds the live stream
+            sliderToStreamOverlay.Show(defaultCount, barMax); // fires Preview -> refreshStreamPreview builds the live stream
         }
 
         /// <summary>Rebuilds the live preview circles for the current panel values (no undo entry).</summary>
@@ -3525,10 +3569,11 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>
         /// Returns the normalised positions (0..1) of <paramref name="count"/> stream circles for a spacing
-        /// <paramref name="curve"/> in [-1,1]. The gap between consecutive circles changes <em>linearly</em>
-        /// from the first gap to the last (constant acceleration), so the ramp is smooth and progressive rather
-        /// than bunched at one end: curve&gt;0 packs the circles toward the start, curve&lt;0 toward the end,
-        /// 0 = even spacing.
+        /// <paramref name="curve"/>. The gap between consecutive circles changes <em>linearly</em> from the first
+        /// gap to the last (constant acceleration), so the ramp is smooth and progressive rather than bunched at
+        /// one end: curve&gt;0 packs the circles toward the start, curve&lt;0 toward the end, 0 = even spacing.
+        /// The panel bar spans curve ±1 (a 5x last/first gap ratio); the panel's number box can type past that for
+        /// a stronger ramp on dense streams (each +1 multiplies the ratio by 5).
         /// </summary>
         private static double[] streamSpacing(int count, float curve)
         {
@@ -3537,7 +3582,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 return pos;
 
             int gaps = count - 1;
-            // ratio = last gap / first gap. curve in [-1,1] -> ratio in [1/5, 5], applied as a linear ramp.
+            // ratio = last gap / first gap = 5^curve, applied as a linear ramp (curve ±1 -> ratio 1/5..5).
             double ratio = Math.Pow(5, curve);
 
             double total = 0;
