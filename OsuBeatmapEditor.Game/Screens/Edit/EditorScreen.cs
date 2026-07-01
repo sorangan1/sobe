@@ -831,6 +831,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             playfield.TimeSource = () => VisualTime;
             playfield.SnappedTimeSource = () => snapTime(CurrentTime);
             playfield.PlacementSnap = SnapPlacement;
+            playfield.SpacingGuideResolver = ResolveSpacingGuide;
             playfield.SliderTickDistance = sliderTickDistance;
 
             // The Authors chip only makes sense for a collab; show it when linked, and drop authorship mode if
@@ -2671,10 +2672,20 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 pushUndo();
                 var ids = new HashSet<int>(selection.Selected);
 
+                // Match osu!lazer's ternary behaviour: the selection reads as all-on / all-off / mixed, and a press
+                // sets EVERY selected object to one uniform value (never a per-object toggle). Anything that isn't
+                // already all-on unifies to all-on; all-on clears to all-off; all-off goes back to all-on. So a
+                // mixed selection collapses to a single new combo first, then cycles on/off from there. The original
+                // mixed pattern can't be restored by pressing again, same as lazer.
+                bool allHaveNewCombo = parsed.HitObjects
+                    .Where(o => ids.Contains(o.Id))
+                    .All(o => HitObjectLineEditor.HasNewCombo(o.RawLine));
+                bool target = !allHaveNewCombo;
+
                 for (int i = 0; i < parsed.HitObjects.Count; i++)
                 {
                     if (ids.Contains(parsed.HitObjects[i].Id))
-                        parsed.HitObjects[i] = parsed.HitObjects[i] with { RawLine = HitObjectLineEditor.ToggleNewCombo(parsed.HitObjects[i].RawLine) };
+                        parsed.HitObjects[i] = parsed.HitObjects[i] with { RawLine = HitObjectLineEditor.SetNewCombo(parsed.HitObjects[i].RawLine, target) };
                 }
 
                 afterEdit();
@@ -3200,6 +3211,15 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         /// </summary>
         public Vector2 SnapPlacement(Vector2 cursor)
         {
+            // Holding Shift while placing engages the spacing guide: it snaps to a matching nearby gap (and draws
+            // the distance lines). It takes over from the time-distance / magnetic snapping while held.
+            if (spacingGuideHeld())
+            {
+                var guide = ResolveSpacingGuide(cursor);
+                if (guide.Active)
+                    return guide.Position;
+            }
+
             int time = (int)Math.Round(snapTime(CurrentTime));
 
             Vector2 pos = cursor;
@@ -3214,6 +3234,212 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                 pos = target;
 
             return pos;
+        }
+
+        /// <summary>True while the Shift-held spacing-guide mode should be engaged (Shift down during placement).</summary>
+        private bool spacingGuideHeld() => GetContainingInputManager()?.CurrentState.Keyboard.ShiftPressed == true;
+
+        /// <summary>osu!pixels of gap difference within which the placement locks onto a matching nearby gap.</summary>
+        private const float spacing_snap_threshold = 8f;
+
+        /// <summary>How far (osu!pixels) around the cursor we look for objects to guide against.</summary>
+        private const float spacing_search_radius = 400f;
+
+        /// <summary>Longest centre-to-centre distance (osu!pixels) a reference line will connect - keeps it to genuinely close pairs.</summary>
+        private const float spacing_link_max = 320f;
+
+        // Blanket assist: a slider's arc must curve enough that its radius sits in [min·r, max·r] to be blanket-able;
+        // the wrap ring shows within blanket_show_radius of its centre and snaps the placement onto it within
+        // blanket_snap_threshold; an existing object within existing_blanket_threshold of an arc centre is a blanket.
+        private const float blanket_min_radius_factor = 1.0f;
+        private const float blanket_max_radius_factor = 5.0f;
+        private const float blanket_show_radius = 55f;
+        private const float blanket_snap_threshold = 14f;
+        private const float existing_blanket_threshold = 6f;
+
+        /// <summary>
+        /// Resolves the Shift-held spacing guide at a cursor position. It shows the spacing that already exists
+        /// around the cursor - a solid line + gap label between each pair of temporally-consecutive nearby
+        /// objects - so you can match it by eye, and it snaps your placement onto one of those gaps when your
+        /// distance to the nearest object lands close to it. Inactive when Shift is up or nothing is nearby, so
+        /// the caller falls back to normal snapping. Gaps are edge-to-edge (centre distance - 2·radius; the radius
+        /// is shared since every object uses the current CS).
+        /// </summary>
+        public SpacingGuide ResolveSpacingGuide(Vector2 cursor)
+        {
+            if (!spacingGuideHeld())
+                return SpacingGuide.Inactive;
+
+            float r = circleDiameter() / 2f;
+            float searchSq = spacing_search_radius * spacing_search_radius;
+            float blMin = r * blanket_min_radius_factor;
+            float blMax = r * blanket_max_radius_factor;
+
+            // Visible, non-excluded objects near the cursor (time-ordered), plus the fitted arc of any curved
+            // slider among them (for blankets). Only visible objects count, so nothing off-screen leaks in.
+            var vis = new List<(int id, Vector2 start, Vector2 end, double t)>();
+            var arcs = new List<(int id, Vector2 centre, float radius)>();
+            foreach (var o in parsed.HitObjects)
+            {
+                if (o.Kind == HitObjectKind.Spinner || selection.Contains(o.Id) || streamPreviewIds.Contains(o.Id)
+                    || !playfield.IsObjectVisible(o))
+                    continue;
+
+                Vector2 start = new Vector2(o.X, o.Y);
+                Vector2 end = start;
+                IReadOnlyList<Vector2>? path = null;
+                if (o.Kind == HitObjectKind.Slider && o.Path is { Count: > 0 } p)
+                {
+                    end = p[^1];
+                    path = p;
+                }
+
+                if (Vector2.DistanceSquared(start, cursor) > searchSq && Vector2.DistanceSquared(end, cursor) > searchSq)
+                    continue;
+
+                vis.Add((o.Id, start, end, o.StartTime));
+
+                if (path is { Count: >= 3 } && tryFitArc(path, out Vector2 arcC, out float arcR) && arcR >= blMin && arcR <= blMax)
+                    arcs.Add((o.Id, arcC, arcR));
+            }
+
+            if (vis.Count == 0)
+                return SpacingGuide.Inactive;
+
+            vis.Sort((a, b) => a.t.CompareTo(b.t));
+
+            var segments = new List<GuideSegment>();
+            var candidates = new HashSet<float>();
+
+            // Reference lines between consecutive visible objects (prev end -> next start), showing their gap.
+            // Each is also a snap candidate.
+            for (int i = 1; i < vis.Count; i++)
+            {
+                Vector2 a = vis[i - 1].end;
+                Vector2 b = vis[i].start;
+                float centre = Vector2.Distance(a, b);
+                if (centre > spacing_link_max)
+                    continue;
+
+                float gap = centre - 2 * r;
+                segments.Add(new GuideSegment(a, b, Math.Max(0, gap), Highlighted: false, Placement: false));
+                if (gap > 1f)
+                    candidates.Add((float)Math.Round(gap));
+            }
+
+            // The nearest visible endpoint to the cursor is what the placement measures its gap from.
+            var endpoints = new List<Vector2>();
+            foreach (var v in vis)
+            {
+                endpoints.Add(v.start);
+                if (v.end != v.start)
+                    endpoints.Add(v.end);
+            }
+
+            Vector2 anchor = endpoints.OrderBy(p => Vector2.DistanceSquared(p, cursor)).First();
+            Vector2 dir = cursor - anchor;
+            float centreDist = dir.Length;
+            Vector2 unit = centreDist > 1e-3f ? dir / centreDist : new Vector2(1, 0);
+            float gapNow = centreDist - 2 * r;
+
+            // Snap that gap to the closest matching existing gap, if within the threshold.
+            bool spacingSnapped = false;
+            float chosenGap = gapNow;
+            float bestDelta = spacing_snap_threshold;
+            foreach (float c in candidates)
+            {
+                float delta = Math.Abs(gapNow - c);
+                if (delta <= bestDelta)
+                {
+                    bestDelta = delta;
+                    chosenGap = c;
+                    spacingSnapped = true;
+                }
+            }
+
+            Vector2 position = spacingSnapped ? anchor + unit * (chosenGap + 2 * r) : cursor;
+
+            // --- Blankets ---
+            var rings = new List<BlanketRing>();
+
+            // Existing near-perfect blankets: a visible object sitting on a visible slider's arc centre.
+            foreach (var arc in arcs)
+            {
+                foreach (var v in vis)
+                {
+                    if (v.id == arc.id)
+                        continue;
+                    if (Vector2.Distance(v.start, arc.centre) <= existing_blanket_threshold)
+                    {
+                        rings.Add(new BlanketRing(arc.centre, arc.radius, Active: false));
+                        break;
+                    }
+                }
+            }
+
+            // Placement blanket: the nearest slider arc centre to the cursor. Show its wrap ring as you approach,
+            // and snap the placement onto the centre (a uniform blanket) when very close.
+            bool blanketSnapped = false;
+            Vector2? bestCentre = null;
+            float bestRadius = 0;
+            float bestCentreDist = blanket_show_radius;
+            foreach (var arc in arcs)
+            {
+                float dC = Vector2.Distance(cursor, arc.centre);
+                if (dC <= bestCentreDist)
+                {
+                    bestCentreDist = dC;
+                    bestCentre = arc.centre;
+                    bestRadius = arc.radius;
+                }
+            }
+
+            if (bestCentre is Vector2 bc)
+            {
+                rings.Add(new BlanketRing(bc, bestRadius, Active: true));
+                if (bestCentreDist <= blanket_snap_threshold)
+                {
+                    position = bc;
+                    blanketSnapped = true;
+                }
+            }
+
+            // The placement line: from the nearest object to where the new object would land, with its live gap.
+            segments.Add(new GuideSegment(anchor, position, Math.Max(0, Vector2.Distance(anchor, position) - 2 * r),
+                Highlighted: spacingSnapped && !blanketSnapped, Placement: true));
+
+            return new SpacingGuide
+            {
+                Active = true,
+                Position = position,
+                Snapped = spacingSnapped || blanketSnapped,
+                Segments = segments,
+                Rings = rings,
+            };
+        }
+
+        /// <summary>
+        /// Fits a circle to a slider path via its first, middle and last points (its dominant arc), giving the
+        /// centre of curvature an object would blanket into. Returns false for a near-straight path (no arc).
+        /// </summary>
+        private static bool tryFitArc(IReadOnlyList<Vector2> path, out Vector2 centre, out float radius)
+        {
+            centre = Vector2.Zero;
+            radius = 0;
+            if (path.Count < 3)
+                return false;
+
+            Vector2 p1 = path[0], p2 = path[path.Count / 2], p3 = path[^1];
+            float d = 2f * (p1.X * (p2.Y - p3.Y) + p2.X * (p3.Y - p1.Y) + p3.X * (p1.Y - p2.Y));
+            if (Math.Abs(d) < 1e-2f)
+                return false; // collinear -> no usable centre of curvature
+
+            float s1 = p1.LengthSquared, s2 = p2.LengthSquared, s3 = p3.LengthSquared;
+            float ux = (s1 * (p2.Y - p3.Y) + s2 * (p3.Y - p1.Y) + s3 * (p1.Y - p2.Y)) / d;
+            float uy = (s1 * (p3.X - p2.X) + s2 * (p1.X - p3.X) + s3 * (p2.X - p1.X)) / d;
+            centre = new Vector2(ux, uy);
+            radius = Vector2.Distance(centre, p1);
+            return true;
         }
 
         /// <summary>Constrains a placement position to a distance from the previous object equal to its time gap times the slider velocity.</summary>

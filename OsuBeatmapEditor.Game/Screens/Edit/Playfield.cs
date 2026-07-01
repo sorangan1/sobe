@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using osu.Framework.Allocation;
+using osu.Framework.Extensions.Color4Extensions;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Lines;
@@ -33,6 +34,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
 
         /// <summary>Resolves where a circle placement at a cursor position would actually land (distance/magnetic snap).</summary>
         public Func<Vector2, Vector2>? PlacementSnap;
+
+        /// <summary>Resolves the Shift-held spacing guide (snapped position + distance lines) for a cursor position.</summary>
+        public Func<Vector2, SpacingGuide>? SpacingGuideResolver;
 
         /// <summary>Spacing (osu!pixels) between slider ticks for a given slider, honouring tempo/SV/tick-rate; 0 = none.</summary>
         public Func<HitObjectModel, double>? SliderTickDistance;
@@ -112,6 +116,9 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
         private CircularContainer placementPreview = null!;
         private Box placementFill = null!;
         private SpriteText placementNumber = null!;
+
+        // Solid distance lines + gap labels shown under the ghost while placing with Shift held (spacing guide).
+        private Container spacingGuideLayer = null!;
 
         // Live drawable + model per object id, so edits sync incrementally instead of rebuilding everything.
         private readonly List<DrawableHitObject> objects = new List<DrawableHitObject>();
@@ -247,8 +254,16 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     annotationHighlightLayer = new Container { RelativeSizeAxes = Axes.Both },
                     // Persistent yellow selection outlines (always visible, independent of object fade).
                     selectionLayer = new Container { RelativeSizeAxes = Axes.Both },
-                    // Placement preview + rubber-band box.
-                    overlayLayer = new Container { RelativeSizeAxes = Axes.Both, Child = buildPlacementPreview() },
+                    // Placement preview + rubber-band box. The spacing-guide lines sit under the ghost circle.
+                    overlayLayer = new Container
+                    {
+                        RelativeSizeAxes = Axes.Both,
+                        Children = new Drawable[]
+                        {
+                            spacingGuideLayer = new Container { RelativeSizeAxes = Axes.Both },
+                            buildPlacementPreview(),
+                        },
+                    },
                     // Review-mode modding annotations (notes), above the objects/selection but below the AU cursor.
                     annotationLayer = new AnnotationLayer { TimeSource = () => TimeSource?.Invoke() ?? 0 },
                     // Auto-mod preview cursor, on top of everything (osu!pixel space = the play area itself).
@@ -2001,6 +2016,7 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
                     if (sliderTailPreview != null) sliderTailPreview.Alpha = 0;
                 }
                 clearPreviewFollowPoints();
+                spacingGuideLayer.Clear();
                 return;
             }
 
@@ -2029,10 +2045,91 @@ namespace OsuBeatmapEditor.Game.Screens.Edit
             {
                 double startTime = snappedNow();
                 updatePreviewFollowPoints(ghost, ghost, startTime, startTime, number == 1);
+                updateSpacingGuide(pos);
+            }
+            else
+            {
+                spacingGuideLayer.Clear();
             }
 
             if (SliderPlacementActive)
                 updateSliderTrace(pos);
+        }
+
+        /// <summary>
+        /// Rebuilds the spacing-guide overlay for the current cursor: a solid line + gap label from each nearby
+        /// anchor to where the object would land, with the snapped line highlighted. Cleared when the guide is
+        /// inactive (Shift not held / nothing nearby).
+        /// </summary>
+        private void updateSpacingGuide(Vector2 cursor)
+        {
+            spacingGuideLayer.Clear();
+
+            var guide = SpacingGuideResolver?.Invoke(cursor) ?? SpacingGuide.Inactive;
+            if (!guide.Active)
+                return;
+
+            // Blanket wrap rings (behind the lines): the live suggestion near the cursor is bright pink; existing
+            // near-perfect blankets are faint.
+            foreach (var ring in guide.Rings)
+            {
+                spacingGuideLayer.Add(new CircularContainer
+                {
+                    Position = ring.Centre,
+                    Origin = Anchor.Centre,
+                    Size = new Vector2(ring.Radius * 2),
+                    Masking = true,
+                    BorderThickness = ring.Active ? 3f : 2f,
+                    BorderColour = EditorTheme.Colours.Accent.Opacity(ring.Active ? 0.85f : 0.35f),
+                    Child = new Box { RelativeSizeAxes = Axes.Both, Colour = Color4.Transparent, AlwaysPresent = true },
+                });
+            }
+
+            foreach (var seg in guide.Segments)
+            {
+                if (Vector2.DistanceSquared(seg.From, seg.To) < 1f)
+                    continue; // skip degenerate (zero-length) lines
+
+                // Reference lines (existing spacings) are a calm blue; the placement line is brighter, turning
+                // yellow when it snaps onto a matching gap.
+                Color4 colour = !seg.Placement ? EditorTheme.Colours.Bookmark
+                    : seg.Highlighted ? EditorTheme.Colours.Selection
+                    : EditorTheme.Colours.Text;
+
+                float alpha = seg.Placement ? 0.95f : 0.55f;
+                float thickness = seg.Placement ? (seg.Highlighted ? 3f : 2f) : 2f;
+
+                spacingGuideLayer.Add(guideLine(seg.From, seg.To, colour.Opacity(alpha), thickness));
+
+                spacingGuideLayer.Add(new SpriteText
+                {
+                    Position = (seg.From + seg.To) / 2f,
+                    Anchor = Anchor.TopLeft,
+                    Origin = Anchor.Centre,
+                    Text = $"{seg.Gap:0}",
+                    Colour = colour,
+                    // Counter-flip so the label reads upright while HardRock flips the play area.
+                    Scale = new Vector2(1, modHardRock ? -1 : 1),
+                    Font = FontUsage.Default.With(size: 16, weight: "Bold"),
+                });
+            }
+        }
+
+        /// <summary>A solid straight line (osu!pixel space) between two points, as a thin rotated box.</summary>
+        private static Drawable guideLine(Vector2 from, Vector2 to, Color4 colour, float thickness)
+        {
+            Vector2 d = to - from;
+            float length = d.Length;
+            float angle = MathHelper.RadiansToDegrees((float)Math.Atan2(d.Y, d.X));
+
+            return new Box
+            {
+                Position = from,
+                Origin = Anchor.CentreLeft,
+                Size = new Vector2(length, thickness),
+                Rotation = angle,
+                Colour = colour,
+            };
         }
 
         /// <summary>Redraws the live slider preview (the finished body + tail) through the committed anchors plus the current cursor.</summary>

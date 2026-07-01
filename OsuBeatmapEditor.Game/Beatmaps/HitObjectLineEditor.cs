@@ -24,6 +24,22 @@ namespace OsuBeatmapEditor.Game.Beatmaps
             return string.Join(',', parts);
         }
 
+        /// <summary>Sets (or clears) the object's "new combo" flag (type bit 2) on its raw line to <paramref name="value"/>.</summary>
+        public static string SetNewCombo(string raw, bool value)
+        {
+            string[] parts = raw.Split(',');
+            if (parts.Length < 4 || !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int type))
+                return raw;
+
+            if (value)
+                type |= 0b100;
+            else
+                type &= ~0b100;
+
+            parts[3] = type.ToString(CultureInfo.InvariantCulture);
+            return string.Join(',', parts);
+        }
+
         /// <summary>Whether the raw line's type flags it as a new combo.</summary>
         public static bool HasNewCombo(string raw)
         {

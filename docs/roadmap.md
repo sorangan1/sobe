@@ -1,7 +1,7 @@
 # Roadmap de sobe
 
 Editor de beatmaps para osu!
-Version actual: v0.9.66-beta
+Version actual: v0.9.67-beta
 
 Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 
@@ -22,6 +22,7 @@ Lo marcado con check esta hecho. Lo que falta lleva el porcentaje completado.
 - ✓ Cursor "Humanize" del modo Auto, que imita el movimiento de un jugador real
 - ✓ Hitsounds completos: reproduccion con samples del mapa y skin, loops de slider/spinner, sample sets e index, samples y volumen por objeto, copiar/pegar, editor de lanes en la timeline (pintar, atajos W/E/R, hover, feedback de reproduccion) y opcion de ignorar los hitsounds del mapa
 - ✓ Discord Rich Presence en escritorio (muestra editando/navegando, activable desde ajustes)
+- ✓ Guias de distancia y deteccion de blankets al colocar objetos (manteniendo Shift)
 
 ## En desarrollo
 
